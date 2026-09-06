@@ -51,7 +51,7 @@ const GLOW_BLUR: f32 = 18.0;
 const SPINNER_R: f64 = 24.0;
 
 fn px(f: &Frame<'_>, size: f32) -> f64 {
-    f64::from(size * f.h / 1080.0)
+    f64::from(super::px_1080(f.h, size))
 }
 
 fn linear() -> SamplingOptions {
@@ -148,7 +148,7 @@ fn face_for(title: &str) -> Color4f {
 /// The strip's height: one value line plus air, never more than a third of the card.
 /// `screen_h` scales the line like the fonts are.
 pub(crate) fn strip_h(screen_h: f32, card_h: f32) -> f32 {
-    (line_h(f64::from(VALUE * screen_h / 1080.0)) as f32 + STRIP_PAD)
+    (line_h(f64::from(super::px_1080(screen_h, VALUE))) as f32 + STRIP_PAD)
         .min(card_h / 3.0)
         .max(1.0)
 }
