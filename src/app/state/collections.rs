@@ -52,7 +52,7 @@ impl Default for CollectionsState {
 impl App {
     /// Raises the modal over the card `pin_id`, with the cursor on the collection already
     /// holding it.
-    pub(crate) fn open_collections(&mut self, pin_id: &str, title: &str, screen_h: u32) {
+    pub(crate) fn open_collections(&mut self, pin_id: &str, title: &str) {
         let holding = self.holding_row(pin_id);
         self.screens.collections = CollectionsState {
             target: Some(pin_id.to_string()),
@@ -61,9 +61,6 @@ impl App {
         };
         self.screens.row_button = None;
         self.nav.enter(Screen::Collections, holding);
-        self.render.scroll = crate::ui::scroll::ScrollWindow::new();
-        self.render.content_window = crate::ui::scroll::ContentWindow::new();
-        self.scroll_list_row_into_view(screen_h);
     }
 
     /// The row index of the collection holding `pin_id` — the Library row when nothing else
@@ -96,12 +93,6 @@ impl App {
             .is_some_and(|target| self.card_is_held(target))
     }
 
-    /// Whether the focused row's leading button is held open on `screen` — the drag handle
-    /// of a collection row being moved, and nothing on any other scrolling list.
-    pub(crate) fn dragged_handle(&self, screen: Screen) -> bool {
-        matches!(screen, Screen::Collections) && self.screens.collections.dragging.is_some()
-    }
-
     /// The modal's rows, `None` off the screen or with no host selected.
     pub(crate) fn collections_rows(&self) -> Option<Vec<FocusRow>> {
         let host = self.selected_known_host()?;
@@ -116,11 +107,10 @@ impl App {
     /// Handles one menu event on [`Screen::Collections`].
     pub(crate) fn handle_collections_event(&mut self, ev: MenuEvent, screen_w: u32, screen_h: u32) {
         if self.screens.collections.dragging.is_some() {
-            self.drag_collection_event(ev, screen_h);
+            self.drag_collection_event(ev);
             return;
         }
         if self.list_nav_event(ev) {
-            self.scroll_list_row_into_view(screen_h);
             return;
         }
         match ev {
@@ -257,7 +247,7 @@ impl App {
 
     /// One event while a row is held. Up/Down move the entry; everything else drops it and is
     /// spent doing so — including Back, which commits rather than discards.
-    fn drag_collection_event(&mut self, ev: MenuEvent, screen_h: u32) {
+    fn drag_collection_event(&mut self, ev: MenuEvent) {
         let Some(at) = self.screens.collections.dragging else {
             return;
         };
@@ -279,7 +269,6 @@ impl App {
         self.screens.collections.dragging = Some(to);
         self.nav.set_cursor(ScreenKey::Collections, to);
         self.render.modal.focus_anim = Some(std::time::Instant::now());
-        self.scroll_list_row_into_view(screen_h);
     }
 
     /// Drops the held row: one save and one regroup for the whole drag, however many steps it

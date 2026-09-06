@@ -6,6 +6,7 @@
 //! `ui::widgets::ListModal`'s, shared with any future list screen.
 use crate::app::hosts::HostEntry;
 use crate::app::nav::ScreenKey;
+use crate::app::state::profilepick::ProfilePick;
 use crate::app::App;
 use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
@@ -21,12 +22,20 @@ pub(crate) enum HostAction {
     /// The power row — wake, or this host's own exit behaviour applied on demand. Which one
     /// it is right now is [`App::host_menu_power_row`].
     Power,
+    /// This host's power settings (`Screen::HostPower`): wake automatically, exit behaviour.
+    PowerSettings,
+    /// Stream the desktop once with a picked profile.
+    ConnectWith,
+    /// The profile a title with no binding streams with.
+    DefaultProfile,
+    /// Which profiles are cards under this host in the sidebar.
+    Pin,
     Edit,
     Forget,
 }
 
 /// Every action the menu can offer — the capacity [`HostActions`] is sized to.
-const MAX_HOST_ACTIONS: usize = 6;
+const MAX_HOST_ACTIONS: usize = 10;
 
 /// The actions one host's menu offers, in display order.
 ///
@@ -74,14 +83,13 @@ fn host_menu_row(action: HostAction, paired: bool, power: Option<ExitAction>) ->
         HostAction::Connect => FocusRow::action_with_value(icons::ICON_TV, "Connect", "pairs first"),
         HostAction::Pair => FocusRow::action(icons::ICON_LOCK, "Pair with PIN"),
         HostAction::SpeedTest => FocusRow::action(icons::ICON_SIGNAL, "Test network speed"),
-        // The one row with a trailing button: Confirm acts now, the ⋯ holds this host's
-        // power settings (`Screen::HostPower`). Same affordance and the same
-        // Right-to-reach-it gesture as a sidebar host row's. Plain, never `danger()`: red is
-        // this menu's colour for destroying saved state (Forget host), and powering a machine
-        // off destroys nothing here.
-        HostAction::Power => {
-            FocusRow::action(icons::ICON_POWER, power_row_label(power)).with_trailing(host_menu_trailing(action))
-        }
+        // Plain, never `danger()`: red is this menu's colour for destroying saved state
+        // (Forget host), and powering a machine off destroys nothing here.
+        HostAction::Power => FocusRow::action(icons::ICON_POWER, power_row_label(power)),
+        HostAction::PowerSettings => FocusRow::action(icons::ICON_SETTINGS, "Power settings"),
+        HostAction::ConnectWith => FocusRow::action(icons::ICON_PLAY, "Connect with\u{2026}"),
+        HostAction::DefaultProfile => FocusRow::action(icons::ICON_WRENCH, "Default profile\u{2026}"),
+        HostAction::Pin => FocusRow::action(icons::ICON_PIN, "Pin to sidebar\u{2026}"),
         HostAction::Edit => FocusRow::action(icons::ICON_EDIT, "Edit address"),
         HostAction::Forget => FocusRow::action(icons::ICON_DELETE, "Forget host").danger(),
     }
@@ -96,16 +104,6 @@ fn power_row_label(power: Option<ExitAction>) -> &'static str {
         // `ExitAction::None` never reaches here: `host_menu_power_row` resolves it to
         // `Shutdown`, because a host that is already up has nothing to wake.
         Some(ExitAction::None | ExitAction::Shutdown) => "Shut down",
-    }
-}
-
-/// An action's trailing buttons, without its label — what the pointer and the Right key ask
-/// for, per event. Read by [`host_menu_row`] too, so the buttons drawn on a row and the ones
-/// steppable on it cannot disagree.
-pub(crate) fn host_menu_trailing(action: HostAction) -> &'static [&'static str] {
-    match action {
-        HostAction::Power => std::slice::from_ref(&crate::ui::theme::icons().overflow),
-        _ => &[],
     }
 }
 
@@ -205,6 +203,15 @@ impl App {
             actions.push(HostAction::Power);
         }
         if saved {
+            actions.push(HostAction::PowerSettings);
+        }
+        // The profile rows need a paired, saved host and a catalog with something in it.
+        if saved && paired && !self.profiles.is_empty() {
+            actions.push(HostAction::ConnectWith);
+            actions.push(HostAction::DefaultProfile);
+            actions.push(HostAction::Pin);
+        }
+        if saved {
             actions.push(HostAction::Edit);
             actions.push(HostAction::Forget);
         }
@@ -230,10 +237,6 @@ impl App {
             return;
         }
         match ev {
-            // Right/Left move onto and off the focused row's ⋯, mirroring the sidebar's
-            // `HomeFocus::SidebarMenu`; on a row without one they do nothing.
-            MenuEvent::Right | MenuEvent::Left if self.step_row_button(ev == MenuEvent::Right) => {}
-            MenuEvent::Confirm if self.screens.row_button.is_some() => self.open_host_power(),
             MenuEvent::Confirm => self.confirm_host_menu_row(),
             MenuEvent::Back => {
                 self.screens.host_menu_index = None;
@@ -287,6 +290,19 @@ impl App {
             }
             HostAction::SpeedTest => self.open_speed_test(idx),
             HostAction::Power => self.confirm_power_row(idx),
+            HostAction::PowerSettings => self.open_host_power(),
+            HostAction::ConnectWith | HostAction::DefaultProfile | HostAction::Pin => {
+                let Some(entry) = self.hosts.entries.get(idx) else {
+                    return;
+                };
+                let (host, port) = (entry.host().to_string(), entry.port());
+                let pick = match action {
+                    HostAction::ConnectWith => ProfilePick::ConnectWith { host, port },
+                    HostAction::DefaultProfile => ProfilePick::HostDefault { host, port },
+                    _ => ProfilePick::Pin { host, port },
+                };
+                self.open_pick_profile(pick);
+            }
             HostAction::Edit => self.open_edit_host(idx),
             HostAction::Forget => self.open_forget_host(idx),
         }

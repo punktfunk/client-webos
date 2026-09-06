@@ -1,22 +1,7 @@
-/// Which settings document a settings-shaped screen edits. The per-game scope shows the
-/// overridable rows only (see `app::menu::settings_visible_logical_rows`) and edits a scratch
-/// copy of the global document; both share every row mutator, so a row behaves identically
-/// wherever it appears.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum SettingsScope {
-    Global,
-    Game,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Screen {
     Home,
     Pairing,
-    /// The settings list, in one of two scopes: the global document, or one game's
-    /// overrides of it (`SettingsScope::Game`, reached only by holding that game's card —
-    /// there is no path to it from the global screen). One variant, because the two are the
-    /// same screen with a different row list: every dispatch site treats them alike.
-    Settings(SettingsScope),
     AddHost,
     Wake,
     ForgetHost,
@@ -25,22 +10,10 @@ pub enum Screen {
     About,
     SpeedTest,
     HostPower,
-    /// Log level debug aid (see `app/diagnostics.rs`).
-    Diagnostics,
-    /// Experimental/unstable toggles (see `app/experimental.rs`).
-    Experimental,
     /// Measuring the panel's HDR volume against synthetic PQ patterns, reached from
     /// Experimental (see `app/state/hdrcalibration.rs`). Unlike every other list screen it draws
     /// over live video: the patterns play on the NDL plane underneath it.
     HdrCalibration,
-    /// Pointer/cursor behaviour, grouped off Settings (see `app/cursorsettings.rs`).
-    /// Carries the scope of the settings screen that opened it, so the sub-screen edits the
-    /// same document its parent does and Back knows where to return.
-    CursorSettings(SettingsScope),
-    /// Everything about the pad itself, behind `SettingsRow::Controller`. Carries the caller's
-    /// scope for the same reason [`Self::CursorSettings`] does: the sub-screen keeps editing
-    /// whichever document opened it.
-    ControllerSettings(SettingsScope),
     /// "Send logs to developer" confirmation (see `app/sendlogs.rs`).
     SendLogs,
     /// Which collection a held card belongs to (see `app/collections.rs`). A scrolling row
@@ -55,9 +28,16 @@ pub enum Screen {
     /// "Clear HDR calibration?" — puts the panel volume back to the shipped default (see
     /// `app/state/hdrcalibration.rs`).
     ResetHdrCalibration,
-    /// "Reset game settings?" — the per-game Reset row's confirmation, raised over
-    /// `Settings(Game)` (see `app/state/gamesettings.rs`).
-    ResetGameSettings,
+    /// The desktop page map on the console's row engine (see `app/state/settingspage.rs`):
+    /// General, Display, Input, Audio, Controllers, About, in one document scope at a time.
+    SettingsPage,
+    /// Naming the profile in scope — a text form like the collection's.
+    RenameProfile,
+    /// "Delete profile?" — warns what falls back to the default settings.
+    DeleteProfile,
+    /// One list of the catalog's profiles, for a host default, a one-off connect, a title's
+    /// binding or the sidebar pins (`app::state::profilepick`).
+    PickProfile,
 }
 
 /// Pairing modal's focused input: PIN row or "Request access" button.

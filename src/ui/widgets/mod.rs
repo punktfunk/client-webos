@@ -4,22 +4,8 @@
 //! Flat within the group — a caller reaching for one row widget reaches for its neighbours
 //! in the same breath, and the file a widget lives in is an implementation detail.
 
-mod cards;
-mod confirm;
-mod dropdown;
-mod listmodal;
-mod modal;
-mod notification;
 mod rows;
-mod scroll;
 mod sidebar;
 
-pub use cards::*;
-pub use confirm::*;
-pub use dropdown::*;
-pub use listmodal::*;
-pub use modal::*;
-pub use notification::*;
 pub use rows::*;
-pub use scroll::*;
 pub use sidebar::*;

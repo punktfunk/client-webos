@@ -27,6 +27,17 @@ pub fn set_level_override(level: LogLevelOverride) {
     apply(to_level(level));
 }
 
+/// The level in force, as the settings enum: what Diagnostics shows. A launch override shows
+/// here without ever reaching the document.
+pub fn current_level_override() -> LogLevelOverride {
+    match current_ordinal() {
+        1 => LogLevelOverride::Error,
+        2 => LogLevelOverride::Warn,
+        3 => LogLevelOverride::Info,
+        _ => LogLevelOverride::Debug,
+    }
+}
+
 pub(super) fn install_handle(handle: reload::Handle<LevelFilter, Registry>, level: Level) {
     let _ = HANDLE.set(handle);
     ORDINAL.store(ordinal(level), Ordering::Relaxed);

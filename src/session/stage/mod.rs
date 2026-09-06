@@ -85,6 +85,15 @@ pub struct SinkConfig {
 /// QUIC control stream, so a tight interval costs nothing but the request itself.
 const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Render-buffer depth past which the decoder is behind for real: eight frames is 133 ms of
+/// picture at 60 fps that NDL accepted and has not shown. Sessions measure 0–1 whether smooth
+/// or stuttering, so this fires on a stall, not on jitter.
+const BACKLOG_HOLD_FRAMES: u32 = 8;
+/// Deep samples in a row before acting; one can catch a burst mid-drain.
+const BACKLOG_HOLD_SAMPLES: u8 = 2;
+/// Sampling cadence for it: one FFI call under the feed lock.
+const BACKLOG_SAMPLE: Duration = Duration::from_millis(500);
+
 /// Everything between "an access unit arrived" and "the decoder has been fed", on any backend.
 ///
 /// Backend-blind by construction: it holds a [`VideoSink`] and asks it what it can do
@@ -128,6 +137,10 @@ pub struct VideoStage {
     hold_started: Option<Instant>,
     /// Intra-refresh wave boundaries observed since the latest loss.
     recovery_marks: u32,
+    /// Backpressure sampling (`backpressure`): when the depth was last read, and how many reads
+    /// in a row found it past [`BACKLOG_HOLD_FRAMES`].
+    backlog_sampled: Option<Instant>,
+    deep_samples: u8,
     /// Completed access units fed this session. A plain counter, mirrored into the overlay's cell
     /// by the pump — nothing else writes it.
     frames: u64,
@@ -158,6 +171,8 @@ impl VideoStage {
             last_keyframe_request: None,
             hold_started: None,
             recovery_marks: 0,
+            backlog_sampled: None,
+            deep_samples: 0,
             au_feed_us: 0,
             parts_fed: 0,
             frames: 0,
@@ -261,6 +276,32 @@ impl VideoStage {
     /// read the answer, and the FFI call rides that cadence rather than one of its own.
     pub fn backlog_depth(&self) -> Option<i32> {
         self.sink.queue_depth().map(|d| i32::try_from(d).unwrap_or(i32::MAX))
+    }
+
+    /// Backpressure, sampled on the feed path. A render buffer that stays deep means the decoder
+    /// is behind, and feeding on only grows the latency. The response is the loss path's: freeze
+    /// and ask for a keyframe, no flush (a flush restart kills the audio plane), so the frames
+    /// skipped are ones the decoder had no time for anyway. Returns whether to request one.
+    pub fn backpressure(&mut self) -> bool {
+        if self.holding() || self.backlog_sampled.is_some_and(|t| t.elapsed() < BACKLOG_SAMPLE) {
+            return false;
+        }
+        self.backlog_sampled = Some(Instant::now());
+        let Some(depth) = self.sink.queue_depth() else {
+            return false;
+        };
+        if depth < BACKLOG_HOLD_FRAMES {
+            self.deep_samples = 0;
+            return false;
+        }
+        self.deep_samples = self.deep_samples.saturating_add(1);
+        if self.deep_samples < BACKLOG_HOLD_SAMPLES {
+            return false;
+        }
+        self.deep_samples = 0;
+        tracing::warn!("decoder {depth} frames behind — freezing until the host reanchors");
+        self.begin_hold();
+        self.take_keyframe_slot()
     }
 
     /// Present one delivery, or decide not to. The stage owns everything past the wire: how the
@@ -462,4 +503,77 @@ enum HoldGate {
     Feed { request_keyframe: bool },
     /// Still frozen — skip it, and report this instead.
     Skip(SinkResult),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// A decoder that accepts everything and reports whatever depth the test sets.
+    struct FakeSink {
+        depth: Cell<Option<u32>>,
+    }
+
+    // `Cell` is `!Sync`; the trait wants `Send` only and the test never shares it.
+    impl VideoSink for FakeSink {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn caps(&self) -> VideoSinkCaps {
+            VideoSinkCaps::FEED_ONLY
+        }
+        fn feed(&self, _au: &[u8], _pts_ns: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn queue_depth(&self) -> Option<u32> {
+            self.depth.get()
+        }
+    }
+
+    fn stage(depth: Option<u32>) -> VideoStage {
+        VideoStage::new(
+            Box::new(FakeSink {
+                depth: Cell::new(depth),
+            }),
+            Arc::new(StreamStats::default()),
+            SinkConfig {
+                stream_hz: 60,
+                report_decode_latency: false,
+            },
+        )
+    }
+
+    fn frame(index: u32, reanchor: bool) -> WireFrame<'static> {
+        WireFrame {
+            data: &[0u8; 4],
+            pts_ns: u64::from(index) * 16_666_667,
+            index,
+            part: None,
+            reanchor,
+            recovery_mark: false,
+            loss: false,
+        }
+    }
+
+    /// Two deep samples freeze the feed and ask for a keyframe; the reanchor lifts the hold.
+    /// One deep sample, or a backend with no queue, never does.
+    #[test]
+    fn a_deep_render_buffer_freezes_until_the_host_reanchors() {
+        let mut s = stage(Some(BACKLOG_HOLD_FRAMES));
+        assert!(!s.backpressure(), "one deep sample is a burst mid-drain");
+        s.backlog_sampled = None;
+        assert!(s.backpressure(), "the second asks for a keyframe");
+        assert!(s.holding());
+        assert!(matches!(s.submit(&frame(1, false)), SinkResult::Held));
+        assert!(matches!(s.submit(&frame(2, true)), SinkResult::Presented { .. }));
+        assert!(!s.holding());
+
+        let mut shallow = stage(Some(1));
+        shallow.backlog_sampled = None;
+        assert!(!shallow.backpressure());
+        shallow.backlog_sampled = None;
+        assert!(!shallow.backpressure());
+        assert!(!stage(None).backpressure(), "no queue to read, nothing to steer on");
+    }
 }

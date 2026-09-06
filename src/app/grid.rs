@@ -9,9 +9,8 @@
 //! Pixel geometry (card rects, the visible band) is `app::view::home`; navigation is
 //! `app::state::home`; the groups themselves are built in `app::library`.
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::app::render::tile;
 use crate::app::spinner::GridReveal;
 use crate::app::view::home::{SECTION_GAP, SECTION_HEADING_H};
 use crate::core::model::GameEntry;
@@ -20,19 +19,6 @@ use crate::core::model::GameEntry;
 pub(crate) const CARD_PREFETCH_ROWS: i32 = 2;
 /// Rows beyond which tiles are dropped (hysteresis prevents oscillation).
 pub(crate) const CARD_KEEP_ROWS: i32 = 5;
-/// Budget per frame for card rasterization. Checked after each card so at least one always
-/// builds (window fills at hardware rate, not slowest-device rate). Fixed count of 1 meant a
-/// 5x4 viewport took 20 frames to fill; on armv7 softfloat this was still one card/tick.
-pub(crate) const CARD_BUILD_BUDGET: Duration = Duration::from_millis(6);
-/// Ceiling regardless of clock: prevents unbounded rasterize+upload in one tick (upload
-/// charged to a later stage the budget can't see).
-pub(crate) const CARD_BUILD_BURST: usize = 8;
-
-/// Upper bound on grid sections: [`MAX_COLLECTIONS`](crate::core::model::MAX_COLLECTIONS)
-/// plus the dynamic Library entry. Every geometry query below scans the group list, so this
-/// is what makes them O(1) in the library's size.
-pub(crate) const MAX_GROUPS: usize = crate::core::model::MAX_COLLECTIONS + 1;
-
 /// One grid section: a collection's cards, laid out as a run of whole rows. Built once per
 /// change by [`Library::regroup`](crate::app::library::Library::regroup) and read by every
 /// geometry path; deliberately column-independent, so a width change needs no rebuild.
@@ -192,10 +178,11 @@ impl<'a> GridLayout<'a> {
 /// The dirty flags are the contract between the two halves: the event side sets them when it
 /// changes something the render side cannot see, and `prepare_grid` clears them as it acts.
 pub(crate) struct GridState {
-    /// Which `TileId` each card's pin id holds (see [`tile::CardIds`]). Keyed by identity rather
-    /// than by grid position because pinning a game reorders the grid, and keying by index would
-    /// rebuild every tile after the moved one.
-    pub card_ids: tile::CardIds,
+    /// Every resident card by id, with its arrival clock. Keyed by identity rather than by
+    /// grid position because pinning a game reorders the grid.
+    pub arrivals: Arrivals,
+    /// The keep window the last eviction pass ran for; an unchanged one is skipped.
+    pub kept: Range<usize>,
     /// When the last-armed card pop finishes (one comparison instead of walking every card).
     /// Never lowered: late deadline costs one frame; early would freeze zoom mid-way.
     pub card_pop_until: Option<Instant>,
@@ -205,8 +192,6 @@ pub(crate) struct GridState {
     pub dirty: bool,
     /// Individual card tiles stale (cover art), by pin id (cheaper than full dirty).
     pub cards_dirty: Vec<String>,
-    /// Cards waiting in prefetch window (keeps loop ticking until filled).
-    pub tiles_pending: bool,
     /// Scroll offset rendered this frame; eases toward `scroll_target`.
     pub scroll: i32,
     pub scroll_target: i32,
@@ -214,30 +199,87 @@ pub(crate) struct GridState {
     pub focus_last: usize,
     /// Spinner state until initial build finishes.
     pub reveal: GridReveal,
-    /// Per-frame scratch lists (window-bounded to avoid allocations every frame on armv7).
-    pub scratch: GridScratch,
-    /// Card pixmaps freed by eviction. Recycled for next build (avoids 360KB realloc at 1080p).
-    pub free_cards: Vec<crate::ui::Painter>,
 }
 
-/// Per-frame working lists. Indices/ids only; doesn't borrow `games`.
+/// The cards resident in the build window and when each arrived. A card is noted the first
+/// time it enters the window; on a settled grid that first sighting is what pops.
 #[derive(Default)]
-pub(crate) struct GridScratch {
-    /// Tiles in keep window, sorted for eviction test.
-    pub keep: Vec<crate::ui::render::TileId>,
-    /// Pin ids evicted (owned because releasing them mutates the map).
-    pub dropped: Vec<String>,
-    /// Build candidates with/without cover art.
-    pub ready: Vec<usize>,
-    pub waiting: Vec<usize>,
+pub(crate) struct Arrivals {
+    seen: std::collections::HashMap<String, Option<Entrance>>,
+}
+
+impl Arrivals {
+    /// Notes `id` as resident; true the first time.
+    pub fn note(&mut self, id: &str) -> bool {
+        if self.seen.contains_key(id) {
+            return false;
+        }
+        self.seen.insert(id.to_string(), None);
+        true
+    }
+
+    pub fn pop(&self, id: &str) -> Option<Entrance> {
+        self.seen.get(id).copied().flatten()
+    }
+
+    /// Starts `id`'s arrival; false when it is not resident.
+    pub fn arm(&mut self, id: &str, entrance: Entrance) -> bool {
+        match self.seen.get_mut(id) {
+            Some(slot) => {
+                *slot = Some(entrance);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn release(&mut self, id: &str) {
+        self.seen.remove(id);
+    }
+
+    pub fn clear(&mut self) {
+        self.seen.clear();
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.seen.keys().map(String::as_str)
+    }
+}
+
+/// Card arrival: scale-up on the grid. Not first appearance (that is `GridReveal`'s wave).
+#[derive(Clone, Copy)]
+pub(crate) struct Entrance {
+    pub start: Instant,
+}
+
+impl Entrance {
+    pub fn pop(start: Instant) -> Self {
+        Self { start }
+    }
+
+    /// Arrival progress and pop shrink, on the caller's clock.
+    pub fn progress(self, now: Instant) -> (f32, f32) {
+        let frac = crate::ui::animation::anim_frac_at(Some(self.start), crate::app::CARD_POP, now);
+        (frac, crate::app::CARD_POP_SHRINK)
+    }
+
+    /// [`Self::progress`] for a card that may not be arriving: `(1.0, 0.0)` when it is not.
+    pub fn progress_of(entrance: Option<Self>, now: Instant) -> (f32, f32) {
+        entrance.map_or((1.0, 0.0), |e| e.progress(now))
+    }
+
+    /// When the arrival finishes (redraw loop deadline).
+    pub fn end(self) -> Instant {
+        self.start + crate::app::CARD_POP
+    }
 }
 
 impl GridState {
     /// Starts/restarts `pin_id`'s pop. Cards without tiles get their clock on build.
     /// Grid's first appearance uses `GridReveal` mask instead (one surface, not per-card entrance).
     pub fn arm_card_pop(&mut self, pin_id: &str, at: Instant) {
-        let entrance = tile::Entrance::pop(at);
-        if self.card_ids.arm(pin_id, entrance) {
+        let entrance = Entrance::pop(at);
+        if self.arrivals.arm(pin_id, entrance) {
             self.extend_pop_deadline(entrance.end());
         }
     }
@@ -263,18 +305,16 @@ impl GridState {
 impl Default for GridState {
     fn default() -> Self {
         Self {
-            card_ids: tile::CardIds::default(),
+            arrivals: Arrivals::default(),
+            kept: 0..0,
             card_pop_until: None,
             card_size: (0, 0),
             dirty: true,
             cards_dirty: Vec::new(),
-            tiles_pending: false,
             scroll: 0,
             scroll_target: 0,
             focus_last: 0,
             reveal: GridReveal::revealed(),
-            scratch: GridScratch::default(),
-            free_cards: Vec::new(),
         }
     }
 }

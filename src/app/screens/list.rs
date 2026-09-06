@@ -1,4 +1,4 @@
-//! The plain list modals: Host menu, Host power, Diagnostics, Experimental, Cursor.
+//! The plain list screens: Host menu, Host power, HDR calibration.
 //!
 //! Each is a card holding one `FocusRow` per line, focused by row index. Their handlers all
 //! opened the same way — count the rows, move the cursor, arm the focus pop, return — and
@@ -10,60 +10,22 @@ use crate::app::view;
 use crate::app::App;
 use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
-use crate::ui::widgets::FocusRow;
 use std::time::Instant;
 
 impl App {
-    /// The rows of whichever plain list modal is open, `None` on any other screen.
-    ///
-    /// The single table over this family: the row *tiles*, the focused-row tile and the
-    /// keyboard's row count all read it, so a screen cannot be listed by one and missed by
-    /// another (see `docs/APP-REWORK-PLAN.md` §1, P3).
-    pub(crate) fn list_modal_rows(&self) -> Option<Vec<FocusRow>> {
-        Some(match self.nav.screen {
-            Screen::HostMenu => self.host_menu_rows(),
-            Screen::HostPower => {
-                let (auto_send, exit_action, access) = self.host_power_view();
-                view::hostpower::rows(auto_send, exit_action, access)
-            }
-            Screen::Diagnostics => view::diagnostics::rows(&self.settings_ui.settings, self.send_logs_host_ready()),
-            Screen::Experimental => view::experimental::rows(&self.settings_ui.settings, self.hosts.rooted),
-            Screen::HdrCalibration => {
-                let m = self.hdr_calibration_view()?;
-                view::hdrcalibration::rows(m.step, m.display)
-            }
-            Screen::ControllerSettings(_) => view::controllersettings::rows(
-                self.settings_target(),
-                self.detected_gamepad_type,
-                self.dualsense_limited(),
-                self.webos_major(),
-            ),
-            Screen::CursorSettings(_) => view::cursorsettings::rows(
-                self.settings_target(),
-                &self.editing_override(),
-                Some(self.nav.cursor(ScreenKey::CursorSettings)),
-            ),
-            _ => return None,
-        })
-    }
-
     /// How many rows the open list modal has — the count without the labels, for the paths
     /// that only navigate (see `app::view::hostmenu::Metrics` for why that matters).
     pub(crate) fn list_modal_row_count(&self) -> usize {
         match self.nav.screen {
             Screen::HostMenu => self.host_menu_actions().len(),
             Screen::HostPower => view::hostpower::ROW_COUNT,
-            Screen::Diagnostics => crate::app::menu::DIAGNOSTICS_ROW_COUNT,
-            Screen::Experimental => crate::app::menu::EXP_ROWS.len(),
+            Screen::PickProfile => self.pick_profile_rows().len(),
             Screen::HdrCalibration => view::hdrcalibration::ROW_COUNT,
-            Screen::CursorSettings(_) => crate::app::menu::CURSOR_ROWS.len(),
-            Screen::ControllerSettings(_) => crate::app::menu::CONTROLLER_ROWS.len(),
             // Exhaustive for the same reason `list_modal_rows` is: this is the second half of
             // the family's table — the labels there, the count here — and a screen listed by
             // one but missed by the other navigates a list it cannot draw.
             Screen::Home
             | Screen::Pairing
-            | Screen::Settings(_)
             | Screen::AddHost
             | Screen::Wake
             | Screen::ForgetHost
@@ -77,7 +39,9 @@ impl App {
             | Screen::RenameCollection
             | Screen::RemoveCollection
             | Screen::ResetHdrCalibration
-            | Screen::ResetGameSettings => 0,
+            | Screen::SettingsPage
+            | Screen::RenameProfile
+            | Screen::DeleteProfile => 0,
         }
     }
 
@@ -85,8 +49,10 @@ impl App {
     /// count every nav path asks for: the two tables each return 0 off their own family, so a
     /// screen counted against the wrong one navigates a list it cannot draw (and freezes).
     pub(crate) fn row_count(&self) -> usize {
-        if crate::app::screens::is_scroll_list(self.nav.screen) {
-            self.scroll_list_row_count()
+        if self.nav.screen == Screen::SettingsPage {
+            self.settings_page_rows().len()
+        } else if self.nav.screen == Screen::Collections {
+            self.collections_row_count()
         } else {
             self.list_modal_row_count()
         }
@@ -97,16 +63,15 @@ impl App {
     /// between stepping focus and scrolling pixels, so a caller lands wherever an Up/Down
     /// press would.
     pub(crate) fn navigates_rows(&self) -> bool {
-        self.card_menu.is_some() || self.settings_ui.dropdown.is_some() || self.row_count() > 0
+        self.card_menu.is_some() || self.row_count() > 0
     }
 
-    /// Where row focus is now, across all three places it can live. Only ever compared with
+    /// Where row focus is now, across the two places it can live. Only ever compared with
     /// itself: a caller that navigates without an animation to redraw off (the wheel) samples
     /// it either side of the step to tell a move from a press against the end of the list.
-    pub(crate) fn row_focus(&self) -> (usize, Option<usize>, Option<usize>) {
+    pub(crate) fn row_focus(&self) -> (usize, Option<usize>) {
         (
             self.nav.cursor(ScreenKey::of(self.nav.screen)),
-            self.settings_ui.dropdown.as_ref().map(|dd| dd.focused),
             self.card_menu.as_ref().map(|m| m.focused),
         )
     }
@@ -126,114 +91,10 @@ impl App {
         false
     }
 
-    /// The dropdown half of a list screen's event handling: navigates the open picker, commits
-    /// a pick, or dismisses it — reporting whether there was one to spend the event on. Every
-    /// handler that can open a dropdown starts here, the same way they all start with
-    /// [`list_nav_event`](Self::list_nav_event).
-    ///
-    /// `row` is the row it hangs off (its `(Screen, row)` tile key), `len` how many options it
-    /// lists, and `apply` what a pick means — the only three things the three screens differ by.
-    pub(crate) fn dropdown_event(
-        &mut self,
-        ev: MenuEvent,
-        row: usize,
-        len: usize,
-        apply: impl FnOnce(&mut Self, usize),
-    ) -> bool {
-        let Some(dd) = self.settings_ui.dropdown.as_mut() else {
-            return false;
-        };
-        match ev {
-            MenuEvent::Up | MenuEvent::Down => {
-                crate::ui::widgets::list_nav(&mut dd.focused, len, crate::app::menu::nav_dir(ev));
-            }
-            MenuEvent::Confirm => {
-                let choice = dd.focused;
-                self.close_dropdown(row, choice);
-                apply(self, choice);
-            }
-            MenuEvent::Back => {
-                let focused = dd.focused;
-                self.close_dropdown(row, focused);
-            }
-            MenuEvent::Left | MenuEvent::Right | MenuEvent::Secondary => {}
-        }
-        true
-    }
-
-    /// Runs the close fade against the row the dropdown hung off and drops it — the tail both
-    /// a pick and a dismissal share.
-    pub(crate) fn close_dropdown(&mut self, row: usize, focused: usize) {
-        self.settings_ui.dropdown_fade.close((row, focused));
-        self.settings_ui.dropdown = None;
-    }
-
     /// Starts the focused row's switch slide from the value it is leaving, so the knob slides
     /// rather than snapping — the shared tail of every toggle row on every list screen.
     pub(crate) fn arm_switch_anim(&mut self, from: bool) {
         let row = self.nav.cursor(ScreenKey::of(self.nav.screen));
         self.render.modal.switch_anim = Some((Instant::now(), from, row));
-    }
-
-    /// The options the open dropdown lists, on whichever screen owns one.
-    ///
-    /// Three screens have dropdowns and they read different tables — Diagnostics' log level,
-    /// Experimental's audio route, and every other pick on the settings list. One exhaustive match rather than a `_ =>`
-    /// arm per caller: the overlay's drawn height, its hit test and its focused-option tile
-    /// all measure against this, so a screen absorbed into the wrong table by a fallback
-    /// would draw options it cannot land on. `display_row` is the on-screen row the dropdown
-    /// hangs off.
-    pub(crate) fn dropdown_options(&self, display_row: usize) -> Vec<crate::app::menu::Label> {
-        match self.nav.screen {
-            Screen::Diagnostics => crate::app::menu::log_level_dropdown_options(),
-            Screen::Experimental => crate::app::menu::audio_route_options(),
-            Screen::HostPower => crate::app::menu::exit_action_options(),
-            Screen::Settings(set) => crate::app::menu::settings_logical_row(set, display_row)
-                .map_or_else(Vec::new, |row| {
-                    crate::app::menu::dropdown_options(row, self.settings_target(), self.detected_gamepad_type)
-                }),
-            Screen::ControllerSettings(_) => crate::app::menu::CONTROLLER_ROWS
-                .get(display_row)
-                .map_or_else(Vec::new, |&row| {
-                    crate::app::menu::dropdown_options(row, self.settings_target(), self.detected_gamepad_type)
-                }),
-            // No dropdowns: nothing on these screens opens one, so nothing here should be
-            // drawn or hit-tested as if it had.
-            Screen::Home
-            | Screen::Pairing
-            | Screen::AddHost
-            | Screen::Wake
-            | Screen::ForgetHost
-            | Screen::HostMenu
-            | Screen::EditHost
-            | Screen::About
-            | Screen::SpeedTest
-            | Screen::HdrCalibration
-            | Screen::CursorSettings(_)
-            | Screen::SendLogs
-            | Screen::Collections
-            | Screen::RenameCollection
-            | Screen::RemoveCollection
-            | Screen::ResetHdrCalibration
-            | Screen::ResetGameSettings => Vec::new(),
-        }
-    }
-
-    /// How many options the open dropdown lists, without building their labels — the compose
-    /// and hit-test paths ask per frame, and [`dropdown_options`](Self::dropdown_options)
-    /// allocates a `String` per entry.
-    pub(crate) fn dropdown_len(&self, display_row: usize) -> usize {
-        match self.nav.screen {
-            Screen::Diagnostics => crate::app::menu::LOG_LEVEL_OPTIONS.len(),
-            Screen::Experimental => crate::app::menu::audio_routes().len(),
-            Screen::HostPower => crate::services::store::ExitAction::ALL.len(),
-            Screen::Settings(set) => crate::app::menu::settings_logical_row(set, display_row).map_or(0, |row| {
-                crate::app::menu::dropdown_option_count(row, self.settings_target())
-            }),
-            Screen::ControllerSettings(_) => crate::app::menu::CONTROLLER_ROWS.get(display_row).map_or(0, |&row| {
-                crate::app::menu::dropdown_option_count(row, self.settings_target())
-            }),
-            _ => 0,
-        }
     }
 }

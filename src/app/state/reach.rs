@@ -77,7 +77,6 @@ impl App {
             return false;
         }
         self.hosts.reachable.insert(key, online);
-        self.render.sidebar_dirty = true;
         true
     }
 
@@ -130,12 +129,7 @@ impl App {
     /// Last known reachability of a saved host, by record rather than by sidebar entry —
     /// the exit path has the `KnownHost` and no entry to go with it.
     pub(crate) fn known_host_online(&self, known: &crate::services::store::KnownHost) -> Option<bool> {
-        self.hosts.reachable.get(&(known.host.clone(), known.port)).copied()
-    }
-
-    /// All reachability states, index-aligned with entries.
-    pub(crate) fn reachability_list(&self) -> Vec<Option<bool>> {
-        self.hosts.entries.iter().map(|e| self.entry_online(e)).collect()
+        self.hosts.reachable.get(&(known.addr.clone(), known.port)).copied()
     }
 
     pub(crate) fn new_reachability() -> HashMap<(String, u16), bool> {

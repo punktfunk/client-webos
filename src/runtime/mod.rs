@@ -7,25 +7,25 @@ use punktfunk_core::config::Mode;
 use sdl2::controller::GameController;
 
 use crate::app::hero::Connect;
-use crate::app::render::tile;
 use crate::app::{App, HomeFocus, Screen};
 use crate::core::event::MenuEvent;
-use crate::platform::webos::compositor::Compositor;
+use crate::core::settings::TvSettings;
 use crate::platform::webos::cursor;
 use crate::platform::webos::gamepad;
 use crate::platform::webos::keyboard;
 use crate::platform::webos::mouse;
 use crate::services::store;
 use crate::session;
-use crate::ui::render::DrawCmd;
 
 /// A launch handed from the menu to the streaming loop: the connect thread (started early to
 /// overlap the animation), the settings it was started with, and how much of the first-frame
 /// budget the loading screen has already spent.
 struct ConnectOutcome {
     handle: std::thread::JoinHandle<Result<session::Connected>>,
+    /// What was dialled, kept so a lost link can be dialled again (`stream`'s reconnect).
+    target: crate::app::ConnectTarget,
     settings: store::Settings,
-    /// Whether the user's pick was `Automatic` — `settings.gamepad_type` has already been
+    /// Whether the user's pick was `Automatic` — `settings.gamepad_type()` has already been
     /// resolved against the attached pad, so this is the only thing left that says a pad
     /// hotplugged mid-stream should re-decide the kind rather than keep the session default.
     gamepad_auto: bool,
@@ -56,12 +56,12 @@ fn resolve_gamepad_type(
     mut settings: store::Settings,
     game_controller: &sdl2::GameControllerSubsystem,
 ) -> store::Settings {
-    if settings.gamepad_type != store::GamepadType::Auto {
+    if settings.gamepad_type() != store::GamepadType::Auto {
         return settings;
     }
     if let Some(detected) = gamepad::detect_type(game_controller) {
         tracing::info!("controller Automatic → {detected:?} (mirroring the attached pad)");
-        settings.gamepad_type = detected;
+        settings.set_gamepad_type(detected);
     }
     settings
 }
@@ -108,15 +108,15 @@ fn spawn_connect(
                 // A pinned host is reachable now or off, so a long budget would only hold the
                 // black launch scrim. Waiting on an operator is the pairing flow's job.
                 timeout: crate::services::budget::PROBE,
-                codec: settings.codec,
-                gamepad_type: settings.gamepad_type,
-                cursor_capture: settings.cursor_capture,
+                codec: settings.codec_pref(),
+                gamepad_type: settings.gamepad_type(),
+                cursor_capture: settings.cursor_capture(),
                 // `true` deliberately, whatever is attached right now: this is the SESSION-level
                 // cap, and the host advertises `HOST_CAP_PAD_AUDIO` only in reply to it. A pad
                 // plugged in later re-declares per-pad through `set_pad_audio_caps`, but only
                 // inside a session that claimed the cap up front — probing here would cost hotplug.
                 pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true),
-                audio_route: settings.audio_route,
+                audio_route: settings.audio_route(),
                 display_hdr: settings.hdr_display().hdr_meta(),
             })
             // Flagged before the handle is joined, so the loading screen can stop waiting
@@ -179,7 +179,7 @@ fn cycle_log_overlay() {
         }
         LogOverlayState::Live => {
             let mut snap = frozen_log_lines().lock().unwrap_or_else(PoisonError::into_inner);
-            *snap = crate::logger::recent_lines(crate::ui::tiles::LOG_OVERLAY_LINES);
+            *snap = crate::logger::recent_lines(overlay::LOG_LINES);
             drop(snap);
             // Nothing reads the ring while frozen — stop capturing so logging threads
             // (the video pump above all) drop back to a single atomic load per event.
@@ -208,7 +208,7 @@ pub(crate) fn set_log_overlay_enabled(enabled: bool) {
 fn log_overlay_lines() -> Option<Vec<String>> {
     match log_overlay_state() {
         LogOverlayState::Off => None,
-        LogOverlayState::Live => Some(crate::logger::recent_lines(crate::ui::tiles::LOG_OVERLAY_LINES)),
+        LogOverlayState::Live => Some(crate::logger::recent_lines(overlay::LOG_LINES)),
         LogOverlayState::Frozen => Some(
             frozen_log_lines()
                 .lock()
@@ -272,8 +272,9 @@ pub fn run() -> Result<()> {
 /// `Option<ConnectOutcome>` used to say this, with `None` meaning "quit" — but the quit case
 /// now carries something, and a sentinel that carries a payload wants a name.
 enum UiOutcome {
-    /// A launch was committed; the stream loop takes it from here.
-    Launch(ConnectOutcome),
+    /// A launch was committed; the stream loop takes it from here. Boxed: the shared settings
+    /// document inside is hundreds of bytes and the other two arms carry almost nothing.
+    Launch(Box<ConnectOutcome>),
     /// The user (or the OS) asked to close the app, carrying the selected host's exit action
     /// UNFIRED — see [`ConnectOutcome::exit_plan`] for why nothing runs it here.
     Quit(Option<crate::services::power::ExitPlan>),
@@ -291,50 +292,14 @@ enum StreamOutcome {
     ReturnToMenu,
 }
 
-/// Cap for the debug overlays' text cache. Their lines are mostly unique, so this bounds a
-/// cache that exists for reuse *between consecutive rebuilds* rather than for permanence.
-const OVERLAY_TEXT_CAP: usize = 256;
-
 mod input;
+mod overlay;
 mod session_ext;
 mod stream;
-mod toast;
 mod ui_flow;
 use input::*;
 use stream::run_inner;
 use ui_flow::run_ui_flow;
 
-/// The shared gamepad shell's flow, on the one target that links it.
-#[cfg(all(target_os = "linux", target_arch = "arm"))]
+/// The shared gamepad shell's flow. `runtime` is Linux-only, and so is the shell.
 mod console_flow;
-
-/// Off the TV target there is no Skia and so no shell — every build answers "not wanted" and
-/// the menu loop runs this client's own screens. Mirrors `main.rs`'s stub for non-Linux hosts:
-/// the alternative is a `cfg` around the menu loop's call site, which would fork the whole
-/// eleven-argument `run_ui_flow` call in two.
-#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-mod console_flow {
-    use super::{GameController, Result, UiOutcome};
-
-    /// No shell on this target.
-    pub(super) struct ConsoleGl;
-
-    /// Takes the pad state the real one reads, so the two signatures cannot drift apart —
-    /// only this build's answer is const.
-    pub(super) fn wanted(_pad_connected: bool) -> bool {
-        false
-    }
-
-    pub(super) fn run(
-        _canvas: &mut sdl2::render::Canvas<sdl2::video::Window>,
-        _gl: &mut Option<ConsoleGl>,
-        _events: &mut sdl2::EventPump,
-        _game_controller: &sdl2::GameControllerSubsystem,
-        _controller: &mut Option<GameController>,
-        _identity: &(String, String),
-        _notice: Option<String>,
-    ) -> Result<UiOutcome> {
-        // `wanted` is const-false here, so the menu loop never takes this branch.
-        Ok(UiOutcome::Reenter)
-    }
-}

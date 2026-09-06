@@ -105,7 +105,7 @@ tasks:
         APP_ID={{.APP_ID}}
         STAGE_DIR="$(mktemp -d)"
         trap 'rm -rf "$STAGE_DIR"' EXIT
-        mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib" "$STAGE_DIR/assets"
+        mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib"
         cp target/{{.TARGET}}/release/punktfunk-webos "$STAGE_DIR/bin/"
         cp -L {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0 "$STAGE_DIR/lib/libSDL2-2.0.so.0"
         # Skia is C++, and this SDK builds against libstdc++ 6.0.30 while the TV ships 6.0.29 —
@@ -129,7 +129,6 @@ tasks:
           {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-strip "$STAGE_DIR/bin/pfprobe"
         fi
         cp packaging/appinfo.json packaging/icon.png packaging/icon_large.png packaging/splash.png "$STAGE_DIR/"
-        cp -R assets/cards "$STAGE_DIR/assets/"
 
         PKG_VERSION="{{.PKG_VERSION}}"
         APP_VERSION="${PKG_VERSION%%+git.*}"

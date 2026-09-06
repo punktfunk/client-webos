@@ -1,10 +1,8 @@
 //! On-demand cover-art loading with disk cache (not all-at-once, which caused OOM).
-//! Fetches via mTLS, decodes with pure-Rust `image` crate, handed to UI as `Pixmap`.
+//! Fetches via mTLS, decodes with the pure-Rust `image` crate, handed to the UI as pixels.
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
-
-use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
 
 use crate::services::library::GameEntry;
 
@@ -38,10 +36,17 @@ fn to_rgb565(buf: &mut Vec<u8>) {
     buf.truncate(pixels * 2);
 }
 
+/// A decoded cover, straight-alpha RGBA8 at card size.
+pub struct CardArt {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 /// One decoded image, ready to composite.
 pub enum ArtLoaded {
     /// Grid cover, stretched to card size.
-    Card { game_id: String, pixmap: Pixmap },
+    Card { game_id: String, art: CardArt },
     /// Wide art for the connecting screen.
     Hero { game_id: String, image: HeroImage },
 }
@@ -151,10 +156,14 @@ fn decode_hero(img: image::DynamicImage) -> Option<HeroImage> {
 }
 
 /// A cover's decoded pixels: cropped to [`TARGET_ART_ASPECT`] and resampled straight to card
-/// size, premultiplied for `tiny_skia`.
-fn decode_card(img: image::DynamicImage, card_w: u32, card_h: u32) -> Option<Pixmap> {
+/// size.
+fn decode_card(img: image::DynamicImage, card_w: u32, card_h: u32) -> Option<CardArt> {
     let rgba = crop_and_resize(&img.into_rgba8(), TARGET_ART_ASPECT, |_, _| (card_w, card_h))?;
-    crate::ui::painter::rgba_pixmap(rgba.width(), rgba.height(), rgba.into_raw())
+    Some(CardArt {
+        width: rgba.width(),
+        height: rgba.height(),
+        pixels: rgba.into_raw(),
+    })
 }
 
 /// Cache version magic ("PFR2" — bumped for center-cropped art).
@@ -227,7 +236,7 @@ fn cache_dir(host: &str, port: u16) -> PathBuf {
 /// The filesystem work runs on its own thread: the caller is either the startup path or a
 /// keypress, and unlinking a stale host's quota is up to ~190 files.
 pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
-    let keep: HashSet<String> = known.iter().map(|h| host_key(&h.host, h.port)).collect();
+    let keep: HashSet<String> = known.iter().map(|h| host_key(&h.addr, h.port)).collect();
     std::thread::Builder::new()
         .name("punktfunk-webos-art-gc".into())
         .spawn(move || {
@@ -418,19 +427,23 @@ fn prune_cache(dir: &std::path::Path) -> CacheTotals {
 /// Stretches a cached cover to card size, or hands it back untouched when it is already that
 /// size — which is the normal case, since covers are cached at card size. Only a `.raw` written
 /// by an older build, or by a session whose panel gave a different card size, is resampled here.
-pub(crate) fn resize_pixmap(src: Pixmap, w: u32, h: u32) -> Pixmap {
-    let (sw, sh) = (src.width() as f32, src.height() as f32);
-    if (src.width(), src.height()) == (w, h) || sw <= 0.0 || sh <= 0.0 {
+pub(crate) fn resize_card(src: CardArt, w: u32, h: u32) -> CardArt {
+    if (src.width, src.height) == (w, h) || src.width == 0 || src.height == 0 || w == 0 || h == 0 {
         return src;
     }
-    let Some(mut dst) = Pixmap::new(w, h) else { return src };
-    let paint = PixmapPaint {
-        quality: FilterQuality::Bilinear,
-        ..PixmapPaint::default()
+    let Some(img) = image::RgbaImage::from_raw(src.width, src.height, src.pixels) else {
+        return CardArt {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
     };
-    let transform = Transform::from_scale(w as f32 / sw, h as f32 / sh);
-    dst.draw_pixmap(0, 0, src.as_ref(), &paint, transform, None);
-    dst
+    let resized = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    CardArt {
+        width: w,
+        height: h,
+        pixels: resized.into_raw(),
+    }
 }
 
 /// `worker`'s fixed, per-host config — bundled to keep its arg count sane.
@@ -631,10 +644,10 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
         let raw_cached = cache_path(dir, &req.game_id, req.kind, true);
         let from_raw_cache = match req.kind {
             ArtKind::Card => read_raw(&raw_cached, RAW_CACHE_MAGIC)
-                .and_then(|(width, height, pixels)| Pixmap::from_vec(pixels, IntSize::from_wh(width, height)?))
-                .map(|pixmap| ArtLoaded::Card {
+                .filter(|(width, height, pixels)| pixels.len() == (*width as usize) * (*height as usize) * 4)
+                .map(|(width, height, pixels)| ArtLoaded::Card {
                     game_id: req.game_id.clone(),
-                    pixmap: resize_pixmap(pixmap, card_w, card_h),
+                    art: resize_card(CardArt { width, height, pixels }, card_w, card_h),
                 }),
             ArtKind::Hero => read_hero_raw(&raw_cached).map(|image| ArtLoaded::Hero {
                 game_id: req.game_id.clone(),
@@ -712,20 +725,15 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
                 }
             }
             ArtKind::Card => {
-                let Some(pixmap) = decode_card(decoded, card_w, card_h) else {
+                let Some(art) = decode_card(decoded, card_w, card_h) else {
                     tracing::warn!("art: {} card decode failed ({card_w}x{card_h})", req.game_id);
                     continue;
                 };
-                totals[ArtKind::Card as usize] += write_raw(
-                    &raw_cached,
-                    RAW_CACHE_MAGIC,
-                    pixmap.width(),
-                    pixmap.height(),
-                    pixmap.data(),
-                );
+                totals[ArtKind::Card as usize] +=
+                    write_raw(&raw_cached, RAW_CACHE_MAGIC, art.width, art.height, &art.pixels);
                 ArtLoaded::Card {
                     game_id: req.game_id,
-                    pixmap,
+                    art,
                 }
             }
         };

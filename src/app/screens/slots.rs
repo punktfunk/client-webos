@@ -8,6 +8,7 @@
 use crate::app::state::collections::CollectionsState;
 use crate::app::state::hdrcalibration::HdrCalibrationState;
 use crate::app::state::hostpower::ProbeFailure;
+use crate::app::state::settingspage::SettingsPage;
 use crate::app::state::speedtest::SpeedTestState;
 use crate::app::state::textfield::TextField;
 use crate::app::WakeState;
@@ -43,6 +44,14 @@ pub(crate) struct ScreenSlots {
     /// The host being measured, for the status line.
     pub(crate) speed_test_name: String,
     pub(crate) add_host: TextField,
+    /// The settings page's page, scope and column focus (`Screen::SettingsPage`).
+    pub(crate) settings_page: SettingsPage,
+    /// The name being typed for the profile in scope (`Screen::RenameProfile`).
+    pub(crate) profile_name: TextField,
+    /// What `Screen::PickProfile` is picking for.
+    pub(crate) profile_pick: Option<crate::app::state::profilepick::ProfilePick>,
+    /// The About document's first visible line.
+    pub(crate) about_scroll: usize,
     /// The card `Screen::Collections` is moving, and its title — see [`CollectionsState`].
     pub(crate) collections: CollectionsState,
     /// What the host said about this pairing's power rights, `None` while the probe is still

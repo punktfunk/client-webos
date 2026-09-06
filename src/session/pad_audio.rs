@@ -21,7 +21,8 @@ use anyhow::{Context, Result};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::quic::{PAD_AUDIO_KIND_HAPTICS, PAD_AUDIO_KIND_SPEAKER};
 
-use crate::core::model::Settings;
+use crate::core::settings::TvSettings;
+use pf_client_core::trust::Settings;
 
 /// Arrival-flag / `set_pad_audio_caps` bit: this client renders the coil lane.
 pub const CAP_HAPTICS: u8 = 0x01;
@@ -64,7 +65,7 @@ pub fn caps_for(settings: &Settings, bt_pad: bool) -> u8 {
     if settings.pad_haptics {
         caps |= CAP_HAPTICS;
     }
-    if settings.pad_speaker && bt_pad {
+    if settings.pad_speaker_on() && bt_pad {
         caps |= CAP_SPEAKER;
     }
     caps

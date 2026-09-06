@@ -14,7 +14,8 @@ use crate::app::App;
 use crate::core::event::MenuEvent;
 use crate::core::model::HdrDisplay;
 use crate::core::screen::Screen;
-use crate::platform::webos::hdr_pattern::Playback;
+use crate::core::settings::TvSettings;
+pub(crate) use crate::platform::webos::hdr_pattern::Playback;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum HdrStep {
@@ -183,7 +184,7 @@ impl App {
                 );
             }
         }
-        self.nav.resume(Screen::Experimental);
+        self.nav.resume(Screen::SettingsPage);
     }
 
     /// Opens the "clear this calibration?" dialog from the Calibrate row's delete button.
@@ -201,9 +202,9 @@ impl App {
                 if self.nav.cursor(ScreenKey::ResetHdrCalibration) == 0 {
                     self.clear_hdr_calibration();
                 }
-                self.nav.resume(Screen::Experimental);
+                self.nav.resume(Screen::SettingsPage);
             }
-            MenuEvent::Back | MenuEvent::Secondary => self.nav.resume(Screen::Experimental),
+            MenuEvent::Back | MenuEvent::Secondary => self.nav.resume(Screen::SettingsPage),
             MenuEvent::Up | MenuEvent::Down | MenuEvent::Left | MenuEvent::Right => {}
         }
     }
@@ -212,7 +213,7 @@ impl App {
     /// that reads "not calibrated" while still advertising a measured volume is the worst of
     /// both, since nothing on screen would say where those numbers came from.
     fn clear_hdr_calibration(&mut self) {
-        let default = crate::core::model::Settings::default();
+        let default = crate::core::settings::default_document();
         self.settings_ui.settings.set_hdr_display(default.hdr_display(), false);
         // The button that opened this dialog is gone with the measurement, so the focus it held
         // has to go back to the row itself.
@@ -246,15 +247,5 @@ impl App {
         let changed = now != hdr.seen;
         hdr.seen = now;
         changed
-    }
-
-    /// What the renderer draws while this screen is up: the step, the volume it has reached, and
-    /// whether the pattern feed has given up (which the card says instead of sitting on black).
-    pub(crate) fn hdr_calibration_view(&self) -> Option<view::hdrcalibration::Modal> {
-        self.screens.hdr.as_ref().map(|hdr| view::hdrcalibration::Modal {
-            step: hdr.step,
-            display: hdr.display,
-            stalled: hdr.playback.as_ref().is_none_or(Playback::stalled),
-        })
     }
 }

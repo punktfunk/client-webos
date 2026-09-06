@@ -10,7 +10,7 @@ impl App {
     /// Enters the WOL flow. With `wol_auto` off, shows prompt immediately.
     /// With it on, fires packet silently, shows prompt only after `WAKE_RETRY_INTERVAL`.
     pub(crate) fn start_wake(&mut self, host: String, port: u16, mac: Vec<String>, reason: String) {
-        let known = self.hosts.known.iter().find(|h| h.host == host && h.port == port);
+        let known = self.hosts.known.iter().find(|h| h.addr == host && h.port == port);
         let name = known.map_or_else(|| host.clone(), |h| h.name.clone());
         // WHY: without a MAC, don't auto-send — show interactive explanation instead. A host
         // the user just powered down never auto-sends either, whatever `wol_auto` says: it is
@@ -92,7 +92,7 @@ impl App {
                     .hosts
                     .known
                     .iter()
-                    .find(|h| h.host == host && h.port == port)
+                    .find(|h| h.addr == host && h.port == port)
                     .and_then(|h| h.mgmt_port);
                 self.wake_succeeded(host, port, mgmt_port, "reachability probe");
                 return true;
@@ -148,8 +148,8 @@ impl App {
         host: &str,
         port: u16,
     ) -> std::sync::mpsc::Receiver<crate::services::library::GamesLoaded> {
-        let known = known_hosts.iter().find(|h| h.host == host && h.port == port);
-        let fingerprint = known.and_then(|k| k.fingerprint);
+        let known = known_hosts.iter().find(|h| h.addr == host && h.port == port);
+        let fingerprint = known.and_then(crate::core::model::KnownHost::fingerprint);
         let mgmt_port = known
             .and_then(|h| h.mgmt_port)
             .unwrap_or(crate::services::library::DEFAULT_MGMT_PORT);

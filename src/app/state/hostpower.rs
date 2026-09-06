@@ -228,7 +228,7 @@ impl App {
     fn power_access_for(&self, known: Option<&store::KnownHost>) -> PowerAccess {
         // An unpaired host has no access mask for a power grant to sit in, and the management
         // lane would refuse the invoke on the certificate alone.
-        if !known.is_some_and(|h| h.fingerprint.is_some()) {
+        if !known.is_some_and(crate::core::model::KnownHost::is_paired) {
             return PowerAccess::NotPaired;
         }
         match self.screens.power_rights {
@@ -244,26 +244,19 @@ impl App {
     /// the other screens' by `self.nav.screen`, see `dropdown_overlay_tile`'s docs). Back
     /// returns to host menu.
     pub(crate) fn handle_host_power_event(&mut self, ev: MenuEvent) {
-        if self.dropdown_event(ev, menu::POWER_ROW_EXIT, ExitAction::ALL.len(), Self::apply_exit_action) {
-            return;
-        }
         if self.list_nav_event(ev) {
             return;
         }
         match (self.nav.cursor(ScreenKey::HostPower), ev) {
             (menu::POWER_ROW_AUTO, MenuEvent::Left | MenuEvent::Right | MenuEvent::Confirm) => self.toggle_wol_auto(),
             // A locked row (see `power_access`) rejects the press — the greyed control
-            // already says the value is fixed.
-            (menu::POWER_ROW_EXIT, MenuEvent::Confirm) if self.power_access().unlocked() => {
-                self.settings_ui.dropdown = Some(crate::app::DropdownState {
-                    row: menu::POWER_ROW_EXIT,
-                    focused: menu::exit_action_current_index(self.host_power_exit_action()),
-                });
-                self.settings_ui.dropdown_fade.reopen();
-            }
-            (menu::POWER_ROW_EXIT, MenuEvent::Left | MenuEvent::Right) if self.power_access().unlocked() => {
+            // already says the value is fixed. A pick steps: Confirm and Right forward,
+            // Left back, the way the console's own choice rows do.
+            (menu::POWER_ROW_EXIT, MenuEvent::Left | MenuEvent::Right | MenuEvent::Confirm)
+                if self.power_access().unlocked() =>
+            {
                 let current = menu::exit_action_current_index(self.host_power_exit_action());
-                let next = menu::cycle_index(current, ExitAction::ALL.len(), ev == MenuEvent::Right);
+                let next = menu::cycle_index(current, ExitAction::ALL.len(), ev != MenuEvent::Left);
                 self.apply_exit_action(next);
             }
             (_, MenuEvent::Back) => {

@@ -6,6 +6,7 @@ pub mod model;
 pub mod perf;
 pub mod pq;
 pub mod screen;
+pub mod settings;
 
 /// The packaged version (e.g. `0.4.0+git.abc12345`), threaded in at compile time via
 /// `PKG_VERSION` by the Taskfile's build step. `Cargo.toml` deliberately stays a fixed

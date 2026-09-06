@@ -3,13 +3,7 @@
 use crate::app::menu::PowerAccess;
 use crate::services::store::ExitAction;
 use crate::ui;
-use crate::ui::render::Rect;
-use crate::ui::text::Fonts;
 use crate::ui::widgets::FocusRow;
-use crate::ui::Canvas;
-use crate::ui::ModalMetrics;
-use crate::ui::ModalScreen;
-use anyhow::Result;
 
 /// Names both directions the card covers, since neither row's label says the other exists.
 /// Auto-wake's "Off" in particular is not "never wake" but "ask first", which the switch
@@ -75,42 +69,6 @@ fn caption(exit_action: ExitAction, access: PowerAccess) -> ui::widgets::RowSubt
         // Losing the host's uptime is the one outcome worth colouring.
         ExitAction::Shutdown => ui::widgets::RowSubtext::caution(text),
         ExitAction::None | ExitAction::Sleep => ui::widgets::RowSubtext::hint(text),
-    }
-}
-
-pub fn card_rect(screen_w: u32, screen_h: u32, fonts: &Fonts) -> Rect {
-    ui::widgets::list_modal_card_rect(screen_w, screen_h, fonts, SUBTITLE, ROW_COUNT)
-}
-
-/// The per-host host power settings as a [`ModalScreen`].
-pub(crate) struct Modal<'a> {
-    pub host_name: &'a str,
-    pub auto_send: bool,
-    pub exit_action: ExitAction,
-    pub access: PowerAccess,
-}
-
-impl ModalMetrics for Modal<'_> {
-    fn card_rect(&self, screen_w: u32, screen_h: u32, fonts: &Fonts) -> Rect {
-        card_rect(screen_w, screen_h, fonts)
-    }
-
-    fn content_rect(&self, card: Rect, fonts: &Fonts) -> Option<Rect> {
-        Some(ui::widgets::list_modal_content_rect(card, fonts, SUBTITLE, ROW_COUNT))
-    }
-}
-
-impl ModalScreen for Modal<'_> {
-    fn render(&self, c: &mut Canvas, hover_close: bool) -> Result<()> {
-        let card = self.card_rect(c.screen_w, c.screen_h, c.fonts);
-        let title = title(self.host_name);
-        c.list_modal_screen(
-            card,
-            &title,
-            SUBTITLE,
-            &rows(self.auto_send, self.exit_action, self.access),
-            hover_close,
-        )
     }
 }
 

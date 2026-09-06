@@ -109,18 +109,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
-name = "arrayvec"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -698,7 +686,7 @@ dependencies = [
 [[package]]
 name = "fec-rs"
 version = "0.1.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=85bcc286ddd138e07cea324e4081484636f2c046#85bcc286ddd138e07cea324e4081484636f2c046"
+source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
 
 [[package]]
 name = "fiat-crypto"
@@ -1298,7 +1286,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pf-client-core"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=85bcc286ddd138e07cea324e4081484636f2c046#85bcc286ddd138e07cea324e4081484636f2c046"
+source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
 dependencies = [
  "anyhow",
  "punktfunk-core",
@@ -1311,7 +1299,7 @@ dependencies = [
 [[package]]
 name = "pf-console-ui"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=85bcc286ddd138e07cea324e4081484636f2c046#85bcc286ddd138e07cea324e4081484636f2c046"
+source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
 dependencies = [
  "anyhow",
  "pf-client-core",
@@ -1411,7 +1399,7 @@ dependencies = [
 [[package]]
 name = "punktfunk-core"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=85bcc286ddd138e07cea324e4081484636f2c046#85bcc286ddd138e07cea324e4081484636f2c046"
+source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
 dependencies = [
  "aes-gcm",
  "cbindgen",
@@ -1456,7 +1444,6 @@ dependencies = [
  "serde",
  "serde_json",
  "skia-safe",
- "tiny-skia",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2094,12 +2081,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "strict-num"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2231,31 +2212,6 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
-]
-
-[[package]]
-name = "tiny-skia"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
-dependencies = [
- "arrayref",
- "arrayvec",
- "bytemuck",
- "cfg-if",
- "log",
- "tiny-skia-path",
-]
-
-[[package]]
-name = "tiny-skia-path"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
-dependencies = [
- "arrayref",
- "bytemuck",
- "strict-num",
 ]
 
 [[package]]

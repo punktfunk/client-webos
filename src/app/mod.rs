@@ -5,6 +5,7 @@
 //! and `view` (geometry + draw-list building). Keeping them under `app` lets `ui`/`core`
 //! stay dependency leaves — neither reaches back into `App`.
 pub(crate) mod assets;
+pub(crate) mod draw;
 pub(crate) mod grid;
 pub(crate) mod hero;
 pub(crate) mod hosts;
@@ -16,7 +17,6 @@ pub(crate) mod nav;
 pub(crate) mod pointer;
 pub(crate) mod press;
 pub(crate) mod render;
-pub(crate) mod render_input;
 pub(crate) mod screens;
 pub(crate) mod settingsui;
 pub(crate) mod spinner;
@@ -29,14 +29,14 @@ use crate::ui::render::Rect;
 use anyhow::Result;
 
 use crate::app::hosts::HostEntry;
-use crate::app::nav::ScreenKey;
 use crate::core::event::MenuEvent;
 use crate::core::model;
 pub use crate::core::model::ConnectTarget;
 pub use crate::core::screen::{HomeFocus, PairingFocus, Screen};
+use crate::core::settings::TvSettings;
 use crate::services::discovery::Discovery;
 use crate::services::library::GameEntry;
-use crate::services::store::{self, KnownHost, Settings};
+use crate::services::store::{self, KnownHost};
 use crate::ui;
 
 /// How much a focused grid card grows. Bigger than the modal widgets' pop (they sit
@@ -53,8 +53,6 @@ pub(crate) const GRID_REVEAL_WAVE: ui::animation::Wave = ui::animation::Wave {
     span: Duration::from_millis(380),
     fade: Duration::from_millis(420),
 };
-pub(crate) const SCROLL_INDICATOR_HOLD: Duration = Duration::from_millis(700);
-pub(crate) const SCROLL_INDICATOR_FADE: Duration = Duration::from_millis(350);
 /// How long a Home status line stays up at full opacity before it fades out. The fade
 /// itself is [`OVERLAY_FADE`], the same curve the toast notification leaves on. Every line here is
 /// ambient (a load result, a wake report, a launch error) and none of them stay true
@@ -64,16 +62,8 @@ pub(crate) const HOME_STATUS_LIFETIME: Duration = Duration::from_secs(15);
 /// How long a library fetch may run before its progress line is worth putting up — avoids
 /// flashing "Loading library…" for one frame on a fast fetch.
 pub(crate) const LIBRARY_STATUS_DELAY: Duration = Duration::from_secs(1);
-/// Wider than track for rounded caps not to clip.
-const SCROLL_INDICATOR_TILE_W: u32 = 10;
-
-/// About document window size (lines). Balances GPU texture height limit vs rebuild hitch.
-const ABOUT_WINDOW_BUDGET: usize = 80;
-/// Margin (lines) before recentering the baked window.
-const ABOUT_WINDOW_MARGIN: usize = 16;
-
 /// Home status bar's vertical padding; box height is fixed at two text rows.
-const STATUS_BG_PAD: i32 = 12;
+pub(crate) const STATUS_BG_PAD: i32 = 12;
 
 /// WOL packet resend interval; silent-mode timeout before showing prompt.
 pub(crate) const WAKE_RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -98,12 +88,6 @@ pub struct WakeState {
     pub(crate) silent: bool,
     pub(crate) last_probe: Option<Instant>,
     pub(crate) probe_rx: Option<std::sync::mpsc::Receiver<crate::services::library::GamesLoaded>>,
-}
-
-/// Open dropdown on settings modal.
-pub struct DropdownState {
-    pub row: usize,
-    pub focused: usize,
 }
 
 pub struct App {
@@ -139,15 +123,16 @@ pub struct App {
     /// webOS on-screen keyboard up (moves address form from under panel).
     pub(crate) keyboard_shown: bool,
     pub(crate) identity: (String, String),
-    /// The stored settings object's fields this UI does not model, carried so a save from here
-    /// does not reset them — see [`store::Persisted::shared_base`].
-    shared_base: pf_client_core::trust::Settings,
     /// The settings-profile catalog ([`store::Persisted::profiles`]). Held rather than re-read
     /// because [`App::persist`] rebuilds the whole document from these fields, so anything not
     /// here is dropped on the next save.
     pub(crate) profiles: Vec<pf_client_core::profiles::StreamProfile>,
     /// Last tick time (for real-time scroll easing, not frame-count based).
     last_tick: Option<Instant>,
+    /// The console kit's Geist, for the screens drawn on it (`app::draw`). Owned here
+    /// because the pointer hit tests measure with it too, not only the frame; `Rc` so the
+    /// frame can borrow it beside a `&mut App`.
+    pub(crate) fonts: std::rc::Rc<pf_console_ui::theme::Fonts>,
 }
 
 /// What a finished background pairing/request-access ceremony reports back —
@@ -165,8 +150,26 @@ pub(crate) struct PairingOutcome {
 }
 
 /// The sidebar's saved-host rows.
-fn known_entries(known_hosts: &[store::KnownHost]) -> Vec<HostEntry> {
-    known_hosts.iter().cloned().map(HostEntry::Known).collect()
+/// The sidebar's rows from the saved hosts: each host, then one card per profile pinned
+/// under it (a pin whose profile has left the catalog is skipped, not shown broken).
+fn known_entries(
+    known_hosts: &[store::KnownHost],
+    profiles: &[pf_client_core::profiles::StreamProfile],
+) -> Vec<HostEntry> {
+    let mut entries = Vec::with_capacity(known_hosts.len());
+    for h in known_hosts {
+        entries.push(HostEntry::Known(h.clone()));
+        for id in &h.pinned_profiles {
+            if let Some(p) = profiles.iter().find(|p| p.id == *id) {
+                entries.push(HostEntry::Pinned {
+                    host: h.clone(),
+                    profile_id: id.clone(),
+                    label: format!("{} · {}", h.name, p.name),
+                });
+            }
+        }
+    }
+    entries
 }
 
 impl App {
@@ -197,15 +200,6 @@ impl App {
         self.home_status_sticky = sticky;
     }
 
-    /// Open modal's scroll indicator (hold-then-fade like all self-expiring overlays).
-    pub(crate) fn scroll_indicator_alpha(&self) -> Option<f32> {
-        ui::fade::hold_alpha(
-            self.render.scroll.shown_at?,
-            SCROLL_INDICATOR_HOLD,
-            SCROLL_INDICATOR_FADE,
-        )
-    }
-
     /// Status line opacity (same clock as toast, so lines leave screen identically).
     pub(crate) fn home_status_alpha(&self) -> Option<f32> {
         ui::fade::hold_alpha(
@@ -230,7 +224,7 @@ impl App {
         self.settings_ui.slider_drag = false;
     }
 
-    pub fn new(identity: (String, String)) -> Self {
+    pub fn new(identity: (String, String), fonts: std::rc::Rc<pf_console_ui::theme::Fonts>) -> Self {
         let store::Loaded {
             state: loaded,
             new_build,
@@ -243,9 +237,8 @@ impl App {
             selected_host,
             version: _,
             profiles,
-            shared_base,
         } = loaded;
-        let entries = known_entries(&known_hosts);
+        let entries = known_entries(&known_hosts, &profiles);
 
         // Catches hosts that left the list while the app was closed (migration, torn document);
         // in-session removals reconcile at their own sites.
@@ -282,9 +275,9 @@ impl App {
             detected_gamepad_type: None,
             keyboard_shown: false,
             identity,
-            shared_base,
             profiles,
             last_tick: None,
+            fonts,
         };
         // Restore the last-active sidebar host (if it's still known and paired)
         // so relaunching the app lands back on its game grid.
@@ -293,23 +286,25 @@ impl App {
                 .hosts
                 .known
                 .iter()
-                .find(|h| h.host == host && h.port == port && h.is_paired())
+                .find(|h| h.addr == host && h.port == port && h.is_paired())
             {
-                let (host, port, mgmt_port) = (h.host.clone(), h.port, h.mgmt_port);
+                let (host, port, mgmt_port) = (h.addr.clone(), h.port, h.mgmt_port);
                 app.select_host(host, port, mgmt_port);
             }
         }
         // Applies the persisted "Show logs" preference to the otherwise-ephemeral overlay.
-        if app.settings_ui.settings.show_logs {
+        if app.settings_ui.settings.show_logs() {
             crate::runtime::set_log_overlay_enabled(true);
         }
-        // Same call the Experimental toggle makes, so the persisted value and a live flip take
-        // exactly the same path into `ui::theme`.
-        app.restyle();
-        // Rasterizes the spinner's frames off the render thread (OnceLock warm-up). After
-        // `restyle`, because the cache snapshots the palette it rasterizes in.
-        std::thread::spawn(crate::app::assets::spinner_frames);
         app
+    }
+
+    /// Publish the kit's palette for this frame from the shared document's `ui_palette` —
+    /// the same row every gamepad surface reads, so the two UIs cannot differ in colour.
+    pub(crate) fn apply_ink(&self) {
+        let palette = pf_console_ui::library::palette(&self.settings_ui.settings.ui_palette);
+        crate::app::draw::set_current_palette(palette.id);
+        pf_console_ui::theme::set_ink(pf_console_ui::theme::Ink::of(palette));
     }
 
     /// Name of the host whichever host-scoped modal (Forget, Host power settings) is acting on.
@@ -318,99 +313,6 @@ impl App {
             .host_menu_index
             .and_then(|i| self.hosts.entries.get(i))
             .map(HostEntry::name)
-    }
-
-    /// Which document the settings-shaped screen that is up is editing. Read off the screen
-    /// itself — it and the Cursor sub-screen both carry their scope — so a scratch copy that
-    /// outlives its flow can't redirect the global screen's edits into it.
-    pub(crate) fn settings_scope(&self) -> menu::SettingsScope {
-        match self.nav.screen {
-            Screen::Settings(scope) | Screen::CursorSettings(scope) | Screen::ControllerSettings(scope) => scope,
-            // The Reset dialog is raised *over* the per-game list and returns to it, so the
-            // scratch state is still what's being edited — without this arm every accessor
-            // below reads Global while it is up, and the reset it confirms lands nowhere.
-            Screen::ResetGameSettings => menu::SettingsScope::Game,
-            _ => menu::SettingsScope::Global,
-        }
-    }
-
-    /// The per-game scratch state, but only while a per-game screen is actually up — the one
-    /// gate every accessor below shares, in the two forms borrowck needs.
-    pub(crate) fn editing_game(&self) -> Option<&state::gamesettings::GameSettingsState> {
-        match self.settings_scope() {
-            menu::SettingsScope::Game => self.settings_ui.game_settings.as_ref(),
-            menu::SettingsScope::Global => None,
-        }
-    }
-
-    pub(crate) fn editing_game_mut(&mut self) -> Option<&mut state::gamesettings::GameSettingsState> {
-        match self.settings_scope() {
-            menu::SettingsScope::Game => self.settings_ui.game_settings.as_mut(),
-            menu::SettingsScope::Global => None,
-        }
-    }
-
-    /// The `Settings` the open settings screen is editing: the global document, or the
-    /// per-game scratch copy. One accessor so every mutator, lock check and dropdown lookup
-    /// in `menu` sees the same value the rows were built from.
-    pub(crate) fn settings_target(&self) -> &Settings {
-        match self.editing_game() {
-            Some(gs) => &gs.merged,
-            None => &self.settings_ui.settings,
-        }
-    }
-
-    /// Spells `editing_game_mut`'s gate out rather than calling it: the fallback arm needs
-    /// `self` back, which borrowck won't grant while a returned `Option<&mut _>` is in scope.
-    pub(crate) fn settings_target_mut(&mut self) -> &mut Settings {
-        let scope = self.settings_scope();
-        match &mut self.settings_ui.game_settings {
-            Some(gs) if scope == menu::SettingsScope::Game => &mut gs.merged,
-            _ => &mut self.settings_ui.settings,
-        }
-    }
-
-    /// This game's overrides while the per-game screen is up — what decides which rows wear
-    /// a "use global" button. Empty everywhere else, so the global screen shows none.
-    pub(crate) fn editing_override(&self) -> store::SettingsOverride {
-        self.editing_game()
-            .map_or_else(store::SettingsOverride::default, |gs| gs.over)
-    }
-
-    /// The settings rows, with the platform/hardware facts the view can't reach folded in,
-    /// plus the override dot on every row this game differs from the global on.
-    pub(crate) fn settings_rows(&self) -> Vec<ui::widgets::FocusRow> {
-        let set = self.settings_scope();
-        let settings = self.settings_target();
-        let mut rows = view::settings::rows(
-            set,
-            settings,
-            self.detected_gamepad_type,
-            self.dualsense_limited(),
-            self.webos_major(),
-        );
-        let over = self.editing_override();
-        let focused = self.nav.cursor(ScreenKey::Settings);
-        for (display, (row, logical)) in rows
-            .iter_mut()
-            .zip(menu::settings_visible_logical_rows(set))
-            .enumerate()
-        {
-            menu::decorate_override(row, &over, logical, display == focused);
-        }
-        rows
-    }
-
-    /// `(row, focused, alpha)` for the open dropdown or its close-fade; `None` if neither.
-    pub(crate) fn dropdown_draw_state(&self) -> Option<(usize, usize, f32)> {
-        if let Some(dd) = &self.settings_ui.dropdown {
-            Some((dd.row, dd.focused, self.settings_ui.dropdown_fade.open_alpha()))
-        } else {
-            self.settings_ui
-                .dropdown_fade
-                .closing_frame()
-                .map(|(alpha, (row, focused))| (row, focused, alpha))
-        }
     }
 
     /// Grid geometry bridges — `view::home` is pure geometry, so these supply the two
@@ -448,8 +350,12 @@ impl App {
     /// Rebuilds the sidebar from `known_hosts`, dropping any discovered-but-unsaved rows. Every
     /// caller that mutates `known_hosts` goes through this rather than collecting the list
     /// itself, so no site has to remember to re-anchor focus.
+    pub(crate) fn refresh_entries(&mut self) {
+        self.rebuild_entries();
+    }
+
     pub(crate) fn rebuild_entries(&mut self) {
-        self.set_entries(known_entries(&self.hosts.known));
+        self.set_entries(known_entries(&self.hosts.known, &self.profiles));
     }
 
     /// The one place the sidebar row list is replaced: keeps focus on the row the user is on and
@@ -458,9 +364,6 @@ impl App {
         let before = self.hosts.entries.len();
         self.hosts.entries = entries;
         self.reanchor_sidebar_focus(before);
-        // The sidebar layer is a cached tile keyed by nothing but this flag (see `prepare_tiles`),
-        // so a rebuilt row list that doesn't set it leaves the previous host list on screen.
-        self.render.sidebar_dirty = true;
     }
 
     /// Keeps sidebar focus on the row the user is actually on after the host list changed
@@ -489,7 +392,7 @@ impl App {
 
     /// Whether `addr:port` already has a sidebar row, saved or merely discovered.
     pub(crate) fn host_listed(&self, addr: &str, port: u16) -> bool {
-        self.hosts.known.iter().any(|h| h.host == addr && h.port == port)
+        self.hosts.known.iter().any(|h| h.addr == addr && h.port == port)
             || self
                 .hosts
                 .entries
@@ -530,7 +433,7 @@ impl App {
                 .hosts
                 .known
                 .iter_mut()
-                .find(|h| h.host == found.addr && h.port == found.port);
+                .find(|h| h.addr == found.addr && h.port == found.port);
             if let Some(known) = known {
                 if !found.mac.is_empty() && known.mac != found.mac {
                     known.mac.clone_from(&found.mac);
@@ -566,7 +469,6 @@ impl App {
         if sidebar_changed {
             // Rows were appended, so the utility rows have moved.
             self.reanchor_sidebar_focus(before);
-            self.render.sidebar_dirty = true;
         }
         sidebar_changed || grid_changed
     }
@@ -605,11 +507,10 @@ impl App {
         }
         for item in loaded {
             match item {
-                crate::services::art::ArtLoaded::Card { game_id, pixmap } => {
-                    // Layout is unchanged by art arriving — queue a repaint of just that
-                    // card's tile (see `grid_cards_dirty`) rather than a full layer rebuild.
+                crate::services::art::ArtLoaded::Card { game_id, art } => {
+                    // Layout is unchanged by art arriving: only that card's cover is rebuilt.
                     self.render.grid.cards_dirty.push(game_id.clone());
-                    self.library.art.insert(game_id, pixmap);
+                    self.library.art.insert(game_id, art);
                 }
                 crate::services::art::ArtLoaded::Hero { game_id, image } => {
                     // One that's no longer of use (focus moved on) is let go of in the
@@ -644,6 +545,12 @@ impl App {
                     true
                 }
             }
+            Screen::RenameProfile => {
+                !self.screens.profile_name.text().is_empty() && {
+                    self.screens.profile_name.backspace();
+                    true
+                }
+            }
             Screen::Pairing => self.erase_pin_digit(),
             _ => false,
         }
@@ -655,7 +562,7 @@ impl App {
     /// dispatch: `main.rs`'s Back handling on Home (a no-op there, but routed
     /// through here so the policy lives in one place) and a modal's close (X)
     /// button click (`handle_mouse_click`'s `hover_close` branch below).
-    pub fn back(&mut self, screen_w: u32, screen_h: u32, fonts: &ui::text::Fonts) -> Option<ConnectTarget> {
+    pub fn back(&mut self, screen_w: u32, screen_h: u32) -> Option<ConnectTarget> {
         // Back steps focus out of the game grid (and the ⋯ column) back onto the
         // host sidebar first. Only a Back from the sidebar itself is a no-op here
         // — the menu loop turns that into the quit dialog.
@@ -678,7 +585,7 @@ impl App {
             return None;
         }
         // Every modal decides for itself where Back goes.
-        self.handle_menu_event(MenuEvent::Back, screen_w, screen_h, fonts)
+        self.handle_menu_event(MenuEvent::Back, screen_w, screen_h)
     }
 
     /// Advances every live animation one tick — the eased scroll, the focus pop,
@@ -691,10 +598,6 @@ impl App {
         self.last_tick = Some(now);
         let mut animating =
             ui::animation::ease_scroll(&mut self.render.grid.scroll, self.render.grid.scroll_target, dt);
-        // The scrolling modal's viewport, on the same ease-out as the grid. `scroll.offset`
-        // has already jumped to its new row; this is only the rendered crop catching up.
-        animating |=
-            ui::animation::ease_scroll(&mut self.render.modal.scroll_px, self.render.modal.scroll_target_px, dt);
         if let Some(t) = self.render.focus_anim {
             let duration = match self.home_focus {
                 HomeFocus::Grid(_) => ui::animation::CARD_FOCUS_POP,
@@ -706,9 +609,6 @@ impl App {
             animating = true;
         }
         if self.render.modal.fade.tick() {
-            animating = true;
-        }
-        if self.settings_ui.dropdown_fade.tick() {
             animating = true;
         }
         // The hero loading screen keeps panning for as long as the launch is on screen,
@@ -761,12 +661,6 @@ impl App {
             }
             animating = true;
         }
-        if self.render.scroll.shown_at.is_some() {
-            if self.scroll_indicator_alpha().is_none() {
-                self.render.scroll.shown_at = None;
-            }
-            animating = true;
-        }
         // The held card's submenu: its rise, and the selection band's slide between rows.
         // Both run off clocks on `CardMenu`, not off `focus_anim` — without reporting them
         // here the loop parks in `wait_for_event` mid-rise (the auto-repeat KeyDowns the
@@ -777,34 +671,46 @@ impl App {
         if self.render.grid.card_pops_running() || self.render.grid.reveal.dissolving() {
             animating = true;
         }
+        // The kit list and the two focus eases settle on their own clocks, past the pop.
+        if self.render.list.as_ref().is_some_and(|(_, l)| l.animating())
+            || self.render.sidebar_focus.animating()
+            || self.render.tab_focus.animating()
+        {
+            animating = true;
+        }
         animating
     }
 
     /// Queues the whole document for the background writer. Every mutation of settings, hosts or
     /// selection comes through here rather than writing its own slice.
     pub(crate) fn persist(&self) {
-        self.state_writer.save(store::Persisted {
-            settings: self.settings_ui.settings,
+        self.state_writer.save(self.persisted());
+    }
+
+    /// The document as this App holds it right now.
+    pub(crate) fn persisted(&self) -> store::Persisted {
+        store::Persisted {
+            settings: self.settings_ui.settings.clone(),
             known_hosts: self.hosts.known.clone(),
             selected_host: self.library.selected_host.clone(),
             // Always this build's version: whatever wrote the document last is what a future
             // migration needs to know, and that is now us.
             version: Some(store::VERSION.to_string()),
             profiles: self.profiles.clone(),
-            // Carried, never rebuilt: this UI models a subset of the stored schema, and
-            // dropping the rest here would reset the gamepad shell's own rows every time
-            // anything on this side was saved. See [`store::Persisted::shared_base`].
-            shared_base: self.shared_base.clone(),
-        });
+        }
     }
 
     /// Whether the pad in play is a `DualSense` this webOS release only partly supports — the
     /// caution the Controller row carries. The *effective* kind, so `Auto` answers for
     /// whatever is actually attached rather than for the word itself.
     pub(crate) fn dualsense_limited(&self) -> bool {
-        menu::effective_gamepad(self.settings_target(), self.detected_gamepad_type)
-            .is_some_and(store::GamepadType::is_dualsense)
-            && !crate::platform::webos::dualsense::hid_playstation_bound()
+        let settings = &self.settings_ui.settings;
+        let effective = if settings.gamepad_type() == store::GamepadType::Auto {
+            self.detected_gamepad_type.unwrap_or_default()
+        } else {
+            settings.gamepad_type()
+        };
+        effective.is_dualsense() && !crate::platform::webos::dualsense::hid_playstation_bound()
     }
 
     /// This set's webOS major, for the row captions that name it. `None` where
@@ -815,7 +721,7 @@ impl App {
 
     /// The known-host record for an address — the one place `(host, port)` is matched.
     pub(crate) fn known_host(&self, host: &str, port: u16) -> Option<&KnownHost> {
-        self.hosts.known.iter().find(|h| h.host == host && h.port == port)
+        self.hosts.known.iter().find(|h| h.addr == host && h.port == port)
     }
 
     /// The `KnownHost` record backing `selected_host`, if any — shared by every lookup
@@ -861,12 +767,12 @@ impl App {
     ) -> Option<crate::services::power::ExitPlan> {
         action.action_id()?;
         Some(crate::services::power::ExitPlan {
-            addr: known.host.clone(),
+            addr: known.addr.clone(),
             mgmt_port: known.mgmt_port.unwrap_or(crate::services::library::DEFAULT_MGMT_PORT),
             identity: self.identity.clone(),
             // Required, not merely pinned-if-known: an unpaired host would refuse the invoke
             // anyway, and a power action is the last request to send to an unverified peer.
-            pin: Some(known.fingerprint?),
+            pin: Some(known.fingerprint()?),
             action,
         })
     }
@@ -884,7 +790,7 @@ impl App {
     }
 
     pub(crate) fn known_host_mut(&mut self, host: &str, port: u16) -> Option<&mut KnownHost> {
-        self.hosts.known.iter_mut().find(|h| h.host == host && h.port == port)
+        self.hosts.known.iter_mut().find(|h| h.addr == host && h.port == port)
     }
 
     pub(crate) fn selected_known_host_mut(&mut self) -> Option<&mut KnownHost> {
@@ -898,26 +804,6 @@ impl App {
         match self.grid_card_at(idx, columns) {
             Some(game) => game,
             None => unreachable!("idx filtered to a real card before building"),
-        }
-    }
-
-    /// The current position (0.0..=1.0, see `Painter::switch`) of a `Toggle`
-    /// row's switch given its settled state `target_on` — mid-slide while
-    /// `switch_anim` is in flight *for that same row and transition*, otherwise
-    /// settled at the endpoint. `row` is the focused row being rendered; the
-    /// slide only plays for the row that actually flipped, not a same-valued
-    /// neighbor focused mid-animation.
-    pub(crate) fn toggle_frac(&self, target_on: bool, row: usize) -> f32 {
-        match self.render.modal.switch_anim {
-            Some((t, from_on, anim_row)) if anim_row == row && from_on != target_on => {
-                let f = ui::animation::anim_frac(Some(t), ui::animation::FOCUS_POP);
-                if target_on {
-                    f
-                } else {
-                    1.0 - f
-                }
-            }
-            _ => f32::from(target_on),
         }
     }
 

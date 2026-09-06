@@ -104,10 +104,22 @@ impl Connected {
         self.client.is_session_ended()
     }
 
-    /// The sentence for the menu toast when the session ended on its own. Nothing here separates
-    /// a graceful close from a drop, so one sentence covers both.
+    /// Why it ended; `Lost` is the one reason worth dialling again.
+    pub(crate) fn end_reason(&self) -> punktfunk_core::client::PunktfunkEndReason {
+        self.client.end_reason()
+    }
+
+    /// The sentence for the menu toast when the session ended on its own.
     pub(crate) fn end_message(&self) -> String {
-        "The host closed the connection".to_string()
+        use punktfunk_core::client::PunktfunkEndReason as R;
+        match self.end_reason() {
+            R::GameExited => "The game exited",
+            R::HostEnded => "The host ended the session",
+            R::HostError => "The host closed the session with an error",
+            R::Lost => "Connection lost",
+            R::None | R::Local => "The host closed the connection",
+        }
+        .to_string()
     }
 
     pub(crate) fn disconnect_quit(&self) {

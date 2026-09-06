@@ -9,11 +9,10 @@ use crate::core::screen::Screen;
 use crate::services::library::{self, LibraryError};
 use std::path::Path;
 
-/// Leaves headroom below the host's 1 MiB request limit.
-const MAX_LOG_BYTES: u64 = 1000 * 1024;
-
 /// Upload endpoint (see the Go service: POST multipart `file` field to `/upload`).
 const UPLOAD_URL: &str = "https://www.upload.dyptan.dev/upload";
+/// The tail of the log that travels; the file itself rotates at this size too.
+const MAX_LOG_BYTES: u64 = 960 * 1024;
 
 /// What the background upload thread reports back — a user-facing status line
 /// either way, shown in the Home status bar by `drain_send_logs`.
@@ -26,10 +25,10 @@ impl App {
     /// Resolves a reachable, paired host for log delivery.
     pub(crate) fn send_logs_host(&self) -> Option<HostTarget> {
         let known = self.reachable_selected_host()?;
-        let pin = known.fingerprint?;
+        let pin = known.fingerprint()?;
         Some(HostTarget {
             name: known.name.clone(),
-            addr: known.host.clone(),
+            addr: known.addr.clone(),
             mgmt_port: known.mgmt_port.unwrap_or(library::DEFAULT_MGMT_PORT),
             identity: self.identity.clone(),
             pin,
@@ -39,7 +38,7 @@ impl App {
     /// Whether "Send logs" would send directly to the host.
     pub(crate) fn send_logs_host_ready(&self) -> bool {
         self.reachable_selected_host()
-            .is_some_and(|known| known.fingerprint.is_some())
+            .is_some_and(crate::core::model::KnownHost::is_paired)
     }
 
     /// Sends to the host when available, otherwise opens developer confirmation.

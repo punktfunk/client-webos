@@ -5,7 +5,6 @@
 //! Every table had to name the same field as the other three; one of them already didn't (see
 //! `HostPower` in `docs/APP-REWORK-PLAN.md` §1, P3). Here the mapping is the array index,
 //! so there is nothing left to keep in step.
-use crate::app::screens::is_scroll_list;
 use crate::core::screen::Screen;
 
 /// A [`Screen`] without its payload — what a cursor is filed under, so the two settings
@@ -15,7 +14,6 @@ use crate::core::screen::Screen;
 pub(crate) enum ScreenKey {
     Home,
     Pairing,
-    Settings,
     AddHost,
     Wake,
     ForgetHost,
@@ -24,27 +22,25 @@ pub(crate) enum ScreenKey {
     About,
     SpeedTest,
     HostPower,
-    Diagnostics,
-    Experimental,
     HdrCalibration,
-    ControllerSettings,
-    CursorSettings,
     SendLogs,
     Collections,
     RenameCollection,
     RemoveCollection,
     ResetHdrCalibration,
-    ResetGameSettings,
+    SettingsPage,
+    RenameProfile,
+    DeleteProfile,
+    PickProfile,
 }
 
 impl ScreenKey {
-    pub const COUNT: usize = Self::ResetGameSettings as usize + 1;
+    pub const COUNT: usize = Self::PickProfile as usize + 1;
 
     pub const fn of(screen: Screen) -> Self {
         match screen {
             Screen::Home => Self::Home,
             Screen::Pairing => Self::Pairing,
-            Screen::Settings(_) => Self::Settings,
             Screen::AddHost => Self::AddHost,
             Screen::Wake => Self::Wake,
             Screen::ForgetHost => Self::ForgetHost,
@@ -53,46 +49,18 @@ impl ScreenKey {
             Screen::About => Self::About,
             Screen::SpeedTest => Self::SpeedTest,
             Screen::HostPower => Self::HostPower,
-            Screen::Diagnostics => Self::Diagnostics,
-            Screen::Experimental => Self::Experimental,
             Screen::HdrCalibration => Self::HdrCalibration,
-            Screen::CursorSettings(_) => Self::CursorSettings,
-            Screen::ControllerSettings(_) => Self::ControllerSettings,
             Screen::SendLogs => Self::SendLogs,
             Screen::Collections => Self::Collections,
             Screen::RenameCollection => Self::RenameCollection,
             Screen::RemoveCollection => Self::RemoveCollection,
             Screen::ResetHdrCalibration => Self::ResetHdrCalibration,
-            Screen::ResetGameSettings => Self::ResetGameSettings,
+            Screen::SettingsPage => Self::SettingsPage,
+            Screen::RenameProfile => Self::RenameProfile,
+            Screen::DeleteProfile => Self::DeleteProfile,
+            Screen::PickProfile => Self::PickProfile,
         }
     }
-}
-
-/// Whether `screen` is a scrolling row list or one of the sub-pages that open over one and
-/// return to it — the settings list and its pages, or the collections list and its dialogs.
-///
-/// Here rather than on [`Screen`] itself: which screens make a family is this layer's
-/// business (see [`ScreenKey::of`] and `app::screens`), not the domain's.
-pub(crate) const fn over_scroll_list(screen: Screen) -> bool {
-    if is_scroll_list(screen) {
-        return true;
-    }
-    matches!(
-        screen,
-        Screen::Experimental
-            // Included even though nothing behind it is drawn (see `screens::over_video`): this
-            // decides tile *retention*, and dropping the row band would make the return from a
-            // calibration a re-raster of the whole settings list.
-            | Screen::HdrCalibration
-            | Screen::Diagnostics
-            | Screen::CursorSettings(_)
-            | Screen::ControllerSettings(_)
-            | Screen::SendLogs
-            | Screen::RenameCollection
-            | Screen::RemoveCollection
-            | Screen::ResetHdrCalibration
-            | Screen::ResetGameSettings
-    )
 }
 
 /// The current screen, the one before it, and one focus cursor per screen.

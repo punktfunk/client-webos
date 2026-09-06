@@ -144,6 +144,12 @@ impl VideoPump {
                 && frame.part.is_none_or(|part| part.first),
             loss: self.note_loss(frame),
         };
+        // Sampled ahead of the feed so a stalled decoder is not handed one more frame first.
+        if self.stage.backpressure() {
+            if let Err(e) = self.client.request_keyframe() {
+                tracing::warn!("request_keyframe: {e:#}");
+            }
+        }
         match self.stage.submit(&wire) {
             SinkResult::Presented { decode_us } => {
                 if let Some(us) = decode_us {

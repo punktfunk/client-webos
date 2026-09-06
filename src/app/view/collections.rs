@@ -4,15 +4,10 @@
 //! A scrolling row list rather than a plain one: a host may hold every collection
 //! `MAX_COLLECTIONS` allows plus the dynamic Library entry, which is a card taller than the
 //! screen if baked into a single tile (see `view::scrolllist`).
-use crate::app::view::{icons, scrolllist};
+use crate::app::view::icons;
 use crate::core::model::KnownHost;
 use crate::ui;
-use crate::ui::render::Rect;
 use crate::ui::widgets::FocusRow;
-use crate::ui::Canvas;
-use crate::ui::ModalMetrics;
-use crate::ui::ModalScreen;
-use anyhow::Result;
 
 const TITLE: &str = "Add to";
 const MOVE_TITLE: &str = "Move to";
@@ -70,6 +65,15 @@ pub(crate) fn trailing(dynamic: bool) -> &'static [&'static str] {
 
 /// The remove dialog's subtitle: what happens to the cards it holds, which is the whole
 /// question — nothing is deleted, the games come back to Library.
+/// [`trailing`] in the kit's marks: what the row's buttons draw.
+pub(crate) fn trailing_marks(dynamic: bool) -> &'static [&'static str] {
+    if dynamic {
+        &["pencil"]
+    } else {
+        &["pencil", "trash-2"]
+    }
+}
+
 pub(crate) fn remove_subtitle(name: &str, games: usize) -> String {
     let games = match games {
         0 => "It holds no games".to_string(),
@@ -117,7 +121,7 @@ pub(crate) fn rows(host: &KnownHost, holding: Option<usize>) -> Vec<FocusRow> {
                 _ => row,
             };
             if holding == Some(i) || (holding.is_none() && library == Some(i)) {
-                row.marked(ui::theme::palette().accent)
+                row.marked()
             } else {
                 row
             }
@@ -147,33 +151,5 @@ fn count_label(count: Option<usize>) -> String {
         // Library has no count at all.
         Some(0) | None => String::new(),
         Some(n) => format!("{n} games"),
-    }
-}
-
-/// The modal as a [`ModalScreen`] — the shell only; its rows are their own tiles.
-pub(crate) struct Modal<'a> {
-    pub rows: usize,
-    /// From [`heading`].
-    pub title: &'static str,
-    /// The card being moved, named after the heading so the list says what it acts on.
-    pub card: Option<&'a str>,
-}
-
-impl ModalMetrics for Modal<'_> {
-    fn card_rect(&self, screen_w: u32, screen_h: u32, _fonts: &ui::text::Fonts) -> Rect {
-        scrolllist::layout(self.rows, screen_w, screen_h, scrolllist::COLLECTIONS_WIDTH_FRAC).0
-    }
-}
-
-impl ModalScreen for Modal<'_> {
-    fn render(&self, c: &mut Canvas, hover_close: bool) -> Result<()> {
-        scrolllist::render(
-            c,
-            self.rows,
-            scrolllist::COLLECTIONS_WIDTH_FRAC,
-            self.title,
-            self.card,
-            hover_close,
-        )
     }
 }

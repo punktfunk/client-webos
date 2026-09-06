@@ -140,25 +140,24 @@ impl App {
         match outcome.result {
             Ok(fingerprint) => {
                 tracing::info!("paired ok ({}:{})", outcome.host, outcome.port);
-                store::upsert_known_host(
-                    &mut self.hosts.known,
-                    KnownHost {
+                // Only reaches a genuinely new host — `upsert_known_host` keeps an existing
+                // record's pins and wol_auto.
+                let mut record = KnownHost {
+                    shared: pf_client_core::trust::KnownHost {
                         name: outcome.name,
-                        host: outcome.host.clone(),
+                        addr: outcome.host.clone(),
                         port: outcome.port,
-                        fingerprint: Some(fingerprint),
                         mgmt_port: outcome.mgmt_port,
                         mac: outcome.mac,
                         os: outcome.os,
-                        // Only reaches a genuinely new host — `upsert_known_host` keeps an
-                        // existing record's pins and wol_auto.
-                        collections: Some(store::new_host_collections()),
-                        ..KnownHost::default()
+                        ..Default::default()
                     },
-                );
+                    ..KnownHost::default()
+                };
+                record.set_fingerprint(fingerprint);
+                store::upsert_known_host(&mut self.hosts.known, record);
                 self.persist();
                 self.rebuild_entries();
-                self.render.sidebar_dirty = true;
                 self.nav.screen = Screen::Home;
                 self.select_host(outcome.host, outcome.port, outcome.mgmt_port);
             }

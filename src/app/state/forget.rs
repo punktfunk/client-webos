@@ -1,4 +1,5 @@
 //! The "Forget this host?" confirmation modal's logic. Rendering lives in `app::view::forget`.
+use crate::app::hosts::HostEntry;
 use crate::app::nav::ScreenKey;
 use crate::app::App;
 use crate::core::event::MenuEvent;
@@ -16,7 +17,7 @@ impl App {
         if self
             .screens
             .host_menu_index
-            .is_some_and(|i| i < self.hosts.entries.len())
+            .is_some_and(|i| self.hosts.entries.get(i).is_some_and(HostEntry::has_menu))
         {
             self.nav.enter(Screen::HostMenu, 0);
         } else {

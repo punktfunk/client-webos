@@ -67,17 +67,13 @@ impl ConsoleStore {
 
 impl SettingsStore for ConsoleStore {
     fn load(&self) -> trust::Settings {
-        let state = self.state.lock().expect(POISONED);
-        shared::to_shared(&state.shared_base, &state.settings)
+        self.state.lock().expect(POISONED).settings.clone()
     }
 
     fn save(&self, settings: &trust::Settings) {
         let snapshot = {
             let mut state = self.state.lock().expect(POISONED);
-            state.settings = shared::from_shared(settings);
-            // The shell's whole document becomes the new carried base, so the rows only IT
-            // knows about (its palette, its library view) survive this client's next save.
-            state.shared_base = settings.clone();
+            state.settings = settings.clone();
             state.clone()
         };
         // Whole document, one writer — see the module note.

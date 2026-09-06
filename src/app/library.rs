@@ -7,7 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-use tiny_skia::Pixmap;
+use crate::services::art::CardArt;
 
 use crate::app::grid::{GridLayout, Group};
 use crate::core::model::{GameEntry, KnownHost, DESKTOP_PIN_ID};
@@ -28,7 +28,7 @@ pub(crate) struct Library {
     /// [`Self::regroup`] (or drops the grid via [`Self::clear_groups`]).
     pub(crate) groups: Vec<Group>,
     /// Cover art pixmaps by game id.
-    pub(crate) art: HashMap<String, Pixmap>,
+    pub(crate) art: HashMap<String, CardArt>,
 }
 
 /// The Desktop card, as an ordinary library entry. It is a card the *client* offers rather

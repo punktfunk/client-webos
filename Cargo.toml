@@ -60,17 +60,17 @@ tracing-appender = "0.2"
 # mirrors those semantics while keeping NDL queue depth out of the decoder-pressure signal.
 # v0.34.0 adds deterministic multi-address mDNS selection, shared with the other clients.
 #
-# 🛑 A REV, not a tag, and the SAME rev for all three punktfunk crates. The console shell needs
-# pf-client-core's `desktop` feature split and `Platform::WebOS`, both merged after v0.34.0 was
-# cut. It must also be ONE source: pin punktfunk-core by tag while pf-client-core resolves it by
-# rev and cargo builds two copies whose types do not unify — the shell would then reject the
-# `GamepadPref` this crate hands it. Re-pin all three together, to the next tag that carries them.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "85bcc286ddd138e07cea324e4081484636f2c046", features = ["quic"] }
+# 🛑 A REV, not a tag, and the SAME rev for all three punktfunk crates. The pointer UI draws
+# with the console's exported kit (unom/punktfunk#646), merged after v0.34.0 was cut. It must
+# also be ONE source: pin punktfunk-core by tag while pf-client-core resolves it by rev and
+# cargo builds two copies whose types do not unify — the shell would then reject the
+# `GamepadPref` this crate hands it. Re-pin all three together, to v0.35.0 once it is cut.
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", features = ["quic"] }
 # The portable half of the client stack: `trust::Settings` (the shared settings document this
 # client now persists), the menu vocabulary, the library model, deep links. Pure Rust with no
 # Skia and no SDL, so it builds on every host — `services::store::shared` and its tests need it
 # on the dev target too.
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "85bcc286ddd138e07cea324e4081484636f2c046", default-features = false }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mDNS LAN discovery; direct dep (not via pf-client-core — see session.rs docs).
@@ -90,34 +90,29 @@ ureq = { version = "3", features = ["rustls-no-provider", "rustls-webpki-roots"]
 # aws-lc-rs also carries ML-KEM, so the QUIC/mgmt handshakes get post-quantum key exchange.
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-# Pre-stream UI rendering (software rasterizer); png-format off (already-decoded buffers only).
-tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
 
 # Linux-only (webOS cross target + dev boxes); macOS/Windows build with stub in main.rs.
 # Only genuinely platform-linked crates live here (SDL2, opus C lib, libc).
 [target.'cfg(target_os = "linux")'.dependencies]
-# ttf: SDL2_ttf + freetype on-device; text renders in Geist font. unsafe_textures
-# lets GPU compositor cache textures without TextureCreator lifetime.
-sdl2 = { version = "0.38", default-features = false, features = ["ttf", "unsafe_textures"] }
+# Window, events, pads and the GL context the console kit draws on. No `ttf`: text is the
+# kit's own (Skia + Geist), and nothing rasterizes on the CPU any more.
+sdl2 = { version = "0.38", default-features = false }
 # Opus decode (platform::webos::audio); explicit dep despite being transitive via punktfunk-core.
 opus = "0.3"
 # setpriority for video pump scheduling; explicit dep for libc::gettid calls.
 libc = "0.2"
-# The shared console shell and its Skia backend, on the TV target ONLY.
-#
-# 🛑 Narrower than `target_os = "linux"` on purpose. The `test` task builds for the HOST target,
-# which is also Linux, and the only prebuilt Skia archive keyed `gl-jpegd-jpege-pdf-textlayout`
-# that exists for us is the armv7 one — a host build would find no archive and silently compile
-# Skia from source for about an hour. Gating on the architecture keeps `task test` free of Skia
-# entirely, which is why `services::store::shared` deliberately depends on pf-client-core (no
-# Skia) rather than on the shell: its tests must run on the host.
+# The shared console shell, its drawing kit, and their Skia backend — on every Linux target,
+# so the HOST build (`task test`, aarch64) renders the pointer UI's screens to a raster surface
+# and asserts on the pixels. Skia arrives prebuilt either way: the armv7 archive from our own
+# mirror (`SKIA_BINARIES_URL`), the host one from rust-skia's release (the `test` task's env).
+# 🛑 skia-bindings never fails a missing archive — it silently builds Skia from source for about
+# an hour. Every build must log `DOWNLOAD AND INSTALL SUCCEEDED` in its skia-bindings output.
 #
 # `default-features = false` on the shell drops the Vulkan overlay — this client owns its own GL
 # surface — and `gl` asks Skia for the GLES backend the panel exposes. skia-safe keeps its
 # DEFAULT features: they carry `binary-cache` (the prebuilt fetch) and the jpeg/pdf codecs, and
-# they are what make the key `gl-jpegd-jpege-pdf-textlayout` — the one that exists.
-[target.'cfg(all(target_os = "linux", target_arch = "arm"))'.dependencies]
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "85bcc286ddd138e07cea324e4081484636f2c046", default-features = false, features = ["gl"] }
+# they are what make the key `gl-jpegd-jpege-pdf-textlayout` — the one both sources publish.
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", default-features = false, features = ["gl"] }
 # `Console::frame` draws into a `skia_safe::Canvas`, and the host owns the `DirectContext` plus
 # the surface wrapping framebuffer 0.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }

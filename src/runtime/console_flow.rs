@@ -18,6 +18,7 @@ use pf_console_ui::{Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, Input
 use super::*;
 use crate::console::Service;
 use crate::core::perf::{ArtSnapshot, Perf};
+use crate::core::settings::TvSettings;
 use crate::services::store::console::ConsoleStore;
 use crate::services::store::{shared, StateWriter};
 
@@ -127,6 +128,7 @@ pub(super) fn run(
     // Connecting card, exactly as the old menus overlap it with the loading screen.
     let mut connect: Option<(
         std::thread::JoinHandle<Result<session::Connected>>,
+        crate::app::ConnectTarget,
         store::Settings,
         bool,
     )> = None;
@@ -310,7 +312,7 @@ pub(super) fn run(
                     fp_hex,
                     launch,
                     title,
-                    profile: _,
+                    profile,
                     request_access,
                 } => {
                     if request_access {
@@ -322,9 +324,17 @@ pub(super) fn run(
                             .set_notice("Pair this TV from the classic menus first".into());
                         continue;
                     }
-                    match start_launch(&store, identity, game_controller, &addr, port, &fp_hex, launch) {
+                    let want = Launch {
+                        addr,
+                        port,
+                        fp_hex,
+                        launch,
+                        profile,
+                    };
+                    let where_ = format!("{title} on {}:{}", want.addr, want.port);
+                    match start_launch(&store, identity, game_controller, want) {
                         Ok(started) => {
-                            tracing::info!("console: launching {title} on {addr}:{port}");
+                            tracing::info!("console: launching {where_}");
                             console.session_phase(SessionPhase::Connecting);
                             connect = Some(started);
                         }
@@ -364,16 +374,17 @@ pub(super) fn run(
         // The handshake landed (or failed): the streaming loop takes it from here, and a
         // failure goes back to the menu with the reason, exactly as the old flow does.
         if connect.as_ref().is_some_and(|(h, ..)| h.is_finished()) {
-            let (handle, settings, gamepad_auto) = connect.take().expect("just checked");
-            break 'ui UiOutcome::Launch(ConnectOutcome {
+            let (handle, target, settings, gamepad_auto) = connect.take().expect("just checked");
+            break 'ui UiOutcome::Launch(Box::new(ConnectOutcome {
                 handle,
+                target,
                 settings,
                 gamepad_auto,
                 // The shell has no loading screen of its own to spend a budget on — the
                 // streaming loop starts the first-frame wait fresh.
                 first_frame_deadline: None,
                 exit_plan: exit_plan(&service, identity),
-            });
+            }));
         }
 
         // Draw.
@@ -401,13 +412,13 @@ pub(super) fn run(
         // printing the host's Xbox default over a DualSense. An explicit pick still wins:
         // someone who chose a pad kind wants its glyphs whatever is attached.
         let pad_pref = pad.map(|_| {
-            let stored = state.settings.gamepad_type;
+            let stored = state.settings.gamepad_type();
             let kind = if stored == store::GamepadType::Auto {
                 crate::platform::webos::gamepad::detect_type(game_controller).unwrap_or(stored)
             } else {
                 stored
             };
-            shared::gamepad_pref(kind)
+            crate::core::settings::gamepad_pref(kind)
         });
         if let (Some(pad), Some(pref)) = (pad, pad_pref) {
             pads.push(pad_info(pad, pref));
@@ -465,7 +476,7 @@ fn art_snapshot() -> ArtSnapshot {
 
 /// Bring up (or reuse) the shell's GL context and make it current. Split out so the caller can
 /// answer a failure by handing the screen back rather than by failing the app.
-fn bring_up<'a>(
+pub(super) fn bring_up<'a>(
     gl: &'a mut Option<ConsoleGl>,
     canvas: &sdl2::render::Canvas<sdl2::video::Window>,
 ) -> Result<&'a mut ConsoleGl> {
@@ -487,7 +498,7 @@ fn bring_up<'a>(
 /// agreeing until the next pad arrives.
 fn leave_for_classic(store: &Arc<ConsoleStore>) -> UiOutcome {
     store.edit(|state| {
-        state.settings.gamepad_ui = false;
+        state.settings.set_gamepad_ui(false);
         true
     });
     // Not a quit: `UiOutcome::Quit` ends the app. The streaming loop's menu loop re-enters
@@ -495,20 +506,13 @@ fn leave_for_classic(store: &Arc<ConsoleStore>) -> UiOutcome {
     UiOutcome::Reenter
 }
 
-/// The settings one launch runs with — the global document with this game's per-host overrides
-/// applied, then clamped like any global value. The console's copy of `ui_flow::launch_settings`,
-/// reading the store rather than `App`.
-fn launch_settings(state: &store::Persisted, addr: &str, port: u16, launch: Option<&str>) -> store::Settings {
-    let id = launch.unwrap_or(store::DESKTOP_PIN_ID);
-    let bound = state
-        .known_hosts
-        .iter()
-        .find(|h| h.host == addr && h.port == port)
-        .and_then(|h| h.game_profile(id));
-    let over = shared::game_overrides(&state.profiles, bound);
-    let mut settings = store::merge_for_game(&over, state.settings, id);
-    settings.clamp_to_caps();
-    settings
+/// What the shell committed to launch: the host, a title or the desktop, and a one-off profile.
+struct Launch {
+    addr: String,
+    port: u16,
+    fp_hex: String,
+    launch: Option<String>,
+    profile: Option<String>,
 }
 
 /// Start the connect for a launch the shell committed.
@@ -516,34 +520,40 @@ fn start_launch(
     store: &Arc<ConsoleStore>,
     identity: &(String, String),
     game_controller: &sdl2::GameControllerSubsystem,
-    addr: &str,
-    port: u16,
-    fp_hex: &str,
-    launch: Option<String>,
+    want: Launch,
 ) -> Result<(
     std::thread::JoinHandle<Result<session::Connected>>,
+    crate::app::ConnectTarget,
     store::Settings,
     bool,
 )> {
+    let Launch {
+        addr,
+        port,
+        fp_hex,
+        launch,
+        profile,
+    } = want;
     let state = store.snapshot();
     let fingerprint = state
         .known_hosts
         .iter()
-        .find(|h| h.host == addr && h.port == port)
-        .and_then(|h| h.fingerprint)
-        .or_else(|| shared::parse_fp(fp_hex))
+        .find(|h| h.addr == addr && h.port == port)
+        .and_then(crate::core::model::KnownHost::fingerprint)
+        .or_else(|| shared::parse_fp(&fp_hex))
         .context("that host isn't paired with this TV yet")?;
-    let mut settings = launch_settings(&state, addr, port, launch.as_deref());
-    let gamepad_auto = settings.gamepad_type == store::GamepadType::Auto;
+    let mut settings = shared::launch_settings(&state, &addr, port, launch.as_deref(), profile.as_deref());
+    let gamepad_auto = settings.gamepad_type() == store::GamepadType::Auto;
     settings = resolve_gamepad_type(settings, game_controller);
     let target = crate::app::ConnectTarget {
-        host: addr.to_string(),
+        host: addr,
         port,
         fingerprint,
         launch,
+        profile,
     };
-    let handle = spawn_connect(identity.clone(), target, settings)?;
-    Ok((handle, settings, gamepad_auto))
+    let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
+    Ok((handle, target, settings, gamepad_auto))
 }
 
 /// What to do to the selected host on the way out. Same rule as `App::exit_plan`: the selected
@@ -552,19 +562,19 @@ fn start_launch(
 fn exit_plan(service: &Service, identity: &(String, String)) -> Option<crate::services::power::ExitPlan> {
     let state = service.store.snapshot();
     let (host, port) = state.selected_host.clone()?;
-    let known = state.known_hosts.iter().find(|h| h.host == host && h.port == port)?;
+    let known = state.known_hosts.iter().find(|h| h.addr == host && h.port == port)?;
     known.exit_action.action_id()?;
     if !service.is_online(known) {
         tracing::debug!("exit action skipped: {host} was not reachable");
         return None;
     }
     Some(crate::services::power::ExitPlan {
-        addr: known.host.clone(),
+        addr: known.addr.clone(),
         mgmt_port: known.mgmt_port.unwrap_or(crate::services::library::DEFAULT_MGMT_PORT),
         identity: identity.clone(),
         // Required, not merely pinned-if-known: a power action is the last request to send to
         // an unverified peer, and an unpaired host would refuse it anyway.
-        pin: Some(known.fingerprint?),
+        pin: Some(known.fingerprint()?),
         action: known.exit_action,
     })
 }

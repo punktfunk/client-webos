@@ -114,20 +114,6 @@ impl<T: Copy + PartialEq> ModalFade<T> {
         }
     }
 
-    /// Re-stamps whichever fades are in flight to now — for a caller that does expensive
-    /// work between starting a fade and the first frame that can show it (rasterizing a
-    /// modal outlasts `MODAL_FADE`, so the clock is spent before there are pixels and the
-    /// card snaps in opaque). Both clocks move together, keeping a cross-fade in step.
-    pub fn restart(&mut self) {
-        let now = Instant::now();
-        if self.open_since.is_some() {
-            self.open_since = Some(now);
-        }
-        if let Some((t, _)) = self.closing.as_mut() {
-            *t = now;
-        }
-    }
-
     /// Cancels an in-flight close only if it's fading out `payload`.
     pub fn cancel_closing(&mut self, payload: T) {
         if self.closing.is_some_and(|(_, p)| p == payload) {

@@ -1,12 +1,5 @@
 //! The per-host network speed test — presentation. Logic lives in `app::state::speedtest`.
 use crate::app::state::speedtest::{recommended_kbps, SpeedTestState};
-use crate::ui;
-use crate::ui::render::Rect;
-use crate::ui::text::Fonts;
-use crate::ui::Canvas;
-use crate::ui::ModalMetrics;
-use crate::ui::ModalScreen;
-use anyhow::Result;
 
 pub(crate) const TITLE: &str = "Network speed test";
 
@@ -86,57 +79,5 @@ pub(crate) fn recommendation(state: Option<&SpeedTestState>) -> Option<u32> {
     match state {
         Some(SpeedTestState::Done { outcome, .. }) => recommended_kbps(outcome),
         _ => None,
-    }
-}
-
-/// The speed-test modal as a [`ModalScreen`].
-pub(crate) struct Modal<'a> {
-    pub state: Option<&'a SpeedTestState>,
-    pub host_name: &'a str,
-    /// `None` while the test is still running — there is nothing to apply yet.
-    pub confirm: Option<&'a crate::app::screens::confirm::Confirm>,
-}
-
-impl ModalMetrics for Modal<'_> {
-    fn card_rect(&self, screen_w: u32, screen_h: u32, fonts: &Fonts) -> Rect {
-        match self.confirm {
-            Some(confirm) => ui::tiles::confirm_dialog_card(screen_w, screen_h, fonts, &confirm.subtitle),
-            None => ui::widgets::message_modal_card(screen_w, screen_h, fonts, &status(self.state, self.host_name)),
-        }
-    }
-}
-
-impl ModalScreen for Modal<'_> {
-    fn render(&self, c: &mut Canvas, hover_close: bool) -> Result<()> {
-        let (state, host_name) = (self.state, self.host_name);
-        let failed = matches!(state, Some(SpeedTestState::Failed(_)));
-        if let Some(confirm) = self.confirm {
-            return c.confirm_dialog(
-                TITLE,
-                &confirm.subtitle,
-                if failed {
-                    ui::theme::palette().error
-                } else {
-                    ui::theme::palette().muted
-                },
-                &confirm.widgets(),
-                hover_close,
-                ui::tiles::ConfirmSurface::Glass,
-            );
-        }
-        let card = self.card_rect(c.screen_w, c.screen_h, c.fonts);
-        c.modal_shell(card, hover_close)?;
-        c.modal_header(
-            card,
-            TITLE,
-            ui::theme::palette().text,
-            &status(state, host_name),
-            if failed {
-                ui::theme::palette().error
-            } else {
-                ui::theme::palette().muted
-            },
-        )?;
-        Ok(())
     }
 }

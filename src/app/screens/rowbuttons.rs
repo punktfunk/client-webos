@@ -8,12 +8,9 @@
 //! `ui::widgets::{leading,trailing}_button_rect`, which the painter draws from and the
 //! pointer hit-tests against.
 use crate::app::nav::ScreenKey;
-use crate::app::state::hostmenu::host_menu_trailing;
 use crate::app::view;
 use crate::app::App;
 use crate::core::screen::Screen;
-use crate::ui::render::Rect;
-use crate::ui::widgets::{leading_button_rect, trailing_button_rect};
 
 /// Which of a row's buttons the cursor is on. `None` (the absence of one of these) is the
 /// row body — its own action — which is where a list opens and where Confirm means the row.
@@ -72,22 +69,8 @@ impl App {
     /// (`docs/COLLECTIONS-PLAN.md` §Risks).
     fn row_buttons(&self, row: usize) -> RowButtons {
         match self.nav.screen {
-            Screen::HostMenu => RowButtons::trailing(
-                self.host_menu_actions()
-                    .get(row)
-                    .copied()
-                    .map_or(&[][..], host_menu_trailing),
-            ),
-            Screen::Experimental => crate::app::menu::EXP_ROWS.get(row).map_or_else(
-                || RowButtons::trailing(&[]),
-                |&r| {
-                    RowButtons::trailing(view::experimental::trailing(r, &self.settings_ui.settings)).reserve_mark(
-                        view::experimental::trailing_mark_reserved(r, &self.settings_ui.settings),
-                    )
-                },
-            ),
             // One row, one button: the tick that finishes the measurement.
-            Screen::HdrCalibration => RowButtons::trailing(view::hdrcalibration::ACTION_ICONS),
+            Screen::HdrCalibration => RowButtons::trailing(view::hdrcalibration::ACTION_MARKS),
             Screen::Collections => self
                 .selected_known_host()
                 .and_then(|host| host.collections().get(row))
@@ -132,20 +115,5 @@ impl App {
         // it here read as the row losing and regaining focus. Same as the sidebar's ⋯, which
         // `App::set_home_focus` never pops, and as the hover path (`HoverChange`).
         true
-    }
-
-    /// Which button of row `row` the pointer at `(x, y)` is over, given that row's on-screen
-    /// rect. `None` between them, or on a row with none — which reads as the row body,
-    /// exactly as a click that misses the ⋯ always has.
-    pub(crate) fn row_button_at(&self, row: usize, row_rect: Rect, x: i32, y: i32) -> Option<RowButton> {
-        let buttons = self.row_buttons(row);
-        if buttons.leading && leading_button_rect(row_rect).contains_point((x, y)) {
-            return Some(RowButton::Leading);
-        }
-        (0..buttons.trailing.len())
-            .find(|&i| {
-                trailing_button_rect(row_rect, buttons.trailing.len(), i, buttons.mark_reserved).contains_point((x, y))
-            })
-            .map(RowButton::Trailing)
     }
 }

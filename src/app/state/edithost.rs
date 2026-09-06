@@ -14,7 +14,7 @@ impl App {
         let Some(HostEntry::Known(h)) = self.hosts.entries.get(idx) else {
             return;
         };
-        self.screens.add_host = TextField::from_host_port(&h.host, h.port);
+        self.screens.add_host = TextField::from_host_port(&h.addr, h.port);
         self.screens.edit_host_index = Some(idx);
         self.screens.host_menu_index = None;
         self.nav.screen = Screen::EditHost;
@@ -46,28 +46,23 @@ impl App {
             return;
         };
         let (host, port) = self.screens.add_host.host_and_port();
-        if host == old.host && port == old.port {
+        if host == old.addr && port == old.port {
             self.screens.edit_host_index = None;
             self.nav.screen = Screen::Home;
             return;
         }
 
         // Drop old record before upsert to avoid stale entry (upsert_known_host keys on (host, port))
-        self.hosts.known.retain(|k| !(k.host == old.host && k.port == old.port));
+        self.hosts.known.retain(|k| !(k.addr == old.addr && k.port == old.port));
         store::upsert_known_host(
             &mut self.hosts.known,
             store::KnownHost {
-                name: old.name.clone(),
-                host: host.clone(),
-                port,
-                fingerprint: old.fingerprint,
-                mgmt_port: old.mgmt_port,
-                mac: old.mac.clone(),
-                os: old.os.clone(),
-                wol_auto: old.wol_auto,
-                exit_action: old.exit_action,
-                games: old.games.clone(),
-                collections: old.collections.clone(),
+                shared: pf_client_core::trust::KnownHost {
+                    addr: host.clone(),
+                    port,
+                    ..old.shared.clone()
+                },
+                ..old.clone()
             },
         );
         // The address is the cache key, so the old one's art is now orphaned.
@@ -76,7 +71,7 @@ impl App {
         self.rebuild_entries();
 
         // Keep selection updated to new address
-        if self.library.selected_host.as_ref() == Some(&(old.host.clone(), old.port)) {
+        if self.library.selected_host.as_ref() == Some(&(old.addr.clone(), old.port)) {
             self.library.selected_host = Some((host.clone(), port));
         }
         self.set_home_focus(HomeFocus::Sidebar(
@@ -87,7 +82,6 @@ impl App {
                 .unwrap_or(0),
         ));
         self.screens.edit_host_index = None;
-        self.render.sidebar_dirty = true;
         self.render.grid.dirty = true;
         self.nav.screen = Screen::Home;
     }

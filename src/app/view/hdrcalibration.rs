@@ -4,19 +4,10 @@
 //! plane underneath — so the card is pinned to the bottom of the screen and kept short, clear of
 //! the windows, which sit above centre (see `WINDOW_CENTER_Y`). Logic lives in `app::state::hdrcalibration`.
 use crate::app::state::hdrcalibration::HdrStep;
-use crate::app::view::icons;
 use crate::core::model::{self, HdrDisplay};
 use crate::core::pq;
 use crate::platform::webos::hdr_pattern::Pattern;
 use crate::services::hevc::Patch;
-use crate::ui;
-use crate::ui::render::Rect;
-use crate::ui::text::Fonts;
-use crate::ui::widgets::FocusRow;
-use crate::ui::Canvas;
-use crate::ui::ModalMetrics;
-use crate::ui::ModalScreen;
-use anyhow::Result;
 
 /// The "Clear HDR calibration?" dialog — the Calibrate row's delete button, the same one a
 /// collection row carries.
@@ -31,7 +22,7 @@ pub const ROW_COUNT: usize = 1;
 pub const ROW_SLIDER: usize = 0;
 
 /// Gap between the card's bottom edge and the bottom of the screen, as a fraction of height.
-const BOTTOM_MARGIN_FRAC: f32 = 0.04;
+pub(crate) const BOTTOM_MARGIN_FRAC: f32 = 0.04;
 
 /// Where the mosaic centres vertically, as a fraction of picture height — above centre, clear of
 /// the card pinned to the bottom of the screen.
@@ -72,32 +63,12 @@ pub fn subtitle(step: HdrStep, stalled: bool) -> &'static str {
     }
 }
 
-/// The step's slider, with the advance/commit button on its right end.
-#[must_use]
-pub fn rows(step: HdrStep, display: HdrDisplay) -> Vec<FocusRow> {
-    // No label and no caption: the card's title says which measurement this is and the subtitle
-    // says what to look for, so the row is the track, its value and its button. The width the
-    // text would have taken goes to the track.
-    vec![
-        FocusRow::slider(icons::ICON_SUN, "", step.value_text(display), step.fraction(display))
-            .with_trailing(ACTION_ICONS),
-    ]
-}
-
 /// The button that advances a step, and commits on the last one — a trailing button like a
 /// collection row's rename and remove, reached and lit the same way (`screens::rowbuttons`).
 /// One tick throughout: the subtitle says which step this is, so the button only ever means
 /// "this measurement is done".
-pub const ACTION_ICONS: &[&str] = &[icons::ICON_CHECK];
-
-/// The card, pinned low. Everything above it belongs to the pattern.
-#[must_use]
-pub fn card_rect(screen_w: u32, screen_h: u32, fonts: &Fonts, step: HdrStep, stalled: bool) -> Rect {
-    let card = ui::widgets::list_modal_card_rect(screen_w, screen_h, fonts, subtitle(step, stalled), ROW_COUNT);
-    let margin = (screen_h as f32 * BOTTOM_MARGIN_FRAC).round() as i32;
-    let y = (screen_h as i32 - margin - card.height() as i32).max(0);
-    Rect::new(card.x(), y, card.width(), card.height())
-}
+/// The row's one trailing button: the tick that finishes a step.
+pub const ACTION_MARKS: &[&str] = &["check"];
 
 /// The mastering volume to declare while `step` is being measured.
 ///
@@ -237,41 +208,6 @@ fn mosaic(area: f32, a: u16, b: u16) -> Vec<Patch> {
         }
     }
     patches
-}
-
-/// The calibration card as a [`ModalScreen`].
-pub(crate) struct Modal {
-    pub step: HdrStep,
-    pub display: HdrDisplay,
-    pub stalled: bool,
-}
-
-impl ModalMetrics for Modal {
-    fn card_rect(&self, screen_w: u32, screen_h: u32, fonts: &Fonts) -> Rect {
-        card_rect(screen_w, screen_h, fonts, self.step, self.stalled)
-    }
-
-    fn content_rect(&self, card: Rect, fonts: &Fonts) -> Option<Rect> {
-        Some(ui::widgets::list_modal_content_rect(
-            card,
-            fonts,
-            subtitle(self.step, self.stalled),
-            ROW_COUNT,
-        ))
-    }
-}
-
-impl ModalScreen for Modal {
-    fn render(&self, c: &mut Canvas, hover_close: bool) -> Result<()> {
-        let card = self.card_rect(c.screen_w, c.screen_h, c.fonts);
-        c.list_modal_screen(
-            card,
-            self.step.label(),
-            subtitle(self.step, self.stalled),
-            &rows(self.step, self.display),
-            hover_close,
-        )
-    }
 }
 
 impl HdrStep {

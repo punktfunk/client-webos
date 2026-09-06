@@ -1,5 +1,4 @@
 pub mod audio;
-pub mod compositor;
 pub mod cursor;
 pub mod device;
 pub(crate) mod dl;
@@ -16,5 +15,4 @@ pub mod luna;
 pub mod mouse;
 pub mod ndl;
 pub mod sdl_webos;
-pub mod text_sdl;
 pub mod usb_audio;

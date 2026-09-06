@@ -1,58 +1,27 @@
+use super::overlay::{self, ConfirmAction, ConfirmDialog, Notification};
 use super::*;
-use crate::app::render::ctx::RenderCtx;
+use crate::console::ConsoleGl;
+use crate::core::settings::TvSettings;
 use crate::services::store::ExitAction;
 use crate::ui::render::Size;
-
-/// Uploads one rasterized spinner frame as `tile::spinner(idx)`'s texture.
-fn upload_spinner(
-    compositor: &mut Compositor,
-    texture_creator: &sdl2::render::TextureCreator<sdl2::video::WindowContext>,
-    idx: usize,
-) -> Result<()> {
-    let tile = tile::spinner(idx);
-    if compositor.has_tile(tile) {
-        return Ok(());
-    }
-    if let Some(frame) = crate::app::assets::spinner_frames().get(idx) {
-        compositor.upload(texture_creator, tile, frame, false)?;
-    }
-    Ok(())
-}
-
-/// The settings one launch runs with: the global document with `target`'s per-game
-/// overrides applied. The single merge point — everything downstream (`spawn_connect`,
-/// `session::connect`, the stream loop) reads this one copy.
-///
-/// Clamped to caps afterwards exactly like a global value, so an override a TV can't
-/// satisfy degrades instead of reaching the wire.
-fn launch_settings(app: &App, target: &crate::core::model::ConnectTarget) -> crate::services::store::Settings {
-    use crate::services::store::{shared, DESKTOP_PIN_ID};
-    let id = target.launch.as_deref().unwrap_or(DESKTOP_PIN_ID);
-    let bound = app
-        .known_host(&target.host, target.port)
-        .and_then(|h| h.game_profile(id));
-    let over = shared::game_overrides(&app.profiles, bound);
-    let mut settings = crate::services::store::merge_for_game(&over, app.settings_ui.settings, id);
-    settings.clamp_to_caps();
-    settings
-}
 
 /// Runs the UI (host list -> pairing -> settings) until the user confirms a
 /// connect target or the system asks the app to close (`None`). A plain
 /// function, not a closure — a closure capturing `canvas`/`events` by
 /// reference would hold that borrow for as long as the closure value exists,
 /// which conflicts with using them again in the streaming loop right after.
+///
+/// Draws on the console's GL context (`console::gl`), the same one the shell uses: every
+/// screen draws itself on the kit (`app::draw`), the overlays too (`runtime::overlay`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_ui_flow(
     canvas: &mut sdl2::render::Canvas<sdl2::video::Window>,
-    compositor: &mut Compositor,
-    texture_creator: &sdl2::render::TextureCreator<sdl2::video::WindowContext>,
+    gl: &mut Option<ConsoleGl>,
     events: &mut sdl2::EventPump,
     game_controller: &sdl2::GameControllerSubsystem,
     controller: &mut Option<GameController>,
     identity: &(String, String),
     display_mode: sdl2::video::DisplayMode,
-    fonts: &crate::ui::text::Fonts,
     initial_status: Option<String>,
     initial_toast: Option<String>,
 ) -> Result<UiOutcome> {
@@ -65,25 +34,30 @@ pub(super) fn run_ui_flow(
     // every 40ms spinner frame.
     const TICK_BUDGET: Duration = Duration::from_millis(16);
     canvas.window_mut().show();
-    let mut app = App::new(identity.clone());
+    // Both menus need it now; without a GL context there is nothing to draw with.
+    let gl = console_flow::bring_up(gl, canvas).context("menu: GL host")?;
+    let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
+    tracing::info!(
+        "menu fonts: {} (the kit's embedded faces)",
+        kit_fonts
+            .font(pf_console_ui::theme::W::Regular, 16.0)
+            .typeface()
+            .family_name()
+    );
+    let mut app = App::new(identity.clone(), kit_fonts.clone());
+    // The kit widgets step on real time, like the shell's do.
+    let mut last_frame = Instant::now();
     // Re-poll pad type (ControllerDeviceAdded fires once per connect, not per menu entry).
     app.set_gamepad_type(gamepad::detect_type(game_controller));
     // Seeded here for the same reason: the hotplug events fire once per connect, and this
     // entry may follow one. Refreshed on both arms below.
     let mut pad_connected = gamepad::any_pad_connected(game_controller);
-    // GPU tile cache (render loop's, not App's). Recreated per menu entry.
-    let mut tiles = crate::ui::cache::TileStore::new();
-    // Upload spinner frames upfront (avoids lazy allocation stall during first spin cycle).
-    for idx in 0..crate::ui::spinner::FRAMES {
-        upload_spinner(compositor, texture_creator, idx)?;
-    }
     // Status from last connect attempt (sticky so reload progress doesn't erase it).
     if initial_status.is_some() {
         app.set_home_status(initial_status, true);
     }
-    // Toast widget (same as stream loop). Shown once as Home re-appears.
-    let mut notif = crate::ui::widgets::Notification::new();
-    let mut toast = super::toast::Toast::default();
+    // Toast (same as the stream loop). Shown once as Home re-appears.
+    let mut notif = Notification::new();
     if let Some(msg) = initial_toast {
         notif.show(msg);
     }
@@ -91,7 +65,6 @@ pub(super) fn run_ui_flow(
     // lifetime so repeat draws of the same (font, text, color) reuse an
     // already-rasterized+premultiplied `Pixmap` instead of re-rasterizing
     // freetype glyphs on every ~60fps tick.
-    let mut text_cache = crate::ui::text::TextCache::new();
     let mut input = UiInput::default();
     // Owned handle (it just clones the video subsystem's refcount), so taking it
     // here doesn't hold a borrow on `canvas` for the rest of the loop.
@@ -112,6 +85,7 @@ pub(super) fn run_ui_flow(
     // `run_inner` to join once the launch animation finishes.
     let mut connect_handle: Option<(
         std::thread::JoinHandle<Result<session::Connected>>,
+        crate::app::ConnectTarget,
         store::Settings,
         bool,
     )> = None;
@@ -122,23 +96,16 @@ pub(super) fn run_ui_flow(
     let mut yellow_held = false;
     let mut home_held = false;
     let mut log_overlay_last: Option<Instant> = None;
-    // The two overlays' own rasterized-text cache, long-lived and separate from anything
-    // the menu owns: their content is dynamic (a log tail, per-frame figures), so it must
-    // not settle into the UI cache — and rebuilding at ~2Hz from an empty map, as this
-    // used to, threw away every glyph run the previous rebuild had already rasterized.
-    let mut overlay_text = crate::ui::text::TextCache::with_capacity(OVERLAY_TEXT_CAP);
-    // Cache last overlay tile size for idle frames (no re-render if size stable).
-    let mut log_overlay_dims: Option<(u32, u32)> = None;
+    // The log tail's lines, refreshed on the ~2Hz cadence rather than read per frame.
+    let mut log_lines: Option<Vec<String>> = None;
     // `quit_dialog_was_active` catches the close-fade's final frame so it gets one last
     // redraw-on-change tick to wipe the dialog off the menu.
     let mut quit_dialog = ConfirmDialog::new(
         "Quit app?",
         "Punktfunk will close and you'll return to the webOS home screen.",
-        crate::ui::widgets::confirm_buttons(
-            Some(crate::ui::theme::icons().close),
-            "Quit",
-            crate::ui::theme::palette().error,
-        ),
+        Some(crate::app::view::icons::ICON_CLOSE),
+        "Quit",
+        crate::app::screens::confirm::Tone::Danger,
     );
     let mut exit_held = false;
     // Controller routes to the quit dialog the same way it routes to the disconnect
@@ -148,7 +115,6 @@ pub(super) fn run_ui_flow(
     // One-shot: warm the modal text/shadow/freetype caches on the first idle tick
     // (Home already painted by then) so the first Settings/host-menu open doesn't
     // hitch on cold rasterization. Reset per menu entry — `text_cache` is too.
-    let mut prewarmed = false;
     'ui: loop {
         // Start of this tick, for the loop's own pacing against `TICK_BUDGET`.
         let frame_start = Instant::now();
@@ -203,7 +169,7 @@ pub(super) fn run_ui_flow(
         if app.launch_anim.is_none() {
             if let Some(ev) = input.nav_repeat_due() {
                 dirty = true;
-                match dispatch_menu_event(&mut app, ev, display_mode, fonts) {
+                match dispatch_menu_event(&mut app, ev, display_mode) {
                     EventAction::Next => {}
                     EventAction::Launch => break 'ui,
                 }
@@ -246,11 +212,11 @@ pub(super) fn run_ui_flow(
                         .clone()
                         .unwrap_or_else(|| store::DESKTOP_PIN_ID.to_string()),
                 ));
-                let mut settings = launch_settings(&app, &target);
-                let gamepad_auto = settings.gamepad_type == store::GamepadType::Auto;
+                let mut settings = app.launch_settings(&target);
+                let gamepad_auto = settings.gamepad_type() == store::GamepadType::Auto;
                 settings = resolve_gamepad_type(settings, game_controller);
-                let handle = spawn_connect(identity.clone(), target, settings)?;
-                connect_handle = Some((handle, settings, gamepad_auto));
+                let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
+                connect_handle = Some((handle, target, settings, gamepad_auto));
             }
         }
         // Without a hero the screen is handed to the streaming loop at the end of the
@@ -262,7 +228,7 @@ pub(super) fn run_ui_flow(
             // `is_finished` is monotonic, so this needs no latch of its own.
             let connect = match connect_handle.as_ref() {
                 _ if CONNECT_FAILED.load(Ordering::Relaxed) => Connect::Failed,
-                Some((h, _, _)) if !h.is_finished() => Connect::Pending,
+                Some((h, ..)) if !h.is_finished() => Connect::Pending,
                 _ => Connect::Done,
             };
             // `presented`, not `presenting`: the hero's exit crossfades into the video plane,
@@ -343,7 +309,7 @@ pub(super) fn run_ui_flow(
             // The quit dialog owns input while open — navigate it only, don't let the
             // event reach the menu underneath (same split as the streaming loop).
             if quit_dialog.is_open() {
-                match quit_dialog.handle_event(&event, display_mode.w as u32, display_mode.h as u32, fonts) {
+                match quit_dialog.handle_event(&event, &kit_fonts, display_mode.w as u32, display_mode.h as u32) {
                     Some(ConfirmAction::Confirmed) => {
                         tracing::info!("quit confirmed from menu");
                         return Ok(quit(&app));
@@ -365,7 +331,7 @@ pub(super) fn run_ui_flow(
                 dirty = true;
                 continue;
             }
-            match handle_ui_event(&mut app, event, &mut input, display_mode, fonts, &mut dirty) {
+            match handle_ui_event(&mut app, event, &mut input, display_mode, &mut dirty) {
                 EventAction::Next => {}
                 EventAction::Launch => break 'ui,
             }
@@ -383,7 +349,7 @@ pub(super) fn run_ui_flow(
             }
         }
         let rect = wants_text.then(|| {
-            app.address_field_rect(display_mode.w as u32, display_mode.h as u32, fonts)
+            app.address_field_rect(display_mode.w as u32, display_mode.h as u32)
                 .map(|r| sdl2::rect::Rect::new(r.x(), r.y(), r.width(), r.height()))
         });
         text_input.set_active(wants_text, rect.flatten());
@@ -404,23 +370,18 @@ pub(super) fn run_ui_flow(
         }
         // Polled every tick like the streaming loop's toast, not gated behind
         // `content_dirty` — its own fade needs frames regardless of anything else.
-        let notif_frame = notif.frame();
+        let notif_frame = notif.frame().map(|(t, a)| (t.to_string(), a));
         // The dip has played out (see `App::press`) — the tile springs back.
         if app.poll_press() {
             dirty = true;
         }
         let animating = app.tick_animations()
-            || app.render.grid.tiles_pending
             || !app.render.grid.reveal.is_revealed()
             || quit_dialog_active
             || notif_frame.is_some();
         let log_overlay_due = log_overlay_state() != LogOverlayState::Off
             && log_overlay_last.is_none_or(|t| t.elapsed() >= Duration::from_millis(500));
         if !dirty && !animating && !log_overlay_due {
-            if !prewarmed {
-                prewarmed = true;
-                app.prewarm_modal_caches(&mut text_cache, fonts, display_mode.w as u32, display_mode.h as u32)?;
-            }
             // Blocked on the event queue rather than asleep for the rest of the budget:
             // nothing on this branch is animating, so the next thing that can change a pixel
             // is an SDL event, and waiting for it both wakes the SoC less often and drops the
@@ -433,152 +394,71 @@ pub(super) fn run_ui_flow(
             }
             continue;
         }
-        let content_dirty = dirty;
         dirty = false;
-        // Advance per-tick app state (card size, modal fades) exactly once before compose.
-        let screen_changed = app.advance_frame(display_mode.w as u32);
-        let updated = {
-            let mut ctx = RenderCtx::new(
-                &mut tiles,
-                &mut text_cache,
-                fonts,
-                Size::new(display_mode.w as u32, display_mode.h as u32),
-                content_dirty,
-                screen_changed,
-            );
-            app.prepare_tiles(&mut ctx)?
-        };
-        // Free old textures before uploading new (reduce peak memory during scroll).
-        for tile in std::mem::take(&mut app.render.evicted_tiles) {
-            compositor.drop_tile(tile);
+        // Advance per-tick app state (card size, modal fades) exactly once before drawing.
+        app.advance_frame(display_mode.w as u32);
+        app.prepare_frame(Size::new(display_mode.w as u32, display_mode.h as u32));
+        // The log tail's text is read on the 500 ms cadence; between reads the last lines
+        // are drawn as they were, so an animating menu does not lock the log per frame.
+        if log_overlay_due {
+            log_overlay_last = Some(Instant::now());
+            log_lines = log_overlay_lines();
+        } else if log_overlay_state() == LogOverlayState::Off {
+            log_lines = None;
         }
-        // Two families upload from outside the tile store (the spinner's pre-rasterized
-        // frames, the hero's raw decoded cover art); everything else is a tile the store
-        // just built.
-        for id in updated {
-            if let Some(idx) = tile::spinner_index(id) {
-                upload_spinner(compositor, texture_creator, idx)?;
-            } else if id == tile::HERO {
-                if let Some(hero) = app.render.hero.uploaded_image() {
-                    compositor.upload_raw(
-                        texture_creator,
-                        id,
-                        hero.width,
-                        hero.height,
-                        sdl2::pixels::PixelFormatEnum::RGB565,
-                        &hero.pixels,
-                    )?;
-                }
-            } else if let Some(pm) = tiles.get(id) {
-                // The sidebar strip is the one tile that covers everything under it.
-                let opaque = id == tile::SIDEBAR;
-                compositor.upload(texture_creator, id, pm, opaque)?;
+        // The frame, on the GL context. Layout is in `display_mode` units; the drawable is
+        // documented to differ from the window on webOS (handoff trap 10), so it is scaled
+        // rather than assumed equal.
+        let (dw, dh) = canvas.window().drawable_size();
+        {
+            let surface = gl.surface(dw, dh)?;
+            let c = surface.canvas();
+            c.clear(app.frame_clear_color());
+            c.reset_matrix();
+            c.scale((
+                dw as f32 / display_mode.w.max(1) as f32,
+                dh as f32 / display_mode.h.max(1) as f32,
+            ));
+            // Home, the modals, the launch transition, then the overlays (`app::draw`,
+            // `runtime::overlay`).
+            app.apply_ink();
+            kit_fonts.begin_frame();
+            let dt = last_frame.elapsed().as_secs_f64().min(0.1);
+            last_frame = Instant::now();
+            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
+            app.draw_home(&frame, dt);
+            app.draw_modals(&frame, dt);
+            app.draw_launch(&frame);
+            if let Some(lines) = &log_lines {
+                overlay::log(&frame, lines, 1.0);
             }
-        }
-        // The launch backdrop's dissolve: its mask is the one texture that changes every frame
-        // it is up, so it is uploaded here rather than through the tile store (which caches by
-        // content) — a few KB, for the second or so the wave runs.
-        if app.render.hero.dissolving() {
-            let (mw, mh, px) = app.render.hero.dissolve_mask(frame_start);
-            compositor.upload_raw(
-                texture_creator,
-                tile::HERO_MASK,
-                mw,
-                mh,
-                sdl2::pixels::PixelFormatEnum::ABGR8888,
-                px,
-            )?;
-        }
-        // The grid's own reveal dissolve — same reasoning as the hero mask above.
-        if app.render.grid.reveal.dissolving() {
-            let (mw, mh, px) = app.render.grid.reveal.dissolve_mask(frame_start);
-            compositor.upload_raw(
-                texture_creator,
-                tile::GRID_REVEAL_MASK,
-                mw,
-                mh,
-                sdl2::pixels::PixelFormatEnum::ABGR8888,
-                px,
-            )?;
-        }
-        let mut cmds = app.draw_list(&tiles, display_mode.w as u32, display_mode.h as u32, fonts);
-        // Appended into the same single draw list/present as the rest of the
-        // screen — this loop has no separate overlay pass (see the streaming
-        // loop's `tile::LOG_OVERLAY` handling for why that one differs).
-        //
-        // Text is only re-rendered/re-uploaded when `log_overlay_due` (~2Hz) —
-        // otherwise every animation tick (scroll, focus pop, hover) while the
-        // overlay is on would re-rasterize and re-upload it on every single
-        // frame instead of twice a second, which is what made the menu feel
-        // laggy with the overlay enabled (the streaming loop already gated
-        // this correctly; this one didn't).
-        if let Some(lines) = log_overlay_lines() {
-            if log_overlay_due {
-                log_overlay_last = Some(Instant::now());
-                match crate::ui::rasterize(
-                    crate::ui::tiles::LogOverlayTile {
-                        screen_w: display_mode.w as u32,
-                        lines: &lines,
-                    },
-                    &mut overlay_text,
-                    fonts,
-                ) {
-                    Ok(tile) => {
-                        log_overlay_dims = Some((tile.width(), tile.height()));
-                        compositor.upload(texture_creator, tile::LOG_OVERLAY, &tile, false)?;
-                    }
-                    Err(e) => tracing::warn!("log overlay render failed: {e:#}"),
-                }
+            if let Some((text, alpha)) = &notif_frame {
+                overlay::toast(&frame, text, *alpha);
             }
-            if let Some((tw, th)) = log_overlay_dims {
-                cmds.push(DrawCmd::Tex {
-                    tile: tile::LOG_OVERLAY,
-                    dst: crate::ui::render::Rect::new(0, display_mode.h - th as i32, tw, th),
-                    alpha: 0xff,
-                });
-            }
+            quit_dialog.draw(&frame);
         }
-        toast.draw(
-            compositor,
-            texture_creator,
-            (fonts, &mut overlay_text),
-            &notif_frame,
-            display_mode.w,
-            &mut cmds,
-        )?;
-        // Quit dialog overlay, appended to this loop's single command list rather than
-        // getting its own present (unlike the stream, which draws over the video plane).
-        quit_dialog.draw(
-            compositor,
-            texture_creator,
-            fonts,
-            crate::ui::render::Size::new(display_mode.w as u32, display_mode.h as u32),
-            // Blurrable: this loop's backdrop is the framebuffer.
-            true,
-            &mut cmds,
-        )?;
-        canvas.set_blend_mode(sdl2::render::BlendMode::None);
-        let bg = app.frame_clear_color();
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(bg.r, bg.g, bg.b, bg.a));
-        canvas.clear();
-        compositor.present(canvas, &cmds)?;
-        canvas.present();
+        gl.flush();
+        canvas.window().gl_swap_window();
         let elapsed = frame_start.elapsed();
         if elapsed < TICK_BUDGET {
             std::thread::sleep(TICK_BUDGET - elapsed);
         }
     }
     text_input.stop();
+    // Atlases go back before a stream takes the GPU; the context and its compiled shaders
+    // stay, so the next entry is not a cold start.
+    gl.release_resources();
     Ok(match connect_handle {
-        Some((handle, settings, gamepad_auto)) => UiOutcome::Launch(ConnectOutcome {
+        Some((handle, target, settings, gamepad_auto)) => UiOutcome::Launch(Box::new(ConnectOutcome {
             handle,
+            target,
             settings,
             gamepad_auto,
             first_frame_deadline: app.render.hero.first_frame_deadline(),
             // Carried into the stream so a Quit from there honours it too — that path never
             // comes back through this loop.
             exit_plan: app.exit_plan(),
-        }),
+        })),
         None => quit(&app),
     })
 }

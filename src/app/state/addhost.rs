@@ -37,14 +37,16 @@ impl App {
         };
         store::upsert_known_host(
             &mut self.hosts.known,
+            // Only reaches a genuinely new host: `upsert_known_host` keeps an existing record's
+            // pins, wol_auto and fingerprint, so re-adding a paired host neither unpairs it
+            // nor resets its preferences.
             KnownHost {
-                name,
-                host: host.clone(),
-                port,
-                // Only reaches a genuinely new host: `upsert_known_host` keeps an existing
-                // record's pins, wol_auto and fingerprint, so re-adding a paired host neither
-                // unpairs it nor resets its preferences.
-                collections: Some(store::new_host_collections()),
+                shared: pf_client_core::trust::KnownHost {
+                    name,
+                    addr: host.clone(),
+                    port,
+                    ..Default::default()
+                },
                 ..KnownHost::default()
             },
         );

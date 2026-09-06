@@ -8,65 +8,34 @@ use std::time::Instant;
 
 use crate::app::{grid, hero, modal};
 use crate::ui;
-use crate::ui::render::TileId;
 
+#[derive(Default)]
 pub(crate) struct RenderState {
     /// The connecting screen's backdrop, and every clock it runs on.
     pub(crate) hero: hero::Hero,
-    /// Scroll state for overflowing modal content.
-    pub(crate) scroll: ui::scroll::ScrollWindow,
-    /// Settings' scroll position, stashed while About borrows `scroll` for its own document —
-    /// restored on return so the focus highlight doesn't end up outside the visible rows.
-    pub(crate) settings_scroll: ui::scroll::ScrollWindow,
-    /// Window slice of baked About document.
-    pub(crate) content_window: ui::scroll::ContentWindow,
     /// The About document's source lines, built once on first open. ~10,000 static string
     /// slices; cheap to hold, wasteful to rebuild per frame.
     pub(crate) about_lines: Vec<&'static str>,
     /// `about_lines` wrapped to a body width, flattened into one list of visual lines (see
-    /// `view::about::wrap_document`) — the unit `scroll`/`content_window` actually scroll over,
+    /// `draw::about::wrap_document`) — the unit About scrolls over,
     /// since a source line's wrapped length varies and only the flattened list has a uniform
     /// per-unit stride. Keyed by the body width it was wrapped for, rebuilt if that width
     /// changes.
     pub(crate) about_wrapped: Option<(u32, Vec<String>)>,
     /// Whether the Magic Remote's pointer is currently hovering a modal's close (X) button.
     pub(crate) hover_close: bool,
-    pub(crate) sidebar_gen: u64,
-    pub(crate) sidebar_dirty: bool,
-    /// The theme epoch the sidebar strip was baked in. Its own field because the strip is
-    /// versioned by `sidebar_gen` rather than by `cache::version`, so the epoch that stales
-    /// every other tile passes it by — and its fill is one of the things a look changes.
-    pub(crate) sidebar_styled_at: u64,
-    /// Tiles whose GPU texture this frame released — drained by the render loop, which does
-    /// the actual `drop_tile`. Nothing to do with the style: a Theme pick stales tiles through
-    /// `ui::theme::epoch` folded into every cache version, not through this list.
-    pub(crate) evicted_tiles: Vec<TileId>,
+    /// The grid's cover images by game id (see `app::draw::home`).
+    pub(crate) covers: crate::app::draw::home::Covers,
+    /// The launch backdrop as a Skia image, built when `hero` says its art is in hand.
+    pub(crate) hero_image: Option<skia_safe::Image>,
     pub(crate) modal: modal::ModalState,
     pub(crate) grid: grid::GridState,
     pub(crate) focus_anim: Option<Instant>,
     pub(crate) press: ui::animation::Press,
-}
-
-impl Default for RenderState {
-    fn default() -> Self {
-        Self {
-            hero: hero::Hero::default(),
-            scroll: ui::scroll::ScrollWindow::new(),
-            settings_scroll: ui::scroll::ScrollWindow::new(),
-            content_window: ui::scroll::ContentWindow::new(),
-            about_lines: Vec::new(),
-            about_wrapped: None,
-            hover_close: false,
-            sidebar_gen: 0,
-            sidebar_dirty: true,
-            sidebar_styled_at: crate::ui::theme::epoch(),
-            evicted_tiles: Vec::new(),
-            modal: modal::ModalState::default(),
-            // Hand-written, not derived: `GridState`'s own `Default` starts the tile-id counter
-            // past the fixed band (see `grid.rs`).
-            grid: grid::GridState::default(),
-            focus_anim: None,
-            press: ui::animation::Press::default(),
-        }
-    }
+    /// The kit list widget of the open ported list screen (`app::draw::list`), with the
+    /// screen it was made for — a different screen gets a fresh one.
+    pub(crate) list: Option<(crate::core::screen::Screen, pf_console_ui::widgets::MenuList)>,
+    /// The sidebar rows' and the settings tabs' eased focus (`app::draw::FocusEase`).
+    pub(crate) sidebar_focus: crate::app::draw::FocusEase,
+    pub(crate) tab_focus: crate::app::draw::FocusEase,
 }

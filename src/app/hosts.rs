@@ -15,6 +15,14 @@ use crate::services::store::KnownHost;
 pub enum HostEntry {
     Known(KnownHost),
     Discovered(DiscoveredHost),
+    /// A pinned host+profile card (`KnownHost::pinned_profiles`): under its host, and OK
+    /// streams the host's desktop with that profile.
+    Pinned {
+        host: KnownHost,
+        profile_id: String,
+        /// "Host · Profile", built once when the rows are.
+        label: String,
+    },
 }
 
 impl HostEntry {
@@ -22,26 +30,31 @@ impl HostEntry {
         match self {
             Self::Known(h) => &h.name,
             Self::Discovered(h) => &h.name,
+            Self::Pinned { label, .. } => label,
         }
+    }
+    /// Whether the row carries the ⋯ actions button: a host does, a pinned card does not.
+    pub fn has_menu(&self) -> bool {
+        !matches!(self, Self::Pinned { .. })
     }
     pub fn host(&self) -> &str {
         match self {
-            Self::Known(h) => &h.host,
+            Self::Known(h) | Self::Pinned { host: h, .. } => &h.addr,
             Self::Discovered(h) => &h.addr,
         }
     }
     pub fn port(&self) -> u16 {
         match self {
-            Self::Known(h) => h.port,
+            Self::Known(h) | Self::Pinned { host: h, .. } => h.port,
             Self::Discovered(h) => h.port,
         }
     }
     pub fn is_paired(&self) -> bool {
-        matches!(self, Self::Known(h) if h.is_paired())
+        matches!(self, Self::Known(h) | Self::Pinned { host: h, .. } if h.is_paired())
     }
     pub fn mgmt_port(&self) -> Option<u16> {
         match self {
-            Self::Known(h) => h.mgmt_port,
+            Self::Known(h) | Self::Pinned { host: h, .. } => h.mgmt_port,
             Self::Discovered(h) => h.mgmt_port,
         }
     }
@@ -49,13 +62,13 @@ impl HostEntry {
     /// advertising its `mac` mDNS TXT at least once (see `discovery::DiscoveredHost::mac`).
     pub fn mac(&self) -> &[String] {
         match self {
-            Self::Known(h) => &h.mac,
+            Self::Known(h) | Self::Pinned { host: h, .. } => &h.mac,
             Self::Discovered(h) => &h.mac,
         }
     }
     pub fn os(&self) -> &str {
         match self {
-            Self::Known(h) => &h.os,
+            Self::Known(h) | Self::Pinned { host: h, .. } => &h.os,
             Self::Discovered(h) => &h.os,
         }
     }

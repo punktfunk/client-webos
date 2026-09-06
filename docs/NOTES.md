@@ -19,9 +19,9 @@ host tools beyond Docker. Same image, mounts and cache volumes as the cross-buil
 through `toolchain:docker-run` like they do); SDL2, Xvfb, x11vnc and noVNC are apt-installed per
 run.
 
-- **Build with the `preview` profile** (release codegen, no LTO). `tiny_skia` rasterizes in
-  software; a `dev` build spends tens of ms a frame there and reads as input lag, on top of
-  llvmpipe and the VNC round trip. `PROFILE=dev` if the rebuild time matters more.
+- **Build with the `preview` profile** (release codegen, no LTO). A `dev` build of Skia's
+  callers reads as input lag on top of llvmpipe and the VNC round trip. `PROFILE=dev` if the
+  rebuild time matters more.
 - **No GPU and no mDNS.** llvmpipe means animation timing here is not the TV's, and Docker's
   "host" is the Linux VM, so `services::discovery` sees no LAN multicast — add hosts by hand.
   Unicast is unaffected, so a hand-entered host pairs and speed-tests for real.
@@ -31,18 +31,23 @@ run.
 
 ## UI rendering
 
-Hybrid software/GPU: `tiny_skia` rasterizes tiles, SDL2 composites. Redraw-on-change (no every-tick render). Key facts:
+Immediate mode on Skia over the shell's GL context (`console::gl`), drawn with the console kit
+(`pf_console_ui`) — the menus, the in-stream overlays and the gamepad shell alike. Redraw on
+change and while anything animates; the stream loop keeps its own 33 ms / 500 ms cadence for
+the overlays and clears transparent so NDL's plane shows through. Key facts:
 
-- **Never use `tiny_skia::Painter::draw_pixmap/fill_rect` for large areas** (~300ms full-screen). Use `pixmap.data_mut()` loop or `copy_from_slice`. Verify with on-device timing, never assume a call is cheap.
-- Tiles use premultiplied-alpha, and stay that way: `Compositor::upload` sets a composed
-  premultiplied blend mode (`SDL_ComposeCustomBlendMode(ONE, ONE_MINUS_SRC_ALPHA, …)`, supported
-  by the fork's GLES2 backend) instead of dividing alpha back out per pixel. The un-premultiply
-  fallback is still there for a renderer that refuses the mode — it is the path to suspect if a
-  tile's alpha looks wrong; `premultiplied texture blending: <bool>` in the log says which ran.
-- `FilterQuality::Nearest` + `anti_alias=false` are cheaper scan-conversion paths.
-- Fonts: Geist (OTF, embedded). Icons: Material Icons subset (~1.7 KB) — **subset, so new `ICON_*` codepoint needs font regenerated** (`assets/icons/NOTICE.md` has `pyftsubset` line + codepoint list). Assume Latin only.
-- **Scroll fade needs viewport to cut mid-row, else invisible.** Unfocused rows draw no own background, so a viewport ending on a row boundary has only card background in last pixels — fading `SIDEBAR_BG` into `SIDEBAR_BG` is a no-op; first attempt shipped rendering nothing. The settings viewport deliberately leaves a partial row for `SCROLL_FADE_H` to dissolve.
-- **Modal scrolling is pixel-based, offsets are row-based.** `scroll.offset` stays integral (focus logic + scrollbar defined in rows); the rendered crop is animated in pixels, eased like Home grid. Pixels also let last row sit flush at list end — `offset * stride` overshoots by peek strip. Anything positioned against the list (focus tile, dropdown anchor) **must** derive from same pixel offset: focus tile is focused row re-rendered, so anchoring to quantized row shows that row twice during scroll. Can also hang past viewport mid-glide, hence clip in `draw_list`.
+- **Covers are Skia images built from the art loader's RGBA buffers** (`app::draw::home`),
+  one copy when the art lands; Skia uploads on first draw and keeps the texture. The window
+  that requests and evicts them is `app::render::prepare_grid`.
+- **Text is the kit's**: Geist through Skia, shaped per frame. A string drawn every frame is
+  fine; a document (About) is wrapped once per width and kept.
+- **Glass over the menu is a backdrop blur** (`app::draw::glass_card`); over the stream there
+  is no framebuffer to blur, so the dialog is the kit's panel on a transparent clear.
+- **The drawable can differ from the display mode** on webOS (trap 10 in the port doc): every
+  frame scales the canvas from `display_mode` units to `drawable_size`, and every layout and hit
+  test works in display units.
+- **Icons are Lucide, by name** (`app::view::icons`), from the kit's table. A new mark is added
+  to `assets/lucide/` in `unom/punktfunk` and regenerated there, not here.
 
 ## Video decode (NDL DirectMedia)
 
@@ -722,6 +727,10 @@ Blind alleys, so they aren't re-tried:
 - Running our own capped probe instead does **not** work: `request_probe` completes, but `abr.set_ceiling` is only called from core's own probe path (gated on its `capacity_probe_deadline`), so ceiling never moves. No public bitrate/ceiling setter on `NativeClient`.
 - Pinning a fixed bitrate also disarms the probe, but costs mid-session adaptation entirely.
 
+## Reconnect
+
+A session that ends with `PunktfunkEndReason::Lost` (idle timeout, reset, network) is dialled again up to three times with the same target and settings, a toast up over the emptied plane; the host lingers a dropped session for exactly this. Back, the EXIT gesture or a quit gives a dial up. Any other end (game exited, host ended, host error, our own stop) goes to the menu as before. A session that streamed a minute earns the budget back.
+
 ## Network speed test quirks
 
 Burst is 320 Mbps / 3 s (not 3 Gbps / 5 s) — the UI thread shares a 3-core Cortex-A9, and an unbounded firehose starves the app. 320 still detects any ceiling that would change the clamped recommendation (>~285 Mbps). Probe must advertise `VIDEO_CAP_CHACHA20` like a real session (core's `bytes_received` increments *after* AEAD decrypt). **~245 Mbps airlink ceiling** measured on G5 Wi-Fi (MediaTek USB 2.0 Hi-Speed bus), nothing client code can raise. New flows sometimes black-hole 10-29 s (AP/driver setup), so `session::probe::run_speed_probe` waits for the first completed video frame (cap 35 s) before bursting — plane live, path warm.
@@ -729,6 +738,8 @@ Burst is 320 Mbps / 3 s (not 3 Gbps / 5 s) — the UI thread shares a 3-core Cor
 ## Video backend: NDL
 
 NDL DirectMedia is the only backend. NDL has no decode context; calls go through `NdlVideo::ffi` mutex (header says not thread-safe). AV1 remains disabled (never produced picture).
+
+Backpressure: the video pump samples `render_buffer_length` every 500 ms; two samples of ≥ 8 frames freeze the feed and ask for a keyframe, exactly the loss path (no flush — a flush restart kills the audio plane). Measured sessions sit at 0–1, so this only fires on a real decoder stall.
 
 An SMP (Starfish Media Pipeline) backend for webOS 3.5-4.x was built and removed (2026-08-26, issue #164): never verified on real 3.5-4.x hardware, and it carried a C++ shim `.so`, an ACB sink and a Settings row for the whole NDL v1 audience. Those TVs get NDL v1 (H.264/SDR).
 

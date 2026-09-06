@@ -7,7 +7,6 @@
 pub(crate) mod confirm;
 pub(crate) mod list;
 pub(crate) mod rowbuttons;
-pub(crate) mod scrolllist;
 pub(crate) mod slots;
 
 use crate::core::screen::Screen;
@@ -25,22 +24,20 @@ pub(crate) const fn is_confirm(screen: Screen) -> bool {
         | Screen::SpeedTest
         | Screen::RemoveCollection
         | Screen::ResetHdrCalibration
-        | Screen::ResetGameSettings => true,
+        | Screen::DeleteProfile => true,
         Screen::Home
         | Screen::Pairing
-        | Screen::Settings(_)
         | Screen::AddHost
         | Screen::HostMenu
         | Screen::EditHost
         | Screen::About
         | Screen::HostPower
-        | Screen::Diagnostics
-        | Screen::Experimental
         | Screen::HdrCalibration
-        | Screen::CursorSettings(_)
-        | Screen::ControllerSettings(_)
         | Screen::Collections
-        | Screen::RenameCollection => false,
+        | Screen::RenameCollection
+        | Screen::SettingsPage
+        | Screen::PickProfile
+        | Screen::RenameProfile => false,
     }
 }
 
@@ -54,37 +51,6 @@ pub(crate) const fn over_video(screen: Screen) -> bool {
     matches!(screen, Screen::HdrCalibration)
 }
 
-/// Whether `screen` is a *scrolling* row list: a shell tile plus one tile per row, cropped to
-/// a viewport that scrolls under edge fades (see `view::scrolllist`). Same contract as
-/// [`is_confirm`].
-pub(crate) const fn is_scroll_list(screen: Screen) -> bool {
-    match screen {
-        Screen::Settings(_) | Screen::Collections => true,
-        // Five rows never need a viewport, so the Controller screen is a plain list modal.
-        Screen::ControllerSettings(_)
-        | Screen::Home
-        | Screen::Pairing
-        | Screen::AddHost
-        | Screen::Wake
-        | Screen::ForgetHost
-        | Screen::HostMenu
-        | Screen::EditHost
-        // About scrolls, but wrapped text rather than rows.
-        | Screen::About
-        | Screen::SpeedTest
-        | Screen::HostPower
-        | Screen::Diagnostics
-        | Screen::Experimental
-        | Screen::HdrCalibration
-        | Screen::CursorSettings(_)
-        | Screen::SendLogs
-        | Screen::RenameCollection
-        | Screen::RemoveCollection
-        | Screen::ResetHdrCalibration
-        | Screen::ResetGameSettings => false,
-    }
-}
-
 /// Whether `screen` is a plain list modal: a card holding one `FocusRow` per line, baked into
 /// one tile and hit-tested by row index. Same contract as [`is_confirm`] — and the reason it
 /// stays exhaustive is that a screen silently missing from a table like this inherits the
@@ -93,17 +59,14 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
     match screen {
         Screen::HostMenu
         | Screen::HostPower
-        | Screen::Diagnostics
-        | Screen::Experimental
-        | Screen::ControllerSettings(_)
+        | Screen::PickProfile
         // A list modal like any other, even though it draws over the video plane rather than
         // over the menu — that difference is `compose_modal`'s, not this family's.
         | Screen::HdrCalibration
-        | Screen::CursorSettings(_) => true,
+        => true,
         Screen::Home
         | Screen::Pairing
         // Settings is a list too, but a scrolling one — see `is_scroll_list`.
-        | Screen::Settings(_)
         | Screen::AddHost
         | Screen::Wake
         | Screen::ForgetHost
@@ -116,6 +79,8 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
         | Screen::RenameCollection
         | Screen::RemoveCollection
         | Screen::ResetHdrCalibration
-        | Screen::ResetGameSettings => false,
+        | Screen::SettingsPage
+        | Screen::RenameProfile
+        | Screen::DeleteProfile => false,
     }
 }

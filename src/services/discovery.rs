@@ -44,8 +44,7 @@ fn addr_and_name(info: &mdns_sd::ResolvedService) -> Option<(String, String)> {
 
 /// Trims an advertised OS chain to something bounded and predictable: lowercase, at most five
 /// tokens of 32 characters, nothing outside [`paths::is_asset_char`]'s charset. Nothing
-/// downstream trusts a host's strings, and this one is matched against packaged icon names —
-/// `paths::is_asset_token` is the gate that actually guards the join.
+/// downstream trusts a host's strings, and this one is matched against packaged mark names.
 fn sanitize_os(raw: &str) -> String {
     raw.to_lowercase()
         .split('/')
@@ -55,30 +54,44 @@ fn sanitize_os(raw: &str) -> String {
                 .filter(|c| crate::services::paths::is_asset_char(*c))
                 .take(32)
                 .collect();
-            (!token.is_empty()).then_some(token)
+            // A token of dots alone names nothing (and was once a path segment).
+            (!token.is_empty() && token.bytes().any(|b| b != b'.')).then_some(token)
         })
         .take(5)
         .collect::<Vec<_>>()
         .join("/")
 }
 
-/// Turns a resolved record into a host, or `None` if it isn't usable (no IPv4).
-fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
-    let (addr, name) = addr_and_name(info)?;
-    let props = info.get_properties();
-    Some(DiscoveredHost {
-        name,
-        addr,
-        port: info.get_port(),
-        mgmt_port: props.get_property_val_str("mgmt").and_then(|v| v.parse().ok()),
-        mac: props
-            .get_property_val_str("mac")
-            .unwrap_or("")
+/// The advert's TXT fields as the record keeps them: management port, wake MACs, OS chain.
+/// Nothing here is trusted — a bad port reads as absent and the chain is bounded.
+fn txt_fields(mgmt: Option<&str>, mac: Option<&str>, os: Option<&str>) -> (Option<u16>, Vec<String>, String) {
+    (
+        mgmt.and_then(|v| v.parse().ok()),
+        mac.unwrap_or("")
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
-        os: sanitize_os(props.get_property_val_str("os").unwrap_or("")),
+        sanitize_os(os.unwrap_or("")),
+    )
+}
+
+/// Turns a resolved record into a host, or `None` if it isn't usable (no IPv4).
+fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
+    let (addr, name) = addr_and_name(info)?;
+    let props = info.get_properties();
+    let (mgmt_port, mac, os) = txt_fields(
+        props.get_property_val_str("mgmt"),
+        props.get_property_val_str("mac"),
+        props.get_property_val_str("os"),
+    );
+    Some(DiscoveredHost {
+        name,
+        addr,
+        port: info.get_port(),
+        mgmt_port,
+        mac,
+        os,
     })
 }
 
@@ -161,5 +174,30 @@ impl Discovery {
             Err(e) => tracing::error!("mdns: re-browse({SERVICE_TYPE}) failed: {e}"),
         }
         self.last_browse = std::time::Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host's TXT strings are input: the OS chain is lowercased, bounded and stripped to
+    /// the mark charset, MACs split on commas with blanks dropped, a bad port reads as absent.
+    #[test]
+    fn txt_fields_are_bounded_and_never_trusted() {
+        let (mgmt, mac, os) = txt_fields(
+            Some("47990"),
+            Some("aa:bb:cc:dd:ee:ff, , 11:22:33:44:55:66"),
+            Some("Linux/Fedora/Bazzite"),
+        );
+        assert_eq!(mgmt, Some(47990));
+        assert_eq!(mac, vec!["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"]);
+        assert_eq!(os, "linux/fedora/bazzite");
+        let (mgmt, mac, os) = txt_fields(Some("port"), None, Some("a/b/c/d/e/f/g"));
+        assert_eq!(mgmt, None);
+        assert!(mac.is_empty());
+        assert_eq!(os, "a/b/c/d/e", "five tokens at most");
+        assert_eq!(sanitize_os("../Win dows!//"), "windows");
+        assert_eq!(sanitize_os(&"x".repeat(40)), "x".repeat(32));
     }
 }

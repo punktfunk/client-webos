@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo/logo-sidebar.png" alt="punktfunk" width="300">
+<img src="packaging/icon_large.png" alt="punktfunk" width="130">
 
 <br>
 <br>
@@ -16,8 +16,9 @@
 
 ---
 
-Targets webOS 5.x+ (developed and verified live on an **LG CX, webOS 5.6**), packaged as a homebrew
-`.ipk`. Built directly on the upstream `punktfunk-core` crate (a pinned git dependency — see
+Targets webOS 5 and later (developed and verified live on an **LG CX, webOS 5.6** and an
+**LG G5, webOS 10**), packaged as a homebrew `.ipk`. webOS 3.5–4.x gets H.264 SDR through the
+older NDL interface. Built directly on the upstream `punktfunk-core` crate (a pinned git dependency — see
 `Cargo.toml`).
 
 The app is originally developed by [dyptan.io](https://dyptan.io) and donated to
@@ -40,17 +41,19 @@ This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardwar
 ## Features
 
 - **Video** — up to 4K120 with HDR. H.264 or HEVC, decoded by the TV's hardware media pipeline
-  (NDL DirectMedia), with a fallback decode path for webOS 3.5–4.x.
+  (NDL DirectMedia). No AV1: the pipeline never presented one.
 - **Bitrate** — Automatic mode adjusts to the network, or set a fixed rate from 10 to 200 Mbps.
   A per-host network speed test measures over the real data plane and applies a recommended rate.
-- **Audio** — stereo, 5.1 or 7.1, decoded on the TV.
+- **Audio** — stereo, 5.1 or 7.1 Opus, decoded in software on the TV. An experimental
+  stereo-only route hands the Opus to the TV's media pipeline instead.
 - **Library** — the host's game library, custom collections and ordering.
-- **Per-game settings** — any game can override the global resolution, frame rate, bitrate, codec,
-  HDR, audio or controller settings. Each one is a punktfunk settings profile, so the
-  controller UI can list them and bind one to a cover.
-- **Two interfaces** — these cursor menus, built for the Magic Remote, and punktfunk's shared
-  controller UI, the same one the desktop and Android clients draw. It takes over while a game
-  pad is connected; Settings ▸ Controller-optimized UI chooses whether and when.
+- **Settings profiles** — punktfunk's shared profiles: a named set of overrides (resolution,
+  frame rate, bitrate, codec, HDR, audio, controller) bound to a game, picked per launch, or
+  set as a host's default. The same profiles every other client edits.
+- **Two interfaces, one look** — the pointer menus built for the Magic Remote, and punktfunk's
+  shared controller UI, drawn with the same kit (fonts, marks, palettes, rows) the desktop and
+  Android clients use. The controller UI takes over while a game pad is connected; Settings ▸
+  Controller-optimized UI chooses whether and when.
 - **Input** — Magic Remote pointer, gamepads, USB keyboard and mouse. Pointer capture for games,
   absolute pointing for the desktop, gestures.
 - **DualSense** — adaptive triggers, lightbar, player LEDs, touchpad, gyro, speakers and haptics over

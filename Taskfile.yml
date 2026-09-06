@@ -84,9 +84,14 @@ tasks:
     desc: >-
       Run the unit tests on the HOST target. The armv7 cross build cannot execute on a runner,
       and `lint` only type-checks the tests — this is the only task that runs them. Needs native
-      SDL2 (`libsdl2-dev`, `libsdl2-ttf-dev`); `docker:test` brings its own.
+      SDL2, fontconfig and FreeType (`libsdl2-dev libfontconfig-dev libfreetype-dev`);
+      `docker:test` brings its own.
+    env:
+      # The host's Skia comes from rust-skia's own release: our mirror only carries the armv7
+      # archive that upstream does not build. Same version, same key, different host.
+      SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
     cmds:
-      - cargo test --bin punktfunk-webos
+      - cargo test --bins
 
   lint:
     desc: Cross-target `cargo clippy` (the lint set in Cargo.toml's `[lints.clippy]`), no Docker (used by CI)
@@ -113,6 +118,11 @@ tasks:
     cmds:
       - cargo fmt
 
+  fmt-check:
+    desc: Fail on anything rustfmt would change (used by CI)
+    cmds:
+      - cargo fmt --check
+
   docker:build:
     desc: Cross-compile the release binary inside Docker with thin LTO (fast) — the local dev entry point. Override with RELEASE_LTO=fat for optimized build.
     cmds:
@@ -133,7 +143,7 @@ tasks:
       - task: toolchain:docker-run
         vars:
           TARGET_TASK: test
-          EXTRA_APT: libsdl2-dev libsdl2-ttf-dev
+          EXTRA_APT: libsdl2-dev libfontconfig-dev libfreetype-dev
 
   docker:lint:
     desc: Cross-target `cargo clippy` (the lint set in Cargo.toml's `[lints.clippy]`), inside Docker
@@ -220,7 +230,7 @@ tasks:
             preview PROFILE={{.PROFILE | default "preview"}}
             WEBOS_SDK={{.WEBOS_SDK}}
             TELEMETRY_LEVEL={{.TELEMETRY_LEVEL | default "debug"}}
-          EXTRA_APT: libsdl2-dev libsdl2-ttf-dev xvfb x11vnc novnc websockify netcat-openbsd
+          EXTRA_APT: libsdl2-dev xvfb x11vnc novnc websockify netcat-openbsd
           EXTRA_DOCKER: -p 127.0.0.1:6080:6080 -v punktfunk-webos-client-home:/root
 
   docker:host:

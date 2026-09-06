@@ -22,6 +22,9 @@ pub(crate) enum CardMenuRow {
     MoveTo,
     /// Back to Library, with no dialog. Only on a card a collection holds.
     Remove,
+    /// The shell's bind list: which catalog profile this title streams with.
+    Profile,
+    /// Creates-or-opens the bound profile in profile scope.
     Settings,
 }
 
@@ -240,8 +243,11 @@ impl App {
             // menu, and collapsing it underneath makes going back read as having landed
             // somewhere else. The screen they open owns every event while it is up (this
             // handler runs on Home only), and leaving it closes the menu.
-            (MenuEvent::Confirm, Some(CardMenuRow::MoveTo)) => self.open_collections(&pin_id, &title, screen_h),
-            (MenuEvent::Confirm, Some(CardMenuRow::Settings)) => self.open_game_settings(&pin_id, &title),
+            (MenuEvent::Confirm, Some(CardMenuRow::MoveTo)) => self.open_collections(&pin_id, &title),
+            (MenuEvent::Confirm, Some(CardMenuRow::Settings)) => self.open_game_profile(&pin_id, &title),
+            (MenuEvent::Confirm, Some(CardMenuRow::Profile)) => {
+                self.open_pick_profile(crate::app::state::profilepick::ProfilePick::BindGame { pin_id, title });
+            }
             // No dialog: the card is one press from wherever it was, and the section heading
             // it lands under says where it went.
             (MenuEvent::Confirm, Some(CardMenuRow::Remove)) => {

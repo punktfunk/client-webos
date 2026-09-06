@@ -10,10 +10,16 @@ use crate::app::view;
 use crate::app::App;
 use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
-use crate::ui::render::Color;
-use crate::ui::theme::palette;
-use crate::ui::widgets::ConfirmButton;
 use std::borrow::Cow;
+
+/// What a button means, which is what colours it: the palette's error red for a loss, the
+/// accent for the thing the dialog exists to do, and plain text for Cancel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tone {
+    Danger,
+    Primary,
+    Plain,
+}
 
 impl App {
     /// The nav half of a confirm dialog's event handling, the counterpart to
@@ -36,65 +42,53 @@ impl App {
 pub(crate) struct Button {
     pub icon: Option<&'static str>,
     pub label: Cow<'static, str>,
-    pub color: Color,
+    pub tone: Tone,
 }
 
 /// An open confirm dialog, as data: what its card says, and what its two buttons are.
 pub(crate) struct Confirm {
     pub subtitle: String,
     pub buttons: [Button; 2],
+    /// The body reads as an error (a failed speed test).
+    pub failed: bool,
 }
 
 impl Confirm {
-    fn new(
+    pub(crate) fn new(
         icon: Option<&'static str>,
         label: impl Into<Cow<'static, str>>,
-        color: Color,
+        tone: Tone,
         cancel: &'static str,
         subtitle: String,
     ) -> Self {
         Self {
             subtitle,
+            failed: false,
             buttons: [
                 Button {
                     icon,
                     label: label.into(),
-                    color,
+                    tone,
                 },
                 Button {
                     icon: None,
                     label: Cow::Borrowed(cancel),
-                    color: palette().text,
+                    tone: Tone::Plain,
                 },
             ],
         }
     }
-
-    /// The widget-facing view of [`Self::buttons`] — borrowed, so nothing is copied per frame.
-    pub fn widgets(&self) -> [ConfirmButton<'_>; 2] {
-        std::array::from_fn(|i| ConfirmButton {
-            icon: self.buttons[i].icon,
-            label: &self.buttons[i].label,
-            color: self.buttons[i].color,
-        })
-    }
 }
 
 impl App {
-    /// The open confirm dialog, or `None` — on a screen that isn't one, and on the two whose
-    /// buttons aren't up yet: a Wake with no MAC on record is a button-less message, and a
-    /// speed test still running has nothing to apply.
-    ///
-    /// That `None` is load-bearing beyond the geometry: it is what says the dialog is not
-    /// showing buttons, so a caller holding a `Some` has already proved the arm it is in is
-    /// reachable — which is what four `expect`/`unreachable!` in `prepare_modal` used to
-    /// assert by hand.
-    pub(crate) fn confirm_of(&self) -> Option<Confirm> {
-        Some(match self.nav.screen {
+    /// [`confirm_of`](Self::confirm_of) for any screen, not only the one the cursor is on:
+    /// a card fading out is drawn from the same descriptor after the cursor has moved on.
+    pub(crate) fn confirm_for(&self, screen: Screen) -> Option<Confirm> {
+        Some(match screen {
             Screen::ForgetHost => Confirm::new(
                 Some(view::icons::ICON_DELETE),
                 "Forget",
-                palette().error,
+                Tone::Danger,
                 "Cancel",
                 view::forget::subtitle(self.host_menu_host_name().unwrap_or_default()),
             ),
@@ -103,7 +97,7 @@ impl App {
                 Confirm::new(
                     Some(view::icons::ICON_DELETE),
                     "Remove",
-                    palette().error,
+                    Tone::Danger,
                     "Cancel",
                     view::collections::remove_subtitle(name, games),
                 )
@@ -111,29 +105,32 @@ impl App {
             Screen::ResetHdrCalibration => Confirm::new(
                 Some(view::icons::ICON_DELETE),
                 "Clear",
-                palette().error,
+                Tone::Danger,
                 "Cancel",
                 view::hdrcalibration::RESET_SUBTITLE.to_string(),
             ),
-            Screen::ResetGameSettings => Confirm::new(
-                Some(view::icons::ICON_DELETE),
-                "Reset",
-                palette().error,
-                "Cancel",
-                view::resetgame::subtitle(&self.settings_ui.game_settings.as_ref()?.title),
-            ),
+            Screen::DeleteProfile => {
+                let (hosts, titles) = self.profile_use_counts();
+                Confirm::new(
+                    Some(view::icons::ICON_DELETE),
+                    "Delete",
+                    Tone::Danger,
+                    "Cancel",
+                    view::profile::delete_subtitle(hosts, titles),
+                )
+            }
             Screen::SendLogs => Confirm::new(
                 Some(view::icons::ICON_SEND),
                 "Send",
                 // The same red as Forget: both are consequential.
-                palette().error,
+                Tone::Danger,
                 "Cancel",
                 view::sendlogs::SUBTITLE.to_string(),
             ),
             Screen::Wake => Confirm::new(
                 Some(view::icons::ICON_POWER),
                 "Wake host",
-                palette().accent_bright,
+                Tone::Primary,
                 "Cancel",
                 view::wake::status_text(self.screens.wake.as_ref().filter(|w| !w.mac.is_empty())?),
             ),
@@ -142,15 +139,18 @@ impl App {
                 if !view::speedtest::finished(state) {
                     return None;
                 }
-                Confirm::new(
-                    Some(view::icons::ICON_SIGNAL),
-                    view::speedtest::apply_label(view::speedtest::recommendation(state)),
-                    palette().accent_bright,
-                    // "Close" rather than "Cancel": the test has already run, so there is
-                    // nothing left to call off.
-                    "Close",
-                    view::speedtest::status(state, &self.screens.speed_test_name),
-                )
+                Confirm {
+                    failed: matches!(state, Some(crate::app::state::speedtest::SpeedTestState::Failed(_))),
+                    ..Confirm::new(
+                        Some(view::icons::ICON_SIGNAL),
+                        view::speedtest::apply_label(view::speedtest::recommendation(state)),
+                        Tone::Primary,
+                        // "Close" rather than "Cancel": the test has already run, so there is
+                        // nothing left to call off.
+                        "Close",
+                        view::speedtest::status(state, &self.screens.speed_test_name),
+                    )
+                }
             }
             _ => return None,
         })

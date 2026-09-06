@@ -1,43 +1,17 @@
-//! This app's icon vocabulary: which Material glyph means "settings", "wake", "forget".
-//!
-//! Every icon is a glyph from the bundled Material Icons subset (`crate::assets`), not
-//! vector shapes — a real icon font draws cleaner than hand-rolled path math. Rendered as
-//! text, then scaled to fit the icon rect (see [`ui::Canvas::icon`](crate::ui::Canvas::icon)).
-//!
-//! Not in `ui`: the library draws whatever glyph it is handed, and has no opinion on which
-//! pictogram stands for which of this app's actions. The two glyphs that *are* the library's
-//! — a close X and a pin — are not restated here; the few app rows that want one read
-//! `ui::theme::icons()`, so there is one codepoint per picture in the binary.
+//! This app's icon vocabulary: which Lucide mark means "settings", "wake", "forget". The
+//! names are the kit's (`pf_console_ui::icons::by_name`), the same table every client draws.
 
-pub const ICON_TV: &str = "\u{E333}";
-pub const ICON_LOCK: &str = "\u{E897}";
-pub const ICON_ADD: &str = "\u{E145}";
-pub const ICON_SETTINGS: &str = "\u{E8B8}";
-pub const ICON_MONITOR: &str = "\u{EF5B}";
-pub const ICON_SCHEDULE: &str = "\u{E8B5}";
-pub const ICON_SIGNAL: &str = "\u{E202}";
-pub const ICON_SUN: &str = "\u{E430}";
-pub const ICON_POWER: &str = "\u{E8AC}";
-pub const ICON_DELETE: &str = "\u{E872}";
-pub const ICON_EDIT: &str = "\u{E3C9}";
-pub const ICON_INFO: &str = "\u{E88E}";
-pub const ICON_WRENCH: &str = "\u{E869}";
-pub const ICON_BUG: &str = "\u{E868}";
-pub const ICON_CHART: &str = "\u{E6E1}";
-pub const ICON_MEMORY: &str = "\u{E322}";
-pub const ICON_MOVIE: &str = "\u{E02C}";
-pub const ICON_VISIBILITY: &str = "\u{E8F4}";
-pub const ICON_SEND: &str = "\u{E163}";
-/// Material `check` — the calibration card's Next/Save button.
-pub const ICON_CHECK: &str = "\u{E5CA}";
-pub const ICON_GAMEPAD: &str = "\u{E338}";
-/// Material `palette` — the frosted-theme toggle.
-pub const ICON_PALETTE: &str = "\u{E40A}";
-pub const ICON_MOUSE: &str = "\u{E323}";
-pub const ICON_TOUCH: &str = "\u{E913}";
-/// Material `vibration` — the pad's haptic coils.
-pub const ICON_VIBRATION: &str = "\u{E62D}";
-/// Material `volume_up` — the pad's own speaker.
-pub const ICON_VOLUME: &str = "\u{E050}";
-/// Material `drag_indicator` — the grip that puts a row into drag mode.
-pub const ICON_REORDER: &str = "\u{E945}";
+pub const ICON_TV: &str = "tv";
+pub const ICON_LOCK: &str = "lock";
+pub const ICON_ADD: &str = "plus";
+pub const ICON_SETTINGS: &str = "settings";
+pub const ICON_SIGNAL: &str = "activity";
+pub const ICON_POWER: &str = "power";
+pub const ICON_DELETE: &str = "trash-2";
+pub const ICON_EDIT: &str = "pencil";
+pub const ICON_SEND: &str = "send";
+pub const ICON_REORDER: &str = "grip-vertical";
+pub const ICON_CLOSE: &str = "x";
+pub const ICON_WRENCH: &str = "wrench";
+pub const ICON_PLAY: &str = "play";
+pub const ICON_PIN: &str = "pin";
