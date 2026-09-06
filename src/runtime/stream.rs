@@ -74,6 +74,11 @@ fn wait_for_dial(handle: &std::thread::JoinHandle<Result<session::Connected>>, e
 /// How many copies of a mid-stream `GamepadArrival` to send — see its one caller.
 const ARRIVAL_SENDS: usize = 3;
 
+/// How long a freeze-until-reanchor hold must last before the toast names it. An RFI recovery
+/// lifts a hold within a round trip and the startup capacity probe's own loss clears at the
+/// burst's end; a toast for those flashed on every blip and said nothing the picture did not.
+const HOLD_TOAST_AFTER: Duration = Duration::from_millis(300);
+
 /// `DualSense` HID feedback (adaptive triggers, lightbar), opened only for a pad kind that emits
 /// it — anything else never sends these events. Not found (USB pad, no `luna-send-pub`) isn't an
 /// error: logged once, the feature just stays off.
@@ -438,10 +443,10 @@ pub(super) fn run_inner() -> Result<()> {
             // Transient toasts. `overlay_was_active` catches the fade-out edge so the canvas gets
             // wiped once; `stats_dst`/`log_dst` recomposite each frame at their own slower cadence.
             let mut notif = overlay::Notification::new();
-            // Edge-detects `stats.holding` (freeze-until-reanchor — see `session::pump`'s video pump) so a
-            // packet-loss stall surfaces as a toast even with the stats overlay off, same signal the
-            // overlay's "Beat" line already reads.
-            let mut was_holding = false;
+            // When the current freeze-until-reanchor hold began (`stats.holding`, see `session::pump`),
+            // and whether it has been announced — see `HOLD_TOAST_AFTER`.
+            let mut hold_since: Option<Instant> = None;
+            let mut hold_toasted = false;
             let mut overlay_was_active = false;
             // The stats card's lines and the log tail, rebuilt on their 500 ms cadence and drawn
             // as they stand on every overlay frame between.
@@ -789,18 +794,21 @@ pub(super) fn run_inner() -> Result<()> {
                         log_fade.close(());
                     }
                 }
-                // Connection-issue toast: fires on the rising edge of a freeze-until-reanchor hold
-                // (dropped/gapped frames — see `session::pump`), which is the same "network
-                // trouble" signal the stats overlay's "Beat" line reads, just edge-triggered here so
-                // it's visible without the overlay open. No matching "recovered" toast — the video
-                // itself resuming is the recovery signal.
-                let holding_now = connected.stats().holding.load(Ordering::Relaxed);
-                if holding_now && !was_holding {
-                    tracing::warn!("connection issues detected (freeze-until-reanchor)");
-                    notif.show("Connection issues — recovering...");
-                    overlay_last = None;
+                // Connection-issue toast, once per hold that outlasts `HOLD_TOAST_AFTER` — the same
+                // "network trouble" signal the stats overlay's "Beat" line reads, visible without the
+                // overlay open. No matching "recovered" toast: the picture resuming is that signal.
+                if connected.stats().holding.load(Ordering::Relaxed) {
+                    let since = *hold_since.get_or_insert_with(Instant::now);
+                    if !hold_toasted && since.elapsed() >= HOLD_TOAST_AFTER {
+                        hold_toasted = true;
+                        tracing::warn!("connection issues detected (freeze-until-reanchor)");
+                        notif.show("Connection issues — recovering...");
+                        overlay_last = None;
+                    }
+                } else {
+                    hold_since = None;
+                    hold_toasted = false;
                 }
-                was_holding = holding_now;
                 // The dialog is navigated with the Magic Remote's pointer, so a captured stream
                 // must hand the pointer back while it's up — hidden/relative there'd be nothing
                 // to aim with. Recaptured on dismiss. The evdev reader releases its grabs for the

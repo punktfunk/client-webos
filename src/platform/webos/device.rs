@@ -88,7 +88,7 @@ fn system_info() -> &'static str {
         }
         super::luna::call_capture(
             "luna://com.webos.service.tv.systemproperty/getSystemInfo",
-            r#"{"keys":["sdkVersion","otaId"]}"#,
+            r#"{"keys":["sdkVersion","otaId","UHD"]}"#,
             super::luna::CALL_TIMEOUT,
         )
         .unwrap_or_default()
@@ -124,6 +124,31 @@ pub fn sdk_version() -> Option<(u32, u32)> {
 /// `otaId` from Luna's `getSystemInfo`, e.g. `HE_DTV_W19H_...`. Display-only.
 fn ota_id() -> Option<String> {
     json_str_field(system_info(), "otaId")
+}
+
+/// The panel's own stream mode — what the shared settings document's `0` ("Native") and
+/// `match_window` resolve to at connect, as the desktop clients resolve them to the monitor.
+///
+/// SDL cannot answer this: it reports the app plane as 1080p@60 on a 4K panel. The resolution
+/// comes from `getSystemInfo`'s `UHD` flag; an unanswered query reads as 1080p, which streams
+/// rather than failing the handshake with a 0×0 request. The rate is 60: the plane rate the
+/// compositor reports, and the shipped default before the document moved. 120 stays a pick.
+pub fn native_mode() -> punktfunk_core::config::Mode {
+    let uhd = json_str_field(system_info(), "UHD");
+    let (width, height) = if uhd.as_deref() == Some("true") {
+        (3840, 2160)
+    } else {
+        (1920, 1080)
+    };
+    tracing::info!(
+        "panel: UHD={} — native mode {width}x{height}@60",
+        uhd.as_deref().unwrap_or("unknown")
+    );
+    punktfunk_core::config::Mode {
+        width,
+        height,
+        refresh_hz: 60,
+    }
 }
 
 /// SoC/board codename (`/etc/prefs/properties/machineName`, e.g. `m16p`, `k5lp`), read only for
@@ -249,11 +274,45 @@ pub const HOT_THREAD_NICE: libc::c_int = -10;
 
 /// Renices `tid` (0 = calling thread) to [`HOT_THREAD_NICE`]; `false` if the kernel refused.
 ///
-/// Always best-effort: it needs `CAP_SYS_NICE` or a nonzero `RLIMIT_NICE`, present on a rooted
-/// install and absent under a plain Dev-Mode SAM jail.
+/// Always best-effort: it needs `CAP_SYS_NICE` or a large enough `RLIMIT_NICE`, present on a
+/// rooted install and absent under a plain Dev-Mode SAM jail — see [`unlock_nice_limit`].
 pub fn renice(tid: i32) -> bool {
+    unlock_nice_limit();
     // SAFETY: plain syscall — tid and priority value only, no pointers.
     unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, HOT_THREAD_NICE) == 0 }
+}
+
+/// Raises `RLIMIT_NICE`'s soft limit to its hard limit, once. Raising the soft limit needs no
+/// privilege, so a jail that grants the hard limit alone would otherwise refuse every renice
+/// for nothing. Logged either way: the limit is what a session log needs to say why the boost
+/// did or did not apply. The kernel reads the limit as `20 - rlim_cur`, so nice -10 needs 30.
+fn unlock_nice_limit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `lim` is a valid, writable rlimit for the duration of the call.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NICE, &mut lim) } != 0 {
+            return;
+        }
+        if lim.rlim_cur < lim.rlim_max {
+            lim.rlim_cur = lim.rlim_max;
+            // SAFETY: `lim` is a valid rlimit this function owns for the duration of the call.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NICE, &lim) } != 0 {
+                tracing::warn!(
+                    "RLIMIT_NICE: raising the soft limit failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        tracing::info!(
+            "RLIMIT_NICE soft={} hard={} (nice floor is 20 - soft; the boost asks {HOT_THREAD_NICE})",
+            lim.rlim_cur,
+            lim.rlim_max,
+        );
+    });
 }
 
 /// Boosts the calling thread. See [`renice`].

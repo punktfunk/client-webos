@@ -1,6 +1,7 @@
 //! The "host unreachable — wake it?" flow's logic: the Wake-on-LAN prompt, its retry/probe
 //! timers, and its send-side plumbing. The per-host auto-send setting the prompt obeys
 //! lives in `app::state::hostpower`. Rendering lives in `app::view::wake`.
+use crate::app::view;
 use crate::app::{App, Screen, WakeState};
 use crate::core::event::MenuEvent;
 use crate::services::store::KnownHost;
@@ -9,6 +10,7 @@ use std::time::Instant;
 impl App {
     /// Enters the WOL flow. With `wol_auto` off, shows prompt immediately.
     /// With it on, fires packet silently, shows prompt only after `WAKE_RETRY_INTERVAL`.
+    /// A host with no MAC on record never prompts at all (see [`wake_prompts`]).
     pub(crate) fn start_wake(&mut self, host: String, port: u16, mac: Vec<String>, reason: String) {
         let known = self.hosts.known.iter().find(|h| h.addr == host && h.port == port);
         let name = known.map_or_else(|| host.clone(), |h| h.name.clone());
@@ -18,6 +20,7 @@ impl App {
         let auto = known.is_some_and(|h| h.wol_auto)
             && !mac.is_empty()
             && self.hosts.powered_down.as_ref() != Some(&(host.clone(), port));
+        let prompts = wake_prompts(auto, &mac);
         let mut wake = WakeState {
             host,
             port,
@@ -30,7 +33,7 @@ impl App {
             attempts: 0,
             since: None,
             last_attempt: None,
-            silent: auto,
+            silent: !prompts,
             // Baseline for `WAKE_PROBE_INTERVAL` — the first active probe fires
             // `WAKE_PROBE_INTERVAL` from now, not immediately.
             last_probe: Some(Instant::now()),
@@ -38,12 +41,19 @@ impl App {
         };
         if auto {
             Self::send_wake(&mut wake);
+        }
+        if prompts {
+            self.nav.screen = Screen::Wake;
+        } else {
             // No modal is up in this branch, so the Home bar is the only place the
             // wait is visible at all — without this it would sit on `select_host`'s
             // stale "Loading library…" until the host came back (or didn't).
-            self.set_home_status(Some(Self::wake_home_status(&wake)), false);
-        } else {
-            self.nav.screen = Screen::Wake;
+            let line = if wake.mac.is_empty() {
+                view::wake::status_text(&wake)
+            } else {
+                Self::wake_home_status(&wake)
+            };
+            self.set_home_status(Some(line), false);
         }
         self.screens.wake = Some(wake);
     }
@@ -165,12 +175,9 @@ impl App {
 
     /// Handles Wake modal events: direction moves between "Wake"/"Cancel" buttons.
     /// Confirm sends and closes the modal, or cancels. Back dismisses it (wake runs on in bg).
+    /// The card only ever opens with both buttons on it, so every event has a target.
     pub fn handle_wake_event(&mut self, ev: MenuEvent) {
         let Some(wake) = self.screens.wake.as_mut() else { return };
-        // WHY: no MAC = no send/automate possible. Every event but Back is no-op.
-        if wake.mac.is_empty() && ev != MenuEvent::Back {
-            return;
-        }
         if ev == MenuEvent::Back {
             self.close_wake(false);
             return;
@@ -226,5 +233,27 @@ impl App {
                 wake.name
             ),
         }
+    }
+}
+
+/// Whether a wake puts its prompt up rather than waiting on the Home status line.
+///
+/// Neither silent case has anything on the card to press: `auto` has already sent the packet,
+/// and with no MAC there is none to send. The close mark answers the pointer alone, so a card
+/// without buttons is a dead end for a d-pad.
+fn wake_prompts(auto: bool, mac: &[String]) -> bool {
+    !auto && !mac.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wake_prompts;
+
+    #[test]
+    fn only_a_sendable_wake_prompts() {
+        let mac = ["aa:bb:cc:dd:ee:ff".to_string()];
+        assert!(wake_prompts(false, &mac));
+        assert!(!wake_prompts(true, &mac));
+        assert!(!wake_prompts(false, &[]));
     }
 }

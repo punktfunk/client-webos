@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "fec-rs"
 version = "0.1.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
+source = "git+https://git.unom.io/unom/punktfunk?rev=a157fe582#a157fe5822684ce05909c52e3b27b9b3967eefef"
 
 [[package]]
 name = "fiat-crypto"
@@ -1286,7 +1286,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pf-client-core"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
+source = "git+https://git.unom.io/unom/punktfunk?rev=a157fe582#a157fe5822684ce05909c52e3b27b9b3967eefef"
 dependencies = [
  "anyhow",
  "punktfunk-core",
@@ -1299,7 +1299,7 @@ dependencies = [
 [[package]]
 name = "pf-console-ui"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
+source = "git+https://git.unom.io/unom/punktfunk?rev=a157fe582#a157fe5822684ce05909c52e3b27b9b3967eefef"
 dependencies = [
  "anyhow",
  "pf-client-core",
@@ -1399,7 +1399,7 @@ dependencies = [
 [[package]]
 name = "punktfunk-core"
 version = "0.34.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=01d990cda#01d990cdaf710f17494db3a110a4ffff516955d8"
+source = "git+https://git.unom.io/unom/punktfunk?rev=a157fe582#a157fe5822684ce05909c52e3b27b9b3967eefef"
 dependencies = [
  "aes-gcm",
  "cbindgen",
@@ -2235,6 +2235,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",

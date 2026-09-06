@@ -678,6 +678,14 @@ impl App {
         {
             animating = true;
         }
+        // The mark's entrance, from the sidebar's first frame.
+        if self
+            .render
+            .mark_shown_at
+            .is_some_and(|t| t.elapsed().as_secs_f32() < pf_console_ui::brand::INTRO_SECS)
+        {
+            animating = true;
+        }
         animating
     }
 
