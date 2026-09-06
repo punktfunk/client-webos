@@ -20,7 +20,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{reload, Layer};
 
-pub use launch::{launch_level_override, webos_sdk_override};
+pub use launch::{launch_level_override, ui_scale_override, webos_sdk_override};
 pub use level::{current_level_override, resolved_level, set_level_override};
 pub use ring::{recent_lines, set_ring_capture};
 pub use sink::latest_log_file;

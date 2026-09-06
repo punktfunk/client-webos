@@ -429,8 +429,12 @@ pub(super) fn run(
             console.frame(
                 surface.canvas(),
                 // No insets: webOS hands a native app a clean 1080p surface with no overscan
-                // margin to keep chrome out of.
-                &Viewport::plain(w, h),
+                // margin to keep chrome out of. The scale is the pointer UI's, panel-size
+                // correction included, or the two UIs read at different sizes on one TV.
+                &Viewport {
+                    scale: Some(f64::from(crate::app::draw::scale(h))),
+                    ..Viewport::plain(w, h)
+                },
                 label.as_deref(),
                 pad_pref,
                 &pads,

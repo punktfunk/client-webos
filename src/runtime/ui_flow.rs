@@ -247,13 +247,14 @@ pub(super) fn run_ui_flow(
                 break 'ui;
             }
         }
-        for event in events.poll_iter() {
+        for mut event in events.poll_iter() {
             use sdl2::event::Event;
             // Dropped in the menu too, or a thumb resting on a pad's touchpad hovers rows and
             // clicks them — see `mouse::is_touch_emulated`.
             if mouse::is_touch_emulated(&event) {
                 continue;
             }
+            into_layout_units(&mut event, crate::app::draw::panel_k());
             // Launch committed: the menu is behind the loading screen and its input would
             // move a grid the user can no longer see. Only shutdown still counts.
             if app.launch_anim.is_some() {
@@ -466,6 +467,26 @@ pub(super) fn run_ui_flow(
 /// Raises the quit dialog, focused on Cancel. Every path in goes through here so none can
 /// forget the hold it has to end: the releases of whatever was held when it opened go to the
 /// dialog, so a repeat left armed would keep stepping the menu underneath once it closes.
+/// SDL reports the pointer in window pixels while the menu lays out in a box shrunk by
+/// `app::draw::panel_k`, so a hover lands where it was drawn only after this. Relative motion
+/// rides along: it steers the cursor over the same layout.
+fn into_layout_units(event: &mut sdl2::event::Event, k: f32) {
+    use sdl2::event::Event;
+    if (k - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    let to_box = |v: i32| (v as f32 / k).round() as i32;
+    match event {
+        Event::MouseMotion { x, y, xrel, yrel, .. } => {
+            (*x, *y, *xrel, *yrel) = (to_box(*x), to_box(*y), to_box(*xrel), to_box(*yrel));
+        }
+        Event::MouseButtonDown { x, y, .. } | Event::MouseButtonUp { x, y, .. } => {
+            (*x, *y) = (to_box(*x), to_box(*y));
+        }
+        _ => {}
+    }
+}
+
 fn open_quit_dialog(dialog: &mut ConfirmDialog, input: &mut UiInput, app: &App) {
     input.clear_nav_repeat();
     dialog.open_with(1, quit_subtitle(app));
