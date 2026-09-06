@@ -132,8 +132,8 @@ pub(crate) fn draw(
     });
 }
 
-/// A card with no buttons: what a wake with no address on record, or a speed test still
-/// running, shows.
+/// A card with no buttons: what a speed test still measuring shows, until it has a result to
+/// apply.
 pub(crate) fn draw_message(
     f: &Frame<'_>,
     title: &str,
@@ -338,13 +338,11 @@ impl App {
     }
 
     /// The buttonless card a screen shows while it has nothing to confirm: title, body and
-    /// the body's tone. Wake without an address on record; a speed test still running.
+    /// the body's tone. Only a speed test still measuring — a wake with nothing to send never
+    /// opens a card at all (`state::wake::wake_prompts`), since it would have nothing on it a
+    /// d-pad could reach.
     pub(crate) fn message_card(&self, screen: Screen) -> Option<(&'static str, String, Color4f)> {
         match screen {
-            Screen::Wake => {
-                let wake = self.screens.wake.as_ref()?;
-                Some(("Host unreachable", view::wake::status_text(wake), theme::fg(0.72)))
-            }
             Screen::SpeedTest => {
                 let state = self.screens.speed_test.as_ref();
                 let failed = matches!(state, Some(crate::app::state::speedtest::SpeedTestState::Failed(_)));
