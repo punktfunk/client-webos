@@ -66,6 +66,22 @@ fn resolve_gamepad_type(
     settings
 }
 
+/// The mode to dial with: the document's explicit pick, or the panel where it says "Native"
+/// (`0`) or "Match window" — the two the desktop clients resolve to the monitor, and which the
+/// host refuses as a 0×0 request if passed through.
+fn stream_mode(settings: &store::Settings, native: Mode) -> Mode {
+    let explicit = !settings.match_window && settings.width != 0 && settings.height != 0;
+    Mode {
+        width: if explicit { settings.width } else { native.width },
+        height: if explicit { settings.height } else { native.height },
+        refresh_hz: if settings.refresh_hz == 0 {
+            native.refresh_hz
+        } else {
+            settings.refresh_hz
+        },
+    }
+}
+
 /// Set when a connect attempt returns an error, cleared as the next one is spawned. The
 /// loading screen otherwise has only `is_finished`, which success and failure reach alike —
 /// and a failure never presents a frame, so it sat out the whole
@@ -83,18 +99,8 @@ fn spawn_connect(
     std::thread::Builder::new()
         .name("punktfunk-webos-connect".into())
         .spawn(move || {
-            // SDL2/Wayland reports refresh_rate=0; use settings' nominal rate instead
-            let mode = Mode {
-                width: settings.width,
-                height: settings.height,
-                refresh_hz: settings.refresh_hz,
-            };
-            tracing::info!(
-                "requesting {}x{}@{}",
-                settings.width,
-                settings.height,
-                settings.refresh_hz
-            );
+            let mode = stream_mode(&settings, crate::platform::webos::device::native_mode());
+            tracing::info!("requesting {}x{}@{}", mode.width, mode.height, mode.refresh_hz);
             session::connect(&session::ConnectParams {
                 host,
                 port,
@@ -303,3 +309,34 @@ use ui_flow::run_ui_flow;
 
 /// The shared gamepad shell's flow. `runtime` is Linux-only, and so is the shell.
 mod console_flow;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Native" (0) and "Match window" dial the panel; an explicit pick dials itself.
+    #[test]
+    fn a_native_mode_dials_the_panel() {
+        let panel = Mode {
+            width: 3840,
+            height: 2160,
+            refresh_hz: 60,
+        };
+        let mut s = store::Settings::default();
+        assert_eq!(stream_mode(&s, panel), panel, "the document's default is Native");
+        s.match_window = true;
+        s.width = 1280;
+        assert_eq!(stream_mode(&s, panel), panel);
+        s.match_window = false;
+        s.height = 720;
+        s.refresh_hz = 120;
+        assert_eq!(
+            stream_mode(&s, panel),
+            Mode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 120
+            }
+        );
+    }
+}

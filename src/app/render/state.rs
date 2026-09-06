@@ -38,4 +38,7 @@ pub(crate) struct RenderState {
     /// The sidebar rows' and the settings tabs' eased focus (`app::draw::FocusEase`).
     pub(crate) sidebar_focus: crate::app::draw::FocusEase,
     pub(crate) tab_focus: crate::app::draw::FocusEase,
+    /// When the sidebar first drew the brand mark — the start of its one-shot entrance
+    /// (`pf_console_ui::brand`). `None` until then.
+    pub(crate) mark_shown_at: Option<std::time::Instant>,
 }

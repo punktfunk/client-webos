@@ -132,7 +132,7 @@ impl App {
                 "Wake host",
                 Tone::Primary,
                 "Cancel",
-                view::wake::status_text(self.screens.wake.as_ref().filter(|w| !w.mac.is_empty())?),
+                view::wake::status_text(self.screens.wake.as_ref()?),
             ),
             Screen::SpeedTest => {
                 let state = self.screens.speed_test.as_ref();

@@ -62,7 +62,9 @@ This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardwar
 - **Host power** — Wake-on-LAN starts a sleeping host from the TV, and a paired host can be put to
   sleep or shut down on exit when it grants those rights.
 - **Game mode (rooted TVs)** — optional setting that switches picture and sound to Game mode while
-  streaming and restores the previous settings on exit.
+  streaming and restores the previous settings on exit. On a TV that is not rooted, pick
+  *Game Optimizer* in the TV's own picture menu while a stream is up; webOS remembers it for
+  the app, and it is the largest input-latency win the panel has.
 
 > **Controller advanced features need newer webOS version.** Haptics, triggers, speakers, touchpad, and
 > lightbar all rely on the kernel's `hid-playstation` driver, which LG ships only on webOS versions 10+.

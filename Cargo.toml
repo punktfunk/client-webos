@@ -65,12 +65,14 @@ tracing-appender = "0.2"
 # also be ONE source: pin punktfunk-core by tag while pf-client-core resolves it by rev and
 # cargo builds two copies whose types do not unify — the shell would then reject the
 # `GamepadPref` this crate hands it. Re-pin all three together, to v0.35.0 once it is cut.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", features = ["quic"] }
+# a157fe582 is main (with unom/punktfunk#660, a noted row's value on the centre line, and #662,
+# the kit's brand mark the sidebar draws) plus #664, the mark's highlight as the icon draws it.
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "a157fe582", features = ["quic"] }
 # The portable half of the client stack: `trust::Settings` (the shared settings document this
 # client now persists), the menu vocabulary, the library model, deep links. Pure Rust with no
 # Skia and no SDL, so it builds on every host — `services::store::shared` and its tests need it
 # on the dev target too.
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", default-features = false }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "a157fe582", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mDNS LAN discovery; direct dep (not via pf-client-core — see session.rs docs).
@@ -112,7 +114,7 @@ libc = "0.2"
 # surface — and `gl` asks Skia for the GLES backend the panel exposes. skia-safe keeps its
 # DEFAULT features: they carry `binary-cache` (the prebuilt fetch) and the jpeg/pdf codecs, and
 # they are what make the key `gl-jpegd-jpege-pdf-textlayout` — the one both sources publish.
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "01d990cda", default-features = false, features = ["gl"] }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "a157fe582", default-features = false, features = ["gl"] }
 # `Console::frame` draws into a `skia_safe::Canvas`, and the host owns the `DirectContext` plus
 # the surface wrapping framebuffer 0.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
