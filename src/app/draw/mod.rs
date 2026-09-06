@@ -97,6 +97,12 @@ pub(crate) fn scale(h: u32) -> f32 {
 /// The panel the design is tuned on.
 const REFERENCE_INCHES: f32 = 65.0;
 
+/// How far a smaller panel is compensated. A full correction (1.0) holds type the same
+/// physical size, which assumes everyone sits the same distance from whatever they bought; the
+/// square root splits it, because a smaller set is usually a closer set. The layouts agree: a
+/// full correction overflows the gamepad shell, which fills the screen by design.
+const COMPENSATION: f32 = 0.5;
+
 /// Physical-size correction, resolved once. webOS hands every set the same 1920x1080 surface,
 /// so the UI covers the same fraction of a 48-inch panel as of an 83-inch one, and the text on
 /// the smaller set is physically smaller by the ratio of the diagonals. There is no
@@ -120,9 +126,17 @@ pub(crate) fn panel_k() -> f32 {
 
 /// The curve, split out so it is testable without a TV. It only ever grows the UI: a set
 /// larger than the reference is sat further from, and shrinking chrome nobody has complained
-/// about is a regression. The cap lands at 1.35, which is a 48-inch panel.
+/// about is a regression.
 fn panel_k_for(inches: u32) -> f32 {
-    (REFERENCE_INCHES / inches as f32).clamp(1.0, 1.35)
+    (REFERENCE_INCHES / inches as f32).powf(COMPENSATION).clamp(1.0, 1.25)
+}
+
+/// A metric written as pixels on a 1080p panel, in layout units. Home keeps a few of those
+/// rather than kit design units, and the layout box is divided by [`panel_k`] — so without
+/// this they would be the one thing that ignores the correction, which is exactly how the
+/// first build grew every box on Home and left the type where it was.
+pub(crate) fn px_1080(box_h: f32, size: f32) -> f32 {
+    size * box_h * panel_k() / 1080.0
 }
 
 /// Geist's line box at `size`: the ascent-to-descent span comes out near 1.25 em.
@@ -665,9 +679,10 @@ mod tests {
     fn panel_correction_only_grows() {
         assert!((panel_k_for(65) - 1.0).abs() < 1e-6);
         assert!((panel_k_for(83) - 1.0).abs() < 1e-6);
-        assert!((panel_k_for(55) - 65.0 / 55.0).abs() < 1e-6);
-        assert!((panel_k_for(48) - 1.35).abs() < 1e-6);
-        assert!((panel_k_for(32) - 1.35).abs() < 1e-6);
+        assert!((panel_k_for(48) - (65.0f32 / 48.0).sqrt()).abs() < 1e-6);
+        assert!((panel_k_for(32) - 1.25).abs() < 1e-6);
+        // A 1080p-pixel metric is untouched at the reference panel.
+        assert!((px_1080(1080.0, 54.0) - 54.0).abs() < 1e-4);
     }
 
     /// A focus move owes frames until every channel reaches its target, then none.
