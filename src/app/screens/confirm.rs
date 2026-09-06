@@ -81,9 +81,8 @@ impl Confirm {
 }
 
 impl App {
-    /// The open confirm dialog, or `None` — on a screen that isn't one, and on the two whose
-    /// buttons aren't up yet: a Wake with no MAC on record is a button-less message, and a
-    /// speed test still running has nothing to apply.
+    /// The open confirm dialog, or `None` — on a screen that isn't one, and on the one whose
+    /// buttons aren't up yet: a speed test still running has nothing to apply.
     ///
     /// That `None` is load-bearing beyond the geometry: it is what says the dialog is not
     /// showing buttons, so a caller holding a `Some` has already proved the arm it is in is
@@ -135,7 +134,7 @@ impl App {
                 "Wake host",
                 palette().accent_bright,
                 "Cancel",
-                view::wake::status_text(self.screens.wake.as_ref().filter(|w| !w.mac.is_empty())?),
+                view::wake::status_text(self.screens.wake.as_ref()?),
             ),
             Screen::SpeedTest => {
                 let state = self.screens.speed_test.as_ref();

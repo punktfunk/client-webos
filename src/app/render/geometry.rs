@@ -478,9 +478,9 @@ impl App {
             }),
             // Every one-field text form, described once by `text_form`.
             Screen::AddHost | Screen::EditHost | Screen::RenameCollection => f(&self.text_form()?),
-            Screen::Wake => f(&view::wake::Modal {
-                wake: self.screens.wake.as_ref()?,
-                confirm: confirm.as_ref(),
+            Screen::Wake => f(&view::confirm::Modal {
+                title: view::wake::TITLE,
+                confirm: confirm.as_ref()?,
             }),
             Screen::ForgetHost => f(&view::confirm::Modal {
                 title: view::forget::TITLE,

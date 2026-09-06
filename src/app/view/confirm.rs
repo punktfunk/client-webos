@@ -1,9 +1,9 @@
 //! The two-button confirm dialog, as a screen — the shell every one of them draws.
 //!
 //! What differs between Forget host, Send logs, a Wake prompt and a finished speed test is a
-//! title and a [`Confirm`]; the card, the header and the button row are this. The screens with
-//! a button-less state of their own (Wake without a MAC, a test still running) keep their own
-//! `Modal` and take their buttons from the same descriptor.
+//! title and a [`Confirm`]; the card, the header and the button row are this. A speed test
+//! still running has no buttons yet, so it keeps its own `Modal` and takes them from the same
+//! descriptor once it does.
 use crate::app::screens::confirm::Confirm;
 use crate::ui;
 use crate::ui::render::Rect;

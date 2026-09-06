@@ -344,12 +344,7 @@ impl App {
                     self.screens.collections.dragging.is_some(),
                 ))
             }
-            Screen::Wake => self
-                .screens
-                .wake
-                .as_ref()
-                .filter(|w| !w.mac.is_empty())
-                .map(|w| ModalFocusKey::WakeButton(w.focused)),
+            Screen::Wake => self.screens.wake.as_ref().map(|w| ModalFocusKey::WakeButton(w.focused)),
             Screen::Pairing => Some(match self.screens.pairing_focus {
                 PairingFocus::Pin => ModalFocusKey::PairingDigit(
                     self.screens.pin_digit_index,
@@ -522,8 +517,7 @@ impl App {
         }
         // Whichever modal is open has at most one focused, zoom-animated widget
         // (`ModalFocusKey`'s docs) — `None` for screens with no such widget
-        // (Home, AddHost) or when Wake has nothing to focus (no MAC on record,
-        // see `handle_wake_event`'s matching guard).
+        // (Home, AddHost) or while a speed test is still measuring.
         if let Some(version) = self.modal_focus_version(&host_menu_actions, host_menu_power) {
             // Also stale on every tick of an in-flight `switch_anim`: the knob's
             // position depends on elapsed time, not on the key, which doesn't
@@ -683,7 +677,9 @@ impl App {
             let options = self.dropdown_options(dd.row);
             // The overlay hangs inside whichever viewport its list is drawn in.
             let content_w = match self.nav.screen {
-                s if crate::app::screens::is_list_modal(s) => self.modal_list_content(screen_w, screen_h, fonts).width(),
+                s if crate::app::screens::is_list_modal(s) => {
+                    self.modal_list_content(screen_w, screen_h, fonts).width()
+                }
                 _ => view::settings::layout(self.settings_scope(), screen_w, screen_h)
                     .1
                     .width(),

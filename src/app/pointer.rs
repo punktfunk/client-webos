@@ -245,8 +245,8 @@ impl App {
             // Two-button confirm modals (Forget/SendLogs/Wake/finished SpeedTest — the same
             // modal type as the in-stream Disconnect dialog): hovering a button focuses it,
             // so the pointer can pick action-vs-Cancel, not just confirm whatever the D-pad
-            // last focused. `confirm_subtitle` is `None` for the variants with no buttons up
-            // (a Wake with no MAC, a test still running), which reads as nothing to hover.
+            // last focused. `confirm_subtitle` is `None` while a test is still measuring,
+            // which reads as nothing to hover.
             Screen::ForgetHost
             | Screen::SendLogs
             | Screen::Wake
