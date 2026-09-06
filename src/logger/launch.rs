@@ -13,6 +13,14 @@ struct LaunchParams {
     /// Forces `device::sdk_version`, so a modern TV can exercise the NDL v1 path
     /// (`task deploy WEBOS_SDK=...`).
     webos_sdk: Option<String>,
+    /// Replaces the panel-size UI scale factor, so a set neither developer owns can be tuned
+    /// on glass without a rebuild (`ares-launch … -p ui_scale=1.2`). A launch param, never a
+    /// settings row — see `app::draw::panel_k`.
+    ///
+    /// Untyped on purpose: `ares-launch` sends `-p` values as strings and SAM can send a
+    /// number, and a field that rejects either shape fails the whole struct — which silently
+    /// costs every other param, telemetry included (seen on device 2026-09-06).
+    ui_scale: Option<serde_json::Value>,
 }
 
 /// Cache launch params once; argv doesn't change over process lifetime.
@@ -51,4 +59,12 @@ pub fn launch_level_override() -> Option<LogLevelOverride> {
 /// Launch-time override for the detected webOS SDK version; `None` leaves detection untouched.
 pub fn webos_sdk_override() -> Option<&'static str> {
     launch_params().webos_sdk.as_deref().filter(|s| !s.is_empty())
+}
+
+/// Launch-time replacement for the panel-derived UI scale factor; `None` leaves it alone.
+/// Nonsense (zero, negative, unparseable) is ignored rather than shrinking the UI to nothing.
+pub fn ui_scale_override() -> Option<f32> {
+    let raw = launch_params().ui_scale.as_ref()?;
+    let n = raw.as_f64().or_else(|| raw.as_str()?.parse().ok())? as f32;
+    (n.is_finite() && n > 0.0).then_some(n)
 }

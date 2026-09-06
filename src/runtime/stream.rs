@@ -174,6 +174,18 @@ pub(super) fn run_inner() -> Result<()> {
     // The overlays' fonts: the kit's, the same faces every screen draws with.
     let overlay_fonts = pf_console_ui::theme::build_fonts().context("overlay fonts")?;
     let display = (display_mode.w as u32, display_mode.h as u32);
+    // The menu's layout box: the real mode divided by the panel-size correction, so a smaller
+    // set lays out fewer, larger units and the canvas scale below makes them back up to
+    // pixels. The window, the stream and the IME rect all keep the real mode.
+    let ui_mode = {
+        let k = crate::app::draw::panel_k();
+        sdl2::video::DisplayMode::new(
+            display_mode.format,
+            (display_mode.w as f32 / k).round() as i32,
+            (display_mode.h as f32 / k).round() as i32,
+            display_mode.refresh_rate,
+        )
+    };
 
     // Owned above the loop, not re-declared per iteration: `ControllerDeviceAdded` fires only
     // once per physical (re)connection, so a pad opened earlier must carry across screens.
@@ -213,7 +225,7 @@ pub(super) fn run_inner() -> Result<()> {
                 &game_controller,
                 &mut controller,
                 &identity,
-                display_mode,
+                ui_mode,
                 menu_status.take(),
                 menu_toast.take(),
             )?

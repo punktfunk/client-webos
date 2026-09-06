@@ -15,12 +15,15 @@ pub(crate) mod home;
 pub(crate) mod list;
 pub(crate) mod settings;
 
+use std::sync::OnceLock;
+
 use pf_console_ui::anim::approach;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
 use skia_safe::{Canvas, RRect, Rect};
 
 use crate::app::App;
 use crate::core::screen::Screen;
+use crate::platform::webos::device;
 use crate::ui;
 
 /// Which screens draw here rather than as tiles. Every prepare, compose and hit-test path
@@ -83,8 +86,57 @@ impl<'a> Frame<'a> {
 
 /// The console's `Viewport` default: 800 design units tall, clamped between a Deck and a 4K
 /// panel. 1.35 at 1080p.
+///
+/// `h` is the layout box, which [`panel_k`] has already shrunk on a small panel, so multiply it
+/// back out: a design unit is a fixed share of the *panel*, not of the box. Both halves grow
+/// together — text through this, Home's pixel geometry through the smaller box.
 pub(crate) fn scale(h: u32) -> f32 {
-    (h as f32 / 800.0).clamp(0.75, 3.0)
+    (h as f32 / 800.0 * panel_k()).clamp(0.75, 3.0)
+}
+
+/// The panel the design is tuned on.
+const REFERENCE_INCHES: f32 = 65.0;
+
+/// How far a smaller panel is compensated. A full correction (1.0) holds type the same
+/// physical size, which assumes everyone sits the same distance from whatever they bought; the
+/// square root splits it, because a smaller set is usually a closer set. The layouts agree: a
+/// full correction overflows the gamepad shell, which fills the screen by design.
+const COMPENSATION: f32 = 0.5;
+
+/// Physical-size correction, resolved once. webOS hands every set the same 1920x1080 surface,
+/// so the UI covers the same fraction of a 48-inch panel as of an 83-inch one, and the text on
+/// the smaller set is physically smaller by the ratio of the diagonals. There is no
+/// display-scale signal on this platform to follow, and the diagonal is the one physical fact
+/// the OS reports, so the whole UI grows as the panel shrinks.
+///
+/// `runtime::ui_flow` divides the menu's layout box by this and the canvas scale makes it back
+/// up, which is what carries Home's pixel geometry along with the type.
+pub(crate) fn panel_k() -> f32 {
+    static K: OnceLock<f32> = OnceLock::new();
+    *K.get_or_init(|| {
+        if let Some(over) = crate::logger::ui_scale_override() {
+            tracing::info!("UI scale forced to {over} at launch");
+            return over.clamp(0.5, 2.0);
+        }
+        let k = device::panel_inches().map_or(1.0, panel_k_for);
+        tracing::info!("UI scale {k} from the panel size");
+        k
+    })
+}
+
+/// The curve, split out so it is testable without a TV. It only ever grows the UI: a set
+/// larger than the reference is sat further from, and shrinking chrome nobody has complained
+/// about is a regression.
+fn panel_k_for(inches: u32) -> f32 {
+    (REFERENCE_INCHES / inches as f32).powf(COMPENSATION).clamp(1.0, 1.25)
+}
+
+/// A metric written as pixels on a 1080p panel, in layout units. Home keeps a few of those
+/// rather than kit design units, and the layout box is divided by [`panel_k`] — so without
+/// this they would be the one thing that ignores the correction, which is exactly how the
+/// first build grew every box on Home and left the type where it was.
+pub(crate) fn px_1080(box_h: f32, size: f32) -> f32 {
+    size * box_h * panel_k() / 1080.0
 }
 
 /// Geist's line box at `size`: the ascent-to-descent span comes out near 1.25 em.
@@ -619,6 +671,18 @@ mod tests {
         assert!((scale(1080) - 1.35).abs() < 1e-6);
         assert!((scale(2160) - 2.7).abs() < 1e-6);
         assert!((scale(400) - 0.75).abs() < 1e-6);
+    }
+
+    /// The reference panel is untouched, a smaller one grows to the cap, a larger one does not
+    /// shrink.
+    #[test]
+    fn panel_correction_only_grows() {
+        assert!((panel_k_for(65) - 1.0).abs() < 1e-6);
+        assert!((panel_k_for(83) - 1.0).abs() < 1e-6);
+        assert!((panel_k_for(48) - (65.0f32 / 48.0).sqrt()).abs() < 1e-6);
+        assert!((panel_k_for(32) - 1.25).abs() < 1e-6);
+        // A 1080p-pixel metric is untouched at the reference panel.
+        assert!((px_1080(1080.0, 54.0) - 54.0).abs() < 1e-4);
     }
 
     /// A focus move owes frames until every channel reaches its target, then none.

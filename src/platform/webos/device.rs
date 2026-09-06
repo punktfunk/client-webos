@@ -121,6 +121,42 @@ pub fn sdk_version() -> Option<(u32, u32)> {
     })
 }
 
+/// The panel's diagonal in inches, from LG's per-model config (`tv.model.moduleInchType`,
+/// `"65"` on a 65-inch G5). webOS hands every set the same 1920x1080 surface, so this is the
+/// one signal that separates a 48-inch panel from an 83-inch one.
+///
+/// Its own Luna call rather than a [`system_info`] key: `getSystemInfo` carries no size at all
+/// — asked for `screenSize`, `panelSize`, `inch` and `screenType` together it answers none of
+/// them (webOS 10.3). A set whose config lacks the key scales as it does today.
+pub fn panel_inches() -> Option<u32> {
+    static INCHES: OnceLock<Option<u32>> = OnceLock::new();
+    *INCHES.get_or_init(|| {
+        if !super::luna::available() {
+            return None;
+        }
+        let reply = super::luna::call_capture(
+            "luna://com.webos.service.config/getConfigs",
+            r#"{"configNames":["tv.model.moduleInchType"]}"#,
+            super::luna::CALL_TIMEOUT,
+        )
+        .ok()?;
+        config_digits(&reply, "tv.model.moduleInchType").filter(|n| (24..=120).contains(n))
+    })
+}
+
+/// The number after `key`, quoted or bare: the config service answers strings for some fields
+/// and numbers for others, and which one a given model sends is not worth depending on.
+fn config_digits(reply: &str, key: &str) -> Option<u32> {
+    let rest = reply.split_once(&format!("\"{key}\""))?.1.split_once(':')?.1;
+    rest.trim_start()
+        .trim_start_matches('"')
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 /// `otaId` from Luna's `getSystemInfo`, e.g. `HE_DTV_W19H_...`. Display-only.
 fn ota_id() -> Option<String> {
     json_str_field(system_info(), "otaId")
@@ -252,11 +288,13 @@ impl DeviceInfo {
     /// neither developer owns: which webOS, which `SoC`, which NDL generation, jail check ok.
     pub fn log(&self) {
         tracing::info!(
-            "device: cores={} webos={} model={} sdk={} ota={} machine={} ndl_gen={:?} jail_broken={}",
+            "device: cores={} webos={} model={} panel={} sdk={} ota={} machine={} ndl_gen={:?} \
+             jail_broken={}",
             self.cores,
             self.webos_major
                 .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
             self.model.as_deref().unwrap_or("unknown"),
+            panel_inches().map_or_else(|| "unknown".to_string(), |i| format!("{i}in")),
             self.sdk_version
                 .map_or_else(|| "unknown".to_string(), |(maj, min)| format!("{maj}.{min}")),
             self.ota_id.as_deref().unwrap_or("unknown"),
@@ -340,4 +378,18 @@ pub fn process_cpu_mem() -> Option<(u64, u64)> {
 /// Clock ticks per second, for converting [`process_cpu_mem`]'s ticks to seconds.
 pub fn clock_ticks_per_sec() -> u64 {
     (unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64).max(1) // SAFETY: no pointers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_digits;
+
+    #[test]
+    fn a_config_number_is_read_quoted_or_bare() {
+        let quoted = r#"{"configs":{"tv.model.moduleInchType":"65"}}"#;
+        let bare = r#"{"configs":{"tv.model.moduleInchType":48}}"#;
+        assert_eq!(config_digits(quoted, "tv.model.moduleInchType"), Some(65));
+        assert_eq!(config_digits(bare, "tv.model.moduleInchType"), Some(48));
+        assert_eq!(config_digits(r#"{"configs":{}}"#, "tv.model.moduleInchType"), None);
+    }
 }

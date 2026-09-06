@@ -430,6 +430,12 @@ pub(super) fn run(
                 surface.canvas(),
                 // No insets: webOS hands a native app a clean 1080p surface with no overscan
                 // margin to keep chrome out of.
+                //
+                // No panel-size correction either, unlike the pointer UI. The kit's default
+                // scale is `height / 800`, so its design box is always exactly 800 units tall
+                // and every shell screen is laid out to fill that; a correction shortens the
+                // box and the screens run off the bottom instead of reflowing. Growing this
+                // one is a kit change, not a client change.
                 &Viewport::plain(w, h),
                 label.as_deref(),
                 pad_pref,
