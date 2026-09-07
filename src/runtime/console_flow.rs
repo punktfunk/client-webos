@@ -188,11 +188,16 @@ pub(super) fn run(
                         }
                     }
                 }
-                Event::ControllerDeviceRemoved { .. } => {
-                    *controller = None;
-                    // An unplugged pad sends no releases: drop what the synthesizer holds.
-                    nav.reset();
-                    sample = MenuSample::default();
+                Event::ControllerDeviceRemoved { which, .. } => {
+                    // Only the pad we hold: webOS enumerates the Magic Remote as a controller
+                    // and it drops constantly, and clearing on its removal took the real pad's
+                    // input away with it.
+                    if controller.as_ref().is_some_and(|c| c.instance_id() == which) {
+                        *controller = None;
+                        // An unplugged pad sends no releases: drop what the synthesizer holds.
+                        nav.reset();
+                        sample = MenuSample::default();
+                    }
                 }
                 Event::KeyDown {
                     keycode: Some(k),
@@ -400,7 +405,11 @@ pub(super) fn run(
         // pad withdraws it without writing anything. Plain `Reenter` — `leave_for_classic`
         // would turn the switch off, and a pad going flat is not the user saying "off".
         let state = store.snapshot();
-        if !state.settings.gamepad_ui_active(pad.is_some()) {
+        // 🛑 The SAME expression `stream`'s menu loop enters on, not the open handle: a handle
+        // that went stale while a pad is still attached made the loop enter here, leave, and
+        // enter again forever, drawing no frame — a freeze on the way out of a stream.
+        let pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
+        if !state.settings.gamepad_ui_active(pad_connected) {
             tracing::info!("console: the controller UI no longer applies — back to the cursor menus");
             break 'ui UiOutcome::Reenter;
         }
