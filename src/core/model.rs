@@ -711,7 +711,7 @@ pub struct Persisted {
     /// grid instead of an unfocused sidebar. `(host, port)`, not an index: `known_hosts` order
     /// isn't stable across a forget/re-add.
     pub selected_host: Option<(String, u16)>,
-    /// The app version that last wrote this document (`CARGO_PKG_VERSION`). `None` means it
+    /// The app version that last wrote this document (`core::VERSION`). `None` means it
     /// was written before versioning existed — the only signal a future migration gets about
     /// which shape it is reading. `store::load` stamps it on first sight.
     #[serde(default, skip_serializing_if = "Option::is_none")]

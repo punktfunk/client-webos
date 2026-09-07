@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::core::VERSION;
+
 pub use crate::core::model::{
     upsert_known_host, AudioRoutePref, CodecPref, ExitAction, GamepadType, KnownHost, LogLevelOverride, Persisted,
     DESKTOP_PIN_ID,
@@ -56,9 +58,6 @@ pub fn load() -> Loaded {
     state.settings.clamp_to_caps();
     Loaded { state, new_build }
 }
-
-/// The version this build writes into the document.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Brings [`Persisted::version`] up to this build's, and returns whether it had to — which is
 /// how the UI knows this release is running here for the first time.

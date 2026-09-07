@@ -20,7 +20,6 @@ use crate::app::{menu, App};
 use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
 use crate::core::settings::TvSettings;
-use crate::services::store;
 
 /// The page map. Labels are the desktop shells'; marks are the six the desktop's nav uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -433,7 +432,7 @@ impl App {
                             Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
                         },
-                        Row::Version => RowSpec::field("Punktfunk", store::VERSION.to_string(), ""),
+                        Row::Version => RowSpec::field("Punktfunk", crate::core::VERSION.to_string(), ""),
                         Row::LogLevel => RowSpec::choice(
                             "Log level",
                             menu::log_level_label(crate::logger::current_level_override()),
