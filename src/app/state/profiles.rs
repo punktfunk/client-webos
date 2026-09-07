@@ -45,6 +45,9 @@ impl App {
             self.profiles.retain(|p| p.id != id);
         }
         self.screens.settings_page.scope = Scope::Global;
+        // A discovery announce persists the document from under the open form, so the drop has
+        // to reach disk too rather than only the catalog in memory.
+        self.persist();
     }
 
     /// The card menu's "Game settings": the title's bound profile in profile scope, created
