@@ -59,17 +59,17 @@ jobs:
         with:
           version: 3
 
-      - name: Format check
-        run: task fmt-check
-
-      - name: Lint
+      - name: Lint (rustfmt + clippy)
         run: task lint
         env:
           CARGO_TARGET_DIR: target-clippy
 
       # SDL2 for the window, fontconfig and FreeType for Skia's text layout (the console kit).
       - name: Install native SDL2 and Skia's text libs for the test build
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libfontconfig-dev libfreetype-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libsdl2-dev libfontconfig-dev libfreetype-dev
+          version: 1
 
       # Runs the tests `lint` only type-checks: the byte-exact report/CRC/resample paths
       # fail silently on the pad, so a green cross-compile proves nothing about them.

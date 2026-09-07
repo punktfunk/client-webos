@@ -1,9 +1,7 @@
 
-![punktfunk](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/logo/logo-sidebar.png)
+# Punktfunk — Low-latency desktop and game streaming client for LG webOS.
 
-Low-latency desktop and game streaming for LG webOS.
-
-![Home screen](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/home.jpg)
+![Home screen](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/console-game.jpg)
 
 * **Video.** Up to 4K120 with HDR. HEVC or H.264, decoded by the TV's media pipeline.
 * **Bitrate.** Automatic mode adapts to the network, or set a fixed rate up to 200 Mbps.

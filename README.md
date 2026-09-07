@@ -21,7 +21,7 @@ Targets webOS 5 and later (developed and verified live on an **LG CX, webOS 5.6*
 older NDL interface. Built directly on the upstream `punktfunk-core` crate (a pinned git dependency — see
 `Cargo.toml`).
 
-The app is originally developed by [dyptan.io](https://dyptan.io) and donated to
+The app is originally developed by [dyptan.io](https://github.com/dyptan-io) and donated to
 [punktfunk](https://github.com/punktfunk) organization. Built on the [punktfunk](https://git.unom.io/unom/punktfunk)
 project by **Enrico Bühler ([unom](https://unom.io))** — all credit for the protocol and host implementation belongs there.
 This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardware video decode, and webOS packaging.
@@ -31,8 +31,9 @@ This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardwar
 
 <p align="center">
   <img src="assets/screenshots/home.jpg" width="32%" alt="Home / game library">
-  <img src="assets/screenshots/collections.jpg" width="32%" alt="Collections">
   <img src="assets/screenshots/settings.jpg" width="32%" alt="Settings">
+  <img src="assets/screenshots/console-home.jpg" width="32%" alt="Console Home">
+  <img src="assets/screenshots/console-game.jpg" width="32%" alt="Console Game">
 </p>
 
 </details>
