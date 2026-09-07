@@ -1,10 +1,5 @@
-//! Shared scroll bookkeeping for modal content lists (uniform-stride rows or
-//! wrapped text lines). Offset clamping, scroll-into-view, and fade logic
-//! extracted so any modal can reuse it. Caller-agnostic to rendering/pixels.
-//!
-//! [`ScrollWindow`] is the row-index form, for lists whose scroll position picks *which
-//! rows render at all*; [`scroll_to_reveal`] is the pixel form, for content that scrolls
-//! continuously behind a viewport.
+//! Scroll-into-view for content that scrolls continuously behind a viewport.
+//! Caller-agnostic to rendering/pixels.
 use crate::ui::render::Rect;
 
 /// The pixel scroll offset that brings `target` (in unscrolled content space) fully

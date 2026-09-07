@@ -3,13 +3,9 @@
 //! drawn here; the document body is its own scroll-content tile, composited separately.
 //! Logic lives in `app::state::about`.
 //!
-//! **Scrolling is hardware-accelerated, the same way the Settings modal's row list is.**
-//! `THIRD-PARTY-NOTICES.txt` wraps to ~12,000 visual lines, far too tall to bake into one
-//! GPU texture, so About needs a *windowed* content tile where Settings' 9 rows fit in
-//! one. [`wrap_document`] wraps the document once, up front, into a flat list of visual
-//! lines with a uniform stride — the unit `ui::scroll::ScrollWindow`/`ui::scroll::ContentWindow` scroll
-//! over — and [`draw_window`] rasterizes only a bounded slice at a time (uncached; see
-//! `ui::draw_text_uncached`). Scrolling within that slice is a pure `DrawCmd::TexCropped`.
+//! `THIRD-PARTY-NOTICES.txt` wraps to ~12,000 visual lines, so `app::draw::about`'s
+//! `wrap_document` wraps it once, up front, into a flat list of visual lines with a uniform
+//! stride, and the painter draws only the visible slice.
 use crate::core::VERSION;
 
 pub const TITLE: &str = "About & licenses";

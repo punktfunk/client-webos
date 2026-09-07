@@ -3,9 +3,7 @@ name = "punktfunk-webos"
 description = "Native LG webOS TV client for punktfunk — session pump direct on punktfunk-core, NDL DirectMedia hardware video decode, SDL2 window/gamepad/remote input."
 version = "0.0.1"
 edition = "2021"
-# 1.85 is punktfunk-core's floor from v0.28.0 on — that release moved the whole workspace to
-# edition 2024, and an edition-2024 dependency cannot be compiled by an older toolchain. This
-# crate itself stays on edition 2021; only the compiler floor rises.
+# Pinned to 1.85: edition-2024 deps (v0.28.0+) require it; only the compiler floor rises.
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Volodymyr Dyptan <volodymyr@dyptan.dev>"]
@@ -26,114 +24,57 @@ items_after_statements = "warn"
 match_same_arms = "warn"
 format_collect = "warn"
 suspicious_operation_groupings = "warn"
-# Both target the classes the render path kept regressing on: a key or a row list taken by
-# value and then only read, and a label cloned to be hashed once (see `app::render::key`).
 needless_pass_by_value = "warn"
 redundant_clone = "warn"
 
 [dependencies]
 anyhow = "1"
-# Enables punktfunk-core's internal tracing (ABR, RFI recovery); without this subscriber,
-# core's tracing calls are dropped (see main.rs).
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-appender = "0.2"
-# v0.22.3 is the first release carrying core's `PUNKTFUNK_ABR_PROBE_KBPS` override, which
-# `main.rs` sets to the TV-safe target documented in docs/NOTES.md.
-# v0.24.0 brings the ABR sweep (eleven defects: the 20 Mbps pin, throughput measured in media
-# bytes not wire bytes, a decode ceiling that latched at the choke rate) and probe throughput
-# measured over the client's own receive interval — all client-side, so the bump is the fix.
-# v0.26.0 is the first release carrying the audio latency programme — `JitterPolicy` (the shared
-# de-jitter state machine every other client ring runs), `AvSync`, `AudioSyncCell`,
-# `crossfade_drop`, and the redundant `0xD2` audio plane. At v0.24.0 `punktfunk_core::audio` is
-# 369 lines (layouts + `AudioGapTracker`); at v0.26.0 it is 2301. `connect`'s parameter list is
-# unchanged across the two, so this is a pin-only bump. See `docs/NOTES.md` § Audio.
-# v0.27.0 widens `RumbleCommand` to four motors — the handles plus the Xbox impulse triggers.
-# Additive (the handle pair is a literal prefix), so the bump is pin-only.
-# v0.28.0 is the release this client ships alongside. Wire protocol stays 2, so pairings and the
-# stream itself are unaffected. It moves TLS to aws-lc-rs, which is what lets this crate drop ring
-# (see the `rustls` note below — ring has no ML-KEM, and that is the whole reason the backend
-# moved), and puts `#![deny(unsafe_code)]` over the crate that parses every byte off the network.
-# The one source-visible break is `note_frame_index`, which now returns a gap WIDTH — see
-# `session::video_pump`.
-# v0.32.0 makes bitrate values total wire budgets and adds recovery-point marks. The webOS pump
-# mirrors those semantics while keeping NDL queue depth out of the decoder-pressure signal.
-# v0.34.0 adds deterministic multi-address mDNS selection, shared with the other clients.
-#
-# 🛑 A REV, not a tag, and the SAME rev for all three punktfunk crates. The pointer UI draws
-# with the console's exported kit (unom/punktfunk#646), merged after v0.34.0 was cut. It must
-# also be ONE source: pin punktfunk-core by tag while pf-client-core resolves it by rev and
-# cargo builds two copies whose types do not unify — the shell would then reject the
-# `GamepadPref` this crate hands it. Re-pin all three together, to v0.35.0 once it is cut.
-# 9f2ab6789 is main with unom/punktfunk#729: the override dot beside the value it marks, no row
-# dip when a switch flips, and the connect/launch takeovers off their full-screen layer.
+# 🛑 REV (not tag), same across all drei crates: tag+rev mix builds two copies, types won't unify.
 punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9f2ab6789", features = ["quic"] }
-# The portable half of the client stack: `trust::Settings` (the shared settings document this
-# client now persists), the menu vocabulary, the library model, deep links. Pure Rust with no
-# Skia and no SDL, so it builds on every host — `services::store::shared` and its tests need it
-# on the dev target too.
 pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9f2ab6789", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mDNS LAN discovery; direct dep (not via pf-client-core — see session.rs docs).
 mdns-sd = "0.21"
-# Pure-Rust crates used by the platform-independent layers (`ui`, `services`), so they build
-# on every host — only the SDL2/webOS-linked crates below stay Linux-gated.
-# mTLS game library fetch (services::library) + cover art decode (services::art).
+# mTLS game library fetch (services::library).
 # ⚠ Spell the ureq TLS feature `rustls-no-provider`, NOT the convenience `rustls` feature: the
 # latter expands to `["rustls-no-provider", "_ring", "rustls-webpki-roots"]`, and that `_ring`
 # turns on `rustls/ring` where no dependent can switch it off. Naming the backend-free feature
 # plus the roots feature is what leaves the choice of provider to us, below.
 ureq = { version = "3", features = ["rustls-no-provider", "rustls-webpki-roots"], default-features = false }
-# aws-lc-rs, matching punktfunk-core from v0.28.0 on. Two reasons it is spelled out rather than
-# left to rustls's default: it is the one line that decides this client's crypto backend, and
-# naming it keeps a second backend from creeping back in — rustls refuses to guess when both
-# `ring` and `aws_lc_rs` are compiled, so `ClientConfig::builder()` panics rather than picking.
+# ⚠ Spelled out, not left to rustls's default: this is the line that decides the crypto backend,
+# and naming it keeps a second one from creeping back in — rustls refuses to guess when both
+# `ring` and `aws_lc_rs` are compiled, and `ClientConfig::builder()` panics rather than picking.
 # aws-lc-rs also carries ML-KEM, so the QUIC/mgmt handshakes get post-quantum key exchange.
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# JPEG/PNG only; webp adds 163 KB for unused VP8 decoder.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-# Linux-only (webOS cross target + dev boxes); macOS/Windows build with stub in main.rs.
-# Only genuinely platform-linked crates live here (SDL2, opus C lib, libc).
 [target.'cfg(target_os = "linux")'.dependencies]
-# Window, events, pads and the GL context the console kit draws on. No `ttf`: text is the
-# kit's own (Skia + Geist), and nothing rasterizes on the CPU any more.
 sdl2 = { version = "0.38", default-features = false }
-# Opus decode (platform::webos::audio); explicit dep despite being transitive via punktfunk-core.
 opus = "0.3"
-# setpriority for video pump scheduling; explicit dep for libc::gettid calls.
 libc = "0.2"
-# The shared console shell, its drawing kit, and their Skia backend — on every Linux target,
-# so the HOST build (`task test`, aarch64) renders the pointer UI's screens to a raster surface
-# and asserts on the pixels. Skia arrives prebuilt either way: the armv7 archive from our own
-# mirror (`SKIA_BINARIES_URL`), the host one from rust-skia's release (the `test` task's env).
-# 🛑 skia-bindings never fails a missing archive — it silently builds Skia from source for about
-# an hour. Every build must log `DOWNLOAD AND INSTALL SUCCEEDED` in its skia-bindings output.
-#
-# `default-features = false` on the shell drops the Vulkan overlay — this client owns its own GL
-# surface — and `gl` asks Skia for the GLES backend the panel exposes. skia-safe keeps its
-# DEFAULT features: they carry `binary-cache` (the prebuilt fetch) and the jpeg/pdf codecs, and
-# they are what make the key `gl-jpegd-jpege-pdf-textlayout` — the one both sources publish.
+# 🛑 skia-bindings doesn't fail on missing archive—silently builds from source for ~1hr.
+# Logs must say "DOWNLOAD AND INSTALL SUCCEEDED". Keep default features for the archive key
+# (`gl-jpegd-jpege-pdf-textlayout`, both sources publish). textlayout is pinned: `skunicode_icu`
+# (icudt74_dat, 10.5 MB) is 43% of the binary; kit shapes every string through `Paragraph`.
 pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "9f2ab6789", default-features = false, features = ["gl"] }
-# `Console::frame` draws into a `skia_safe::Canvas`, and the host owns the `DirectContext` plus
-# the surface wrapping framebuffer 0.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
 
 [build-dependencies]
 serde_json = "1"
 
 [profile.release]
-# Hot loops (AEAD decrypt, FEC, QUIC parsing) live in punktfunk-core deps.
-# Fat LTO + codegen-units=1 enables cross-crate inlining for crypto hotpaths;
-# use lto="thin" for faster dev iteration.
+# Hot loops (AEAD decrypt, FEC, QUIC parsing) live in punktfunk-core deps: fat LTO plus
+# codegen-units=1 is what inlines them across crates. `RELEASE_LTO=thin` for dev iteration.
 lto = "fat"
 codegen-units = 1
-# No `catch_unwind` anywhere in this app, and a panic on a TV is a crash either way: unwinding
-# only costs binary size and the landing pads that come with it.
+# No catch_unwind; panic = crash either way. Abort saves binary size + landing pads.
 panic = "abort"
 
-# `task preview`: debug is too slow to watch (software rasterization), but `release`'s fat LTO
-# makes every rebuild a coffee break and its crypto inlining is irrelevant off-device.
 [profile.preview]
 inherits = "release"
 lto = false
