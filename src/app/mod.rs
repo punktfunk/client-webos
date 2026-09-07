@@ -78,7 +78,6 @@ pub struct WakeState {
     pub(crate) mac: Vec<String>,
     /// Original library error, restored on back-out.
     pub(crate) reason: String,
-    pub(crate) focused: usize,
     pub(crate) sent: bool,
     /// Packet count; shown so silent wait visibly progresses.
     pub(crate) attempts: u32,
