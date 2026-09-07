@@ -13,7 +13,7 @@
 use pf_client_core::profiles::{SettingsOverlay, StreamProfile};
 use pf_client_core::trust;
 use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
-use pf_console_ui::widgets::RowSpec;
+use pf_console_ui::widgets::{Control, RowSpec};
 
 use crate::app::nav::ScreenKey;
 use crate::app::{menu, App};
@@ -454,6 +454,19 @@ impl App {
                         Row::Delete => RowSpec::action("Delete…", true),
                     };
                     spec.header = header;
+                    // The engine draws every boolean as text with chevrons, while this app's
+                    // own rows are switches — one page, two controls for one kind of setting.
+                    // ponytail: matched on the drawn value, so a future three-state row whose
+                    // value reads "On" would need its own test.
+                    if let Some(on) = match spec.value.as_deref() {
+                        Some("On") => Some(true),
+                        Some("Off") => Some(false),
+                        _ => None,
+                    } {
+                        spec.control = Control::Toggle(on);
+                        // The switch is the affordance: no chevrons, and no value to slide.
+                        spec.adjustable = false;
+                    }
                     spec
                 })
                 .collect()
