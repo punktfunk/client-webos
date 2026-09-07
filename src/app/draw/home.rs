@@ -135,7 +135,10 @@ impl App {
     /// Everything under the modals: the grid or what stands in for it, the status band, the
     /// sidebar. Skipped over live video, where all of it would cover the picture.
     pub(crate) fn draw_home(&mut self, f: &Frame<'_>, dt: f64) {
-        if self.over_video_layers() {
+        // Past its fade the launch covers the screen with an opaque rect, so rasterizing the
+        // grid (a blurred shadow per card) under it only costs the hero pan its frame rate.
+        let covered = self.launch_anim.is_some_and(|t| t.elapsed() >= hero::LAUNCH_FADE);
+        if self.over_video_layers() || covered {
             return;
         }
         let grid_x = SIDEBAR_W as f32;
