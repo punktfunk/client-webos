@@ -48,6 +48,9 @@ pub(crate) struct ScreenSlots {
     pub(crate) settings_page: SettingsPage,
     /// The name being typed for the profile in scope (`Screen::RenameProfile`).
     pub(crate) profile_name: TextField,
+    /// That profile exists only in memory until the name is confirmed — backing out of the
+    /// form drops it again, so a mis-press leaves nothing on disk.
+    pub(crate) profile_name_new: bool,
     /// What `Screen::PickProfile` is picking for.
     pub(crate) profile_pick: Option<crate::app::state::profilepick::ProfilePick>,
     /// The About document's first visible line.

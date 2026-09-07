@@ -86,6 +86,8 @@ pub(crate) enum Row {
     Kit(RowId),
     /// The scope switcher at the top of General.
     Editing,
+    /// Creates a profile — its own row, because a cycle slot creates one on a stray step.
+    NewProfile,
     /// `webos.game_mode`, rooted TVs only.
     GameMode,
     /// The three-step calibration screen.
@@ -126,6 +128,7 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
     match page {
         Page::General => {
             push(Row::Editing, Some("Editing"));
+            push(Row::NewProfile, None);
             if profile {
                 push(Row::Rename, Some("Profile"));
                 push(Row::Duplicate, None);
@@ -445,6 +448,7 @@ impl App {
                             true,
                         ),
                         Row::Licences => RowSpec::action("Open-source licences", true),
+                        Row::NewProfile => RowSpec::action("New profile…", true),
                         Row::Rename => RowSpec::action("Rename…", true),
                         Row::Duplicate => RowSpec::action("Duplicate", true),
                         Row::Delete => RowSpec::action("Delete…", true),
@@ -552,6 +556,7 @@ impl App {
             Row::SendLogs => self.send_logs_action(),
             Row::ResetHdr => self.open_reset_hdr_calibration(),
             Row::Licences => self.open_about(),
+            Row::NewProfile => self.new_profile(),
             Row::Rename => self.open_rename_profile(),
             Row::Duplicate => self.duplicate_profile(),
             Row::Delete => self.open_delete_profile(),
@@ -621,9 +626,11 @@ impl App {
         }
     }
 
-    /// Editing: Default settings → each profile → New profile… → back around.
+    /// Editing: Default settings → each profile → back around. Creating one is its own row:
+    /// as a slot here, a single step off the last profile (or Left off the first) made and
+    /// saved a profile the user never asked for.
     fn step_scope(&mut self, delta: i32) {
-        let n = self.profiles.len() + 2;
+        let n = self.profiles.len() + 1;
         let cur = match &self.screens.settings_page.scope {
             Scope::Global => 0,
             Scope::Profile(id) => self.profiles.iter().position(|p| &p.id == id).map_or(0, |i| i + 1),
@@ -631,8 +638,6 @@ impl App {
         let next = menu::cycle_index(cur, n, delta >= 0);
         if next == 0 {
             self.screens.settings_page.scope = Scope::Global;
-        } else if next == n - 1 {
-            self.new_profile();
         } else {
             self.screens.settings_page.scope = Scope::Profile(self.profiles[next - 1].id.clone());
         }
@@ -734,5 +739,22 @@ mod nav_tests {
         assert_eq!(settings_nav(false, MenuEvent::Left), NavStep::Row(RowStep::Step(-1)));
         assert_eq!(settings_nav(false, MenuEvent::Right), NavStep::Row(RowStep::Step(1)));
         assert_eq!(settings_nav(false, MenuEvent::Confirm), NavStep::Row(RowStep::Activate));
+    }
+
+    /// Creating a profile is a row the user picks, never a slot the Editing row's value cycle
+    /// steps into — as a slot, one press made and saved a profile nobody asked for.
+    #[test]
+    fn new_profile_is_a_row_of_its_own_in_both_scopes() {
+        for scope in [Scope::Global, Scope::Profile("p1".into())] {
+            let rows = page_rows(Page::General, &scope);
+            assert_eq!(rows.iter().filter(|(r, _)| *r == Row::NewProfile).count(), 1);
+        }
+        for page in Page::ALL {
+            if page == Page::General {
+                continue;
+            }
+            let rows = page_rows(page, &Scope::Global);
+            assert!(!rows.iter().any(|(r, _)| *r == Row::NewProfile));
+        }
     }
 }
