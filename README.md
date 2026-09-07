@@ -30,10 +30,10 @@ This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardwar
 <summary><b>Screenshots</b></summary>
 
 <p align="center">
-  <img src="assets/screenshots/home.jpg" width="32%" alt="Home / game library">
-  <img src="assets/screenshots/settings.jpg" width="32%" alt="Settings">
-  <img src="assets/screenshots/console-home.jpg" width="32%" alt="Console Home">
-  <img src="assets/screenshots/console-game.jpg" width="32%" alt="Console Game">
+  <img src="assets/screenshots/console-kit-home.jpg" width="32%" alt="Home / game library">
+  <img src="assets/screenshots/console-kit-settings.jpg" width="32%" alt="Settings">
+  <img src="assets/screenshots/controller-ui-home.jpg" width="32%" alt="Console Home">
+  <img src="assets/screenshots/controller-ui-game.jpg" width="32%" alt="Console Game">
 </p>
 
 </details>
