@@ -209,7 +209,7 @@ impl App {
                     self.screens.add_host = TextField::ipv4();
                     self.nav.screen = Screen::AddHost;
                 }
-                HomeFocus::Sidebar(_) => self.open_settings_page(),
+                HomeFocus::Sidebar(_) => self.open_settings_page(crate::app::state::settingspage::Scope::Global),
                 HomeFocus::SidebarMenu(i) => self.open_host_menu(i),
                 HomeFocus::Grid(i) => self.confirm_grid_card(i, columns),
             },

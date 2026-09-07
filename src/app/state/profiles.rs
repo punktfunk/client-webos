@@ -59,9 +59,8 @@ impl App {
                 id
             }
         };
-        self.screens.settings_page.scope = Scope::Profile(id);
         self.screens.settings_page.page = Page::Display;
-        self.open_settings_page();
+        self.open_settings_page(Scope::Profile(id));
     }
 
     pub(crate) fn open_rename_profile(&mut self) {

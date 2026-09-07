@@ -285,7 +285,10 @@ pub(crate) fn settings_nav(column: bool, ev: MenuEvent) -> NavStep {
 }
 
 impl App {
-    pub(crate) fn open_settings_page(&mut self) {
+    /// `scope` is the caller's, not the last visit's: the sidebar edits the document, the
+    /// card menu edits a title's profile, and a stale scope silently edits the wrong one.
+    pub(crate) fn open_settings_page(&mut self, scope: Scope) {
+        self.screens.settings_page.scope = scope;
         // The page column takes focus first; OK or Right on a page moves into its rows.
         self.screens.settings_page.column = true;
         self.nav.enter(Screen::SettingsPage, 0);
