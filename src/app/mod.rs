@@ -702,7 +702,7 @@ impl App {
             selected_host: self.library.selected_host.clone(),
             // Always this build's version: whatever wrote the document last is what a future
             // migration needs to know, and that is now us.
-            version: Some(store::VERSION.to_string()),
+            version: Some(crate::core::VERSION.to_string()),
             profiles: self.profiles.clone(),
         }
     }
