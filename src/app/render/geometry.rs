@@ -70,7 +70,6 @@ impl App {
     /// actually moved — the hover/click contract every focus setter here follows.
     pub(crate) fn set_confirm_focused(&mut self, index: usize) -> bool {
         let Some(focused) = (match self.nav.screen {
-            Screen::Wake => self.screens.wake.as_mut().map(|w| &mut w.focused),
             screen if is_confirm(screen) => Some(self.nav.cursor_mut(ScreenKey::of(screen))),
             _ => None,
         }) else {

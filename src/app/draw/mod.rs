@@ -492,6 +492,10 @@ impl App {
                         view::collections::trailing_marks(c.dynamic),
                         on_row.then(|| lit?.trailing()).flatten(),
                     );
+                    // A collection is a labelled row even with nothing to count: the kit reads
+                    // a valueless row as a centred action button, which is what Library and
+                    // every empty collection turned into.
+                    spec.value.get_or_insert_with(String::new);
                     spec.icon = None;
                 }
                 ListCard {

@@ -208,6 +208,8 @@ impl Service {
             .filter(|d| !state.known_hosts.iter().any(|h| same_host(h, d)))
             .map(|d| HostRow {
                 key: shared::host_key("", &d.addr, d.port),
+                // Nothing saved to point at, so the shell hides "Make default host".
+                id: None,
                 name: d.name.clone(),
                 addr: d.addr.clone(),
                 port: d.port,
@@ -253,6 +255,8 @@ impl Service {
         let advert = self.discovered.iter().find(|d| same_host(h, d));
         let online = advert.is_some() || self.reachable.get(&key).copied().unwrap_or(false);
         HostRow {
+            // The store record's own id, which is what the shell's default host names.
+            id: h.id.clone(),
             name: if h.name.is_empty() {
                 h.addr.clone()
             } else {

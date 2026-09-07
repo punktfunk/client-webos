@@ -27,8 +27,6 @@ impl App {
             name,
             mac,
             reason,
-            // Lands on the "Wake host" button — the reason the user is here.
-            focused: 0,
             sent: false,
             attempts: 0,
             since: None,
@@ -43,7 +41,8 @@ impl App {
             Self::send_wake(&mut wake);
         }
         if prompts {
-            self.nav.screen = Screen::Wake;
+            // Cursor 0 is "Wake host" — the reason the user is here.
+            self.nav.enter(Screen::Wake, 0);
         } else {
             // No modal is up in this branch, so the Home bar is the only place the
             // wait is visible at all — without this it would sit on `select_host`'s
@@ -142,7 +141,7 @@ impl App {
             wake.last_probe = Some(now);
         }
         if reveal {
-            self.nav.screen = Screen::Wake;
+            self.nav.enter(Screen::Wake, 0);
         }
         if let Some(status) = new_status {
             self.set_home_status(Some(status), false);
@@ -177,17 +176,25 @@ impl App {
     /// Confirm sends and closes the modal, or cancels. Back dismisses it (wake runs on in bg).
     /// The card only ever opens with both buttons on it, so every event has a target.
     pub fn handle_wake_event(&mut self, ev: MenuEvent) {
-        let Some(wake) = self.screens.wake.as_mut() else { return };
+        if self.screens.wake.is_none() {
+            return;
+        }
         if ev == MenuEvent::Back {
             self.close_wake(false);
             return;
         }
+        if self.confirm_nav_event(ev) {
+            return;
+        }
         match ev {
-            MenuEvent::Up | MenuEvent::Down | MenuEvent::Left | MenuEvent::Right => {
-                wake.focused = usize::from(wake.focused == 0);
+            // The buttons sit side by side, so Up and Down move between them too.
+            MenuEvent::Up | MenuEvent::Down => {
+                let key = crate::app::nav::ScreenKey::Wake;
+                self.nav.set_cursor(key, 1 - self.nav.cursor(key));
                 self.render.modal.focus_anim = Some(Instant::now());
             }
-            MenuEvent::Confirm if wake.focused == 0 => {
+            MenuEvent::Confirm if self.nav.cursor(crate::app::nav::ScreenKey::Wake) == 0 => {
+                let Some(wake) = self.screens.wake.as_mut() else { return };
                 Self::send_wake(wake);
                 // Hand the wait to the grid's spinner; `tick_wake` re-pops the modal if the
                 // host is still down after `WAKE_RETRY_INTERVAL`. A packet that never went
@@ -198,7 +205,7 @@ impl App {
                 }
             }
             MenuEvent::Confirm => self.close_wake(false),
-            MenuEvent::Back | MenuEvent::Secondary => {}
+            MenuEvent::Back | MenuEvent::Secondary | MenuEvent::Left | MenuEvent::Right => {}
         }
     }
 

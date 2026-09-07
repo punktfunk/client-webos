@@ -25,14 +25,29 @@ fn unique_name(catalog: &[StreamProfile], wanted: &str) -> String {
 }
 
 impl App {
-    /// Editing ▸ New profile…: an empty overlay under a placeholder name, opened for editing.
+    /// Editing ▸ New profile…: an empty overlay under a placeholder name, opened for naming.
+    /// Nothing is written until that name is confirmed.
     pub(crate) fn new_profile(&mut self) {
         let profile = StreamProfile::new(unique_name(&self.profiles, "New profile"));
         let id = profile.id.clone();
         self.profiles.push(profile);
-        self.persist();
         self.screens.settings_page.scope = Scope::Profile(id);
         self.open_rename_profile();
+        self.screens.profile_name_new = true;
+    }
+
+    /// Drops the profile the name form was naming, if it was never committed.
+    fn discard_new_profile(&mut self) {
+        if !std::mem::take(&mut self.screens.profile_name_new) {
+            return;
+        }
+        if let Scope::Profile(id) = self.screens.settings_page.scope.clone() {
+            self.profiles.retain(|p| p.id != id);
+        }
+        self.screens.settings_page.scope = Scope::Global;
+        // A discovery announce persists the document from under the open form, so the drop has
+        // to reach disk too rather than only the catalog in memory.
+        self.persist();
     }
 
     /// The card menu's "Game settings": the title's bound profile in profile scope, created
@@ -59,9 +74,8 @@ impl App {
                 id
             }
         };
-        self.screens.settings_page.scope = Scope::Profile(id);
         self.screens.settings_page.page = Page::Display;
-        self.open_settings_page();
+        self.open_settings_page(Scope::Profile(id));
     }
 
     pub(crate) fn open_rename_profile(&mut self) {
@@ -74,6 +88,7 @@ impl App {
             .find(|p| &p.id == id)
             .map_or(String::new(), |p| p.name.clone());
         self.screens.profile_name = TextField::name(MAX_COLLECTION_NAME, &name);
+        self.screens.profile_name_new = false;
         self.nav.screen = Screen::RenameProfile;
     }
 
@@ -81,7 +96,10 @@ impl App {
         match ev {
             MenuEvent::Left => self.screens.profile_name.backspace(),
             MenuEvent::Confirm => self.confirm_rename_profile(),
-            MenuEvent::Back | MenuEvent::Secondary => self.nav.resume(Screen::SettingsPage),
+            MenuEvent::Back | MenuEvent::Secondary => {
+                self.discard_new_profile();
+                self.nav.resume(Screen::SettingsPage);
+            }
             MenuEvent::Right | MenuEvent::Up | MenuEvent::Down => {}
         }
     }
@@ -110,6 +128,7 @@ impl App {
             return;
         }
         let name = self.screens.profile_name.text().trim().to_string();
+        self.screens.profile_name_new = false;
         if let Scope::Profile(id) = self.screens.settings_page.scope.clone() {
             if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
                 p.name = name;
