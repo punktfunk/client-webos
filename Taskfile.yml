@@ -65,9 +65,10 @@ tasks:
       with RELEASE_LTO=fat for an optimized build.
     deps: [toolchain:all]
     env:
-      # Thread the packaged version into the binary so the UI's build marker matches
-      # the .ipk (Cargo.toml stays a fixed 0.0.1; recomputed inside Docker from the
-      # mounted repo's git, so both `build` and CI's `build` pick it up).
+      # Thread the packaged version into the binary (`core::VERSION` reads it through
+      # `option_env!`) so the UI's build marker matches the .ipk — Cargo.toml stays a
+      # fixed 0.0.1. Under `docker:build` the host's value arrives as `-e PKG_VERSION`,
+      # so the container reuses it rather than re-deriving it from the mounted git.
       PKG_VERSION: '{{.PKG_VERSION}}'
     cmds:
       - rustup target add {{.TARGET}}
@@ -224,7 +225,7 @@ tasks:
 
   docker:deploy:
     desc: >-
-      Same as `preview`, but to a container instead of a TV — a virtual 1080p display served
+      Same as `deploy`, but to a container instead of a TV — a virtual 1080p display served
       over VNC at http://localhost:6080/vnc.html, logs streamed to this terminal.
     cmds:
       - task: toolchain:docker-run

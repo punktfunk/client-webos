@@ -6,9 +6,8 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crate::services::library::GameEntry;
 
-/// A decoded wide hero image, RGB565 little-endian — it goes to the GPU as a raw texture
-/// (`Compositor::upload_raw`) rather than through a `Painter`, since nothing is ever
-/// rasterized on top of it.
+/// A decoded wide hero image, RGB565 little-endian — it goes to the GPU as a raw texture,
+/// since nothing is ever rasterized on top of it.
 ///
 /// Half the bytes of RGBA8 on disk, in RAM and over the upload, for an image that is only
 /// ever shown full-screen behind a black scrim ([`crate::app::hero::HERO_SCRIM_ALPHA`]) and

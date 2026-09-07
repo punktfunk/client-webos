@@ -42,11 +42,7 @@ impl Rect {
         Self::new(self.x + dx, self.y + dy, self.w, self.h)
     }
 
-    /// Inset by `pad` on the left and right, full height. The content column inside a
-    /// card: one pad governs both edges, so there is nothing here for a [`Layout`] split
-    /// to keep in agreement.
-    ///
-    /// [`Layout`]: crate::ui::layout::Layout
+    /// Inset by `pad` on the left and right, full height: the content column inside a card.
     pub fn inset_x(self, pad: u32) -> Self {
         Self::new(self.x + pad as i32, self.y, self.w.saturating_sub(2 * pad), self.h)
     }
@@ -57,9 +53,8 @@ impl Rect {
     }
 }
 
-/// Float rectangle, for the one case where whole-pixel placement is too coarse: a pan
-/// slow enough that an integer destination would advance in visible jumps rather than
-/// drift (see `DrawCmd::TexF`).
+/// Float rectangle, for the one case where whole-pixel placement is too coarse: a pan slow
+/// enough that an integer destination would advance in visible jumps rather than drift.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RectF {
     pub x: f32,
