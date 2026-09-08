@@ -46,13 +46,11 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// Button under `(x, y)`, or `None` off both.
     pub fn button_at(&self, x: i32, y: i32) -> Option<usize> {
         let p = Point::new(x as f32, y as f32);
         self.buttons.iter().position(|b| b.contains(p))
     }
 
-    /// Whether `(x, y)` is on the close mark.
     pub fn on_close(&self, x: i32, y: i32) -> bool {
         self.close.contains(Point::new(x as f32, y as f32))
     }
@@ -170,8 +168,7 @@ fn draw_on(
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
-    // Title, then the body's lines.
+    glass_card(f, l.card, CORNER);
     f.fonts.draw_clipped(
         c,
         title,
@@ -194,7 +191,6 @@ fn draw_on(
             body_tone,
         );
     }
-    // Close mark, lit under the pointer.
     let hover_close = motion.is_some_and(|m| m.hover_close);
     if let Some(x) = by_name("x") {
         draw_icon(

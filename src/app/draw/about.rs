@@ -10,7 +10,6 @@ use super::{glass_card, line_h, wrap, Frame};
 
 const WIDTH_FRAC: f32 = 0.78;
 const HEIGHT_FRAC: f32 = 0.84;
-/// Design units.
 const PAD: f32 = 26.0;
 const CORNER: f32 = 18.0;
 const TITLE_SIZE: f64 = 22.0;
@@ -28,7 +27,6 @@ pub(crate) struct Layout {
     pub sub_baseline: f32,
     /// Pixel stride between visual lines.
     pub stride: f32,
-    /// How many visual lines the body shows.
     pub visible: usize,
 }
 
@@ -111,7 +109,7 @@ pub(crate) fn draw(
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
+    glass_card(f, l.card, CORNER);
     let x = f64::from(l.card.left + PAD * k);
     f.fonts.draw(
         c,
@@ -159,7 +157,6 @@ pub(crate) fn draw(
         );
     }
     c.restore();
-    // A thin track on the right says how far along the document the window is.
     if lines.len() > l.visible {
         let track = Rect::from_xywh(l.card.right - 12.0 * k, l.body.top, 4.0 * k, l.body.height());
         c.draw_rrect(

@@ -109,7 +109,7 @@ pub(crate) fn draw(
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
+    glass_card(f, l.card, CORNER);
     f.fonts.draw(
         c,
         "Settings",

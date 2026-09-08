@@ -34,7 +34,6 @@ pub(super) fn run_ui_flow(
     // every 40ms spinner frame.
     const TICK_BUDGET: Duration = Duration::from_millis(16);
     canvas.window_mut().show();
-    // Both menus need it now; without a GL context there is nothing to draw with.
     let gl = console_flow::bring_up(gl, canvas).context("menu: GL host")?;
     let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
     tracing::info!(
@@ -127,7 +126,7 @@ pub(super) fn run_ui_flow(
             crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_YELLOW_SCANCODE);
         if yellow_down && !yellow_held {
             cycle_log_overlay();
-            dirty = true; // force an immediate redraw with the new state
+            dirty = true;
             log_overlay_last = None;
         }
         yellow_held = yellow_down;
@@ -264,8 +263,6 @@ pub(super) fn run_ui_flow(
                 }
                 continue;
             }
-            // Device-level events, handled before anything screen-specific:
-            // shutdown and controller hotplug.
             match event {
                 Event::Quit { .. } => {
                     tracing::info!("quit during UI");
@@ -420,14 +417,24 @@ pub(super) fn run_ui_flow(
                 dw as f32 / display_mode.w.max(1) as f32,
                 dh as f32 / display_mode.h.max(1) as f32,
             ));
-            // Home, the modals, the launch transition, then the overlays (`app::draw`,
-            // `runtime::overlay`).
             app.apply_ink();
             kit_fonts.begin_frame();
             let dt = last_frame.elapsed().as_secs_f64().min(0.1);
             last_frame = Instant::now();
-            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
-            app.draw_home(&frame, dt);
+            // Scoped so the frame's borrow of the canvas ends before the snapshot below.
+            {
+                let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
+                app.draw_home(&frame, dt);
+            }
+            // Snapshot the page for modal frost blur. Only taken when a modal is visible — a
+            // snapshot of a GPU surface forces a copy, so skip it when nothing needs it.
+            let page = app
+                .modal_visible()
+                .then(|| surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32)))
+                .flatten();
+            let c = surface.canvas();
+            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)
+                .with_backdrop(page.as_ref());
             app.draw_modals(&frame, dt);
             app.draw_launch(&frame);
             if let Some(lines) = &log_lines {
@@ -436,7 +443,9 @@ pub(super) fn run_ui_flow(
             if let Some((text, alpha)) = &notif_frame {
                 overlay::toast(&frame, text, *alpha);
             }
-            quit_dialog.draw(&frame);
+            // Quit dialog draws over modal layer — page snapshot is already stale under it.
+            // Don't pass it; opaque is the one thing that always looks the same.
+            quit_dialog.draw(&frame.with_backdrop(None));
         }
         gl.flush();
         canvas.window().gl_swap_window();

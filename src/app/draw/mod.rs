@@ -9,8 +9,10 @@
 //! (`height / 800`) the shell applies, so a row here is a row there.
 
 pub(crate) mod about;
+mod card_rim;
 pub(crate) mod dialog;
 pub(crate) mod form;
+pub(crate) mod glass;
 pub(crate) mod home;
 pub(crate) mod list;
 pub(crate) mod settings;
@@ -19,13 +21,14 @@ use std::sync::OnceLock;
 
 use pf_console_ui::anim::approach;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
-use skia_safe::{Canvas, RRect, Rect};
+use skia_safe::{Canvas, Rect};
 
 use crate::app::screens::rowbuttons::RowButton;
 use crate::app::App;
 use crate::core::screen::Screen;
 use crate::platform::webos::device;
 use crate::ui;
+pub(crate) use glass::{glass_card, Backdrop};
 
 /// Which screens draw here rather than as tiles. Every prepare, compose and hit-test path
 /// asks this, so a screen moves over by being added to this list and nowhere else.
@@ -69,6 +72,7 @@ pub(crate) const fn draws_kit_rows(screen: Screen) -> bool {
 }
 
 /// What every draw fn takes.
+#[derive(Clone, Copy)]
 pub(crate) struct Frame<'a> {
     pub canvas: &'a Canvas,
     pub fonts: &'a Fonts,
@@ -77,6 +81,12 @@ pub(crate) struct Frame<'a> {
     pub h: f32,
     /// Pixels per design unit.
     pub k: f32,
+    /// The page a frosted card blurs, when this frame has one. `None` is the opaque card, and
+    /// it is what a frame over live video must stay: the decoded picture sits on the TV's
+    /// hardware plane, composited outside our GL context, so a grab of our own framebuffer
+    /// reads punch-through alpha and the card would frost a smear of the graphics plane.
+    /// Frosting over video is unrepresentable rather than merely discouraged.
+    pub backdrop: Option<Backdrop<'a>>,
 }
 
 impl<'a> Frame<'a> {
@@ -87,6 +97,16 @@ impl<'a> Frame<'a> {
             w: w as f32,
             h: h as f32,
             k: scale(h),
+            backdrop: None,
+        }
+    }
+
+    /// The same frame with a page for its cards to frost. The borrow is what keeps a snapshot
+    /// from outliving the frame it was taken in.
+    pub fn with_backdrop(self, page: Option<&'a skia_safe::Image>) -> Self {
+        Self {
+            backdrop: page.map(|page| Backdrop { page }),
+            ..self
         }
     }
 }
@@ -180,22 +200,10 @@ pub(crate) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Ve
     lines
 }
 
-/// A raised card: an opaque face lifted off the ground toward the accent, the kit's panel
-/// tint and hairline over it. Opaque on purpose: the TV's GL has no backdrop blur to make a
-/// translucent card read as glass, and a plain translucent card over a grid of covers read
-/// as a mistake.
-pub(crate) fn glass_card(canvas: &Canvas, rect: Rect, corner: f32, k: f32) {
-    let rr = RRect::new_rect_xy(rect, corner * k, corner * k);
-    canvas.draw_rrect(rr, &theme::fill(surface()));
-    theme::panel(canvas, rect, corner, None, PanelStroke::Gradient, k);
-}
-
-/// The face of a raised card.
 pub(crate) fn surface() -> skia_safe::Color4f {
     theme::card_face(0.16)
 }
 
-/// The dim over whatever a modal covers, at the modal's alpha.
 pub(crate) fn scrim(canvas: &Canvas, w: f32, h: f32, alpha: f32) {
     canvas.draw_rect(
         Rect::from_xywh(0.0, 0.0, w, h),
@@ -203,7 +211,6 @@ pub(crate) fn scrim(canvas: &Canvas, w: f32, h: f32, alpha: f32) {
     );
 }
 
-/// An `ui::render::Rect` as Skia's.
 pub(crate) fn sk(r: ui::render::Rect) -> Rect {
     Rect::from_xywh(r.x() as f32, r.y() as f32, r.width() as f32, r.height() as f32)
 }
@@ -238,7 +245,6 @@ fn current_palette() -> String {
     PALETTE.with(|p| p.borrow().clone())
 }
 
-/// A Skia rect as the app's integer one, for the hit tests.
 pub(crate) fn ui_rect(r: Rect) -> ui::render::Rect {
     ui::render::Rect::new(
         r.left.round() as i32,
@@ -328,22 +334,46 @@ pub(crate) fn with_pop(c: &Canvas, r: Rect, f: f32, paint: impl FnOnce(&Canvas))
 }
 
 impl App {
+    /// The modal cards this frame: the open one's alpha, and the one being left, already
+    /// filtered to the ported screens. Both `draw_modals` and [`App::modal_visible`] read it,
+    /// so the snapshot can never disagree with what actually draws.
+    fn modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
+        let m = if matches!(self.nav.screen, Screen::Home) {
+            0.0
+        } else {
+            self.render.modal.fade.open_alpha()
+        };
+        let leaving = self
+            .render
+            .modal
+            .fade
+            .closing_frame_against(m)
+            .filter(|(_, left)| ported(*left));
+        (m, leaving)
+    }
+
+    /// Whether a modal card will be drawn this frame — i.e. whether the page behind it is
+    /// worth snapshotting. Asked by the runtime BEFORE `draw_modals`, because the snapshot has
+    /// to be taken while the page is all that is on the surface.
+    pub(crate) fn modal_visible(&self) -> bool {
+        // A card over the video plane draws opaque (`draw_modal_screen` drops the backdrop), so
+        // it is not worth a snapshot — and on that screen the surface holds punch-through alpha
+        // rather than a page.
+        let frosts = |screen| !crate::app::screens::over_video(screen);
+        let (m, leaving) = self.modal_frames();
+        leaving.is_some_and(|(_, left)| frosts(left)) || (ported(self.nav.screen) && m > 0.0 && frosts(self.nav.screen))
+    }
+
     /// The ported modal layer, drawn after the tiles: the open card at its open alpha and
     /// rise, and the card being left at its closing alpha — the same cross-fade
     /// `render::compose` plays for tiles, from state instead of from a snapshot. `dt` is
     /// the frame's step, for the kit widgets' own motion.
     pub(crate) fn draw_modals(&mut self, f: &Frame<'_>, dt: f64) {
-        let screen = self.nav.screen;
-        let m = if matches!(screen, Screen::Home) {
-            0.0
-        } else {
-            self.render.modal.fade.open_alpha()
-        };
-        if let Some((alpha, left)) = self.render.modal.fade.closing_frame_against(m) {
-            if ported(left) {
-                self.draw_modal_screen(f, left, alpha, false, dt);
-            }
+        let (m, leaving) = self.modal_frames();
+        if let Some((alpha, left)) = leaving {
+            self.draw_modal_screen(f, left, alpha, false, dt);
         }
+        let screen = self.nav.screen;
         if ported(screen) && m > 0.0 {
             self.draw_modal_screen(f, screen, m, true, dt);
         }
@@ -352,10 +382,16 @@ impl App {
     /// One ported card. `live` is whether it is the screen the cursor is on: a card on its
     /// way out keeps its last focus but takes no pop and no press.
     fn draw_modal_screen(&mut self, f: &Frame<'_>, screen: Screen, alpha: f32, live: bool, dt: f64) {
-        // Over live video the card is all there is; over the menu it sits on a dim.
-        if !crate::app::screens::over_video(screen) {
+        // Over live video the card is all there is; over the menu it sits on a dim. The dim
+        // goes on after the page was snapshotted, so it darkens around the card, not through it.
+        let over_video = crate::app::screens::over_video(screen);
+        let mut solid = *f;
+        if over_video {
+            solid.backdrop = None;
+        } else {
             scrim(f.canvas, f.w, f.h, alpha);
         }
+        let f = &solid;
         let dy = ui::animation::modal_rise(alpha) as f32;
         let focus = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
         if matches!(
@@ -654,7 +690,6 @@ impl App {
         hit
     }
 
-    /// The pairing card's geometry on a frame of the given size.
     pub(crate) fn pair_layout(&self, w: u32, h: u32) -> form::PairLayout {
         form::pair_layout(
             &self.fonts,
@@ -665,7 +700,6 @@ impl App {
         )
     }
 
-    /// Where a ported screen's close mark is hit, if one is up.
     pub(crate) fn ported_close_hit(&self, x: i32, y: i32, w: u32, h: u32) -> Option<bool> {
         let screen = self.nav.screen;
         if screen == Screen::SettingsPage {
@@ -698,7 +732,6 @@ impl App {
     }
 }
 
-/// What a ported list screen shows.
 pub(crate) struct ListCard {
     pub title: String,
     pub subtitle: Option<String>,
