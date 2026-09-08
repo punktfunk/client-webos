@@ -39,7 +39,9 @@ fn desktop_entry() -> GameEntry {
         id: DESKTOP_PIN_ID.to_string(),
         title: "Desktop".to_string(),
         art: crate::core::model::Artwork::default(),
-        icon: None,
+        // Its own mark from the start, so the card never draws as a title while the OS the
+        // [`Library::set_desktop_icon`] mark comes from is still unknown.
+        icon: Some(crate::app::view::icons::ICON_DESKTOP.to_string()),
     }
 }
 
@@ -61,10 +63,15 @@ impl Library {
     /// Desktop's icon is client-picked (every other entry carries the host's token), so it is
     /// chosen here rather than in the grid build loop. Idempotent: re-run on every regroup and
     /// whenever mDNS teaches a new OS.
+    ///
+    /// The host's OS mark says WHICH desktop, so it wins whenever the chain has one. A host
+    /// that has not advertised an OS — a hand-added one, or one not yet discovered — takes the
+    /// plain desktop mark rather than the card's title, which reads as art that failed to load.
     pub(crate) fn set_desktop_icon(&mut self, os: &str) {
-        let token = crate::app::assets::os_icon_token(os);
+        let token =
+            crate::app::assets::os_icon_token(os).unwrap_or_else(|| crate::app::view::icons::ICON_DESKTOP.to_string());
         if let Some(desktop) = self.games.iter_mut().find(|g| g.id == DESKTOP_PIN_ID) {
-            desktop.icon = token;
+            desktop.icon = Some(token);
         }
     }
 

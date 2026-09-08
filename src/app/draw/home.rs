@@ -405,6 +405,12 @@ impl App {
             c.draw_path(&path, &theme::fill(theme::fg(0.92 * alpha)));
             return;
         }
+        // Neither an OS nor a brand: a UI mark, which is what the Desktop card falls back to.
+        // Stroked, not filled — Lucide's paths are outlines, and filling one gives a blob.
+        if let Some(icon) = game.icon.as_deref().and_then(by_name) {
+            draw_icon(c, icon, r.center_x(), r.center_y(), side * 0.8, theme::fg(0.92 * alpha));
+            return;
+        }
         let pad = 18.0;
         let max_w = (r.width() - 2.0 * pad).max(1.0);
         // The largest size the title fits at, down a short ladder.
