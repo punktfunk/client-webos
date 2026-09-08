@@ -734,6 +734,76 @@ impl App {
     }
 }
 
+/// Why a shared row is on no page, or `None` when it is on one.
+///
+/// Exhaustive on purpose. A `RowId` added upstream is a build error here, so a new setting
+/// gets a decision instead of silently never appearing — which is how Compositor, Render
+/// scale and the pacing rows stayed off the TV.
+#[cfg(test)]
+fn absence(id: RowId) -> Option<&'static str> {
+    Some(match id {
+        // On a page — see `page_rows`.
+        RowId::Resolution
+        | RowId::Refresh
+        | RowId::Bitrate
+        | RowId::Codec
+        | RowId::Hdr
+        | RowId::Audio
+        | RowId::AudioRoute
+        | RowId::Mouse
+        | RowId::CursorGestures
+        | RowId::InvertScroll
+        | RowId::PadType
+        | RowId::PadHaptics
+        | RowId::PadSpeaker
+        | RowId::Stats
+        | RowId::AutoWake
+        | RowId::Palette
+        | RowId::GamepadUi
+        | RowId::GamepadUiMode => return None,
+        // This page draws its own scope switcher and profile rows.
+        RowId::Profile(_) | RowId::NoProfiles => "the page builds its own profile rows",
+        // The client's own screens, not the kit's action rows.
+        RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
+        // The kit answers `false` for WebOS, so a page entry would draw nothing.
+        RowId::Decoder
+        | RowId::Chroma444
+        | RowId::TenBitSdr
+        | RowId::Vsync
+        | RowId::AllowVrr
+        | RowId::Fullscreen
+        | RowId::Shortcuts => "the kit gates it off WebOS",
+        // Android hardware, and one MediaCodec flag.
+        RowId::LowLatency
+        | RowId::PhoneRumble
+        | RowId::PhoneGyro
+        | RowId::Sc2Passthrough
+        | RowId::ReduceUiResolution => "Android-only in the kit",
+        // `ConnectParams` takes ten settings-derived fields, and none of these keys has a
+        // reader anywhere in this crate. A row would write a value nothing ever sends.
+        RowId::Compositor
+        | RowId::RenderScale
+        | RowId::PresentPriority
+        | RowId::SmoothBuffer
+        | RowId::AudioFormat
+        | RowId::KeepHostAudio
+        | RowId::Mic
+        | RowId::EchoCancel
+        | RowId::PadForward
+        | RowId::Pad
+        | RowId::SystemButtons
+        | RowId::GuideGesture
+        | RowId::Touch
+        | RowId::QuickActions
+        | RowId::DsCapture
+        | RowId::FollowOsTheme
+        | RowId::ReduceMotion
+        | RowId::LibraryView
+        | RowId::LibraryCollections
+        | RowId::StartIn => "not read by this client — see `runtime`'s `ConnectParams`",
+    })
+}
+
 #[cfg(test)]
 mod nav_tests {
     use super::*;
@@ -767,6 +837,29 @@ mod nav_tests {
             }
             let rows = page_rows(page, &Scope::Global);
             assert!(!rows.iter().any(|(r, _)| *r == Row::NewProfile));
+        }
+    }
+
+    /// A placed row must not also be recorded as absent. The pair's value is `absence`
+    /// itself: it is exhaustive, so a row added upstream cannot reach the TV as silence —
+    /// the build stops until someone places it or writes down why not.
+    #[test]
+    fn a_placed_row_is_never_also_recorded_absent() {
+        let mut placed: Vec<RowId> = Vec::new();
+        for page in Page::ALL {
+            for scope in [Scope::Global, Scope::Profile("p1".into())] {
+                for (row, _) in page_rows(page, &scope) {
+                    if let Row::Kit(id) = row {
+                        if !placed.contains(&id) {
+                            placed.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!placed.is_empty(), "the pages list no shared rows at all");
+        for id in placed {
+            assert!(absence(id).is_none(), "{id:?} is on a page and also recorded as absent");
         }
     }
 }
