@@ -15,6 +15,7 @@ use skia_safe::{
 };
 
 use super::{focus_face, line_h, panel, sk, with_pop, Frame};
+use crate::app::draw::glass;
 use crate::app::grid::{Entrance, GridLayout};
 use crate::app::hosts::HostEntry;
 use crate::app::state::cardmenu::CardMenuRow;
@@ -482,8 +483,13 @@ impl App {
         c.save();
         c.clip_rrect(rr(r), ClipOp::Intersect, true);
         c.clip_rect(window, ClipOp::Intersect, true);
-        // An opaque strip over the art, the same face every card wears.
-        c.draw_rect(window, &theme::fill(super::surface()));
+        // Frosted over the cover it sits on, opaque where there is no cover to blur.
+        let frosted = (self.render.covers)
+            .get(&game.id)
+            .is_some_and(|img| glass::frost_over_art(c, img, r, window, f.k));
+        if !frosted {
+            c.draw_rect(window, &theme::fill(super::surface()));
+        }
         let size = px(f, VALUE);
         let title_top = window.top;
         f.fonts.draw_clipped(

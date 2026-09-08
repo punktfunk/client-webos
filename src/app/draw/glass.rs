@@ -106,3 +106,21 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
     card_rim::draw(canvas, rr, rect, corner, k);
     card_hairline(canvas, rect, rr, k);
 }
+
+/// Frost `window` over the cover already drawn at `art`, same blur and face as [`glass_card`].
+///
+/// The card menu grows out of one card, so the only thing behind it is that card's cover:
+/// blurring the image straight into the rect it was drawn at needs no surface grab and stays
+/// registered through the card's zoom. `false` when there is no blur filter.
+pub(crate) fn frost_over_art(canvas: &Canvas, img: &skia_safe::Image, art: Rect, window: Rect, k: f32) -> bool {
+    let Some(blur) = card_blur(k) else {
+        return false;
+    };
+    let mut p = theme::layer();
+    p.set_image_filter(blur);
+    canvas.draw_image_rect(img, None, art, &p);
+    let mut face = surface();
+    face.a = CARD_FROST;
+    canvas.draw_rect(window, &theme::fill(face));
+    true
+}
