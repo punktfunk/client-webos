@@ -15,3 +15,7 @@ pub const ICON_CLOSE: &str = "x";
 pub const ICON_WRENCH: &str = "wrench";
 pub const ICON_PLAY: &str = "play";
 pub const ICON_PIN: &str = "pin";
+/// The Desktop card's own mark, for a host whose OS it cannot wear. Mirrors the kit's
+/// `library::DESKTOP_ICON`, which the pinned revision predates — read it from there once
+/// the pin moves.
+pub const ICON_DESKTOP: &str = "monitor";
