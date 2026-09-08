@@ -48,7 +48,7 @@ fn generate_third_party_notices(manifest_dir: &str) {
          None,
          "https://freetype.org"),
         ("GNU libstdc++",
-         "Bundled as lib/libstdc++.so.6 in the .ipk (the SDK builds against a newer GLIBCXX than the TV ships). GPL-3.0 with the GCC Runtime Library Exception.",
+         "Linked statically into the binary (a bundled .so would shadow the TV's own through DT_RPATH — see scripts/cc-shim.sh). GPL-3.0 with the GCC Runtime Library Exception.",
          None,
          "https://gcc.gnu.org/onlinedocs/libstdc++/"),
         ("Geist (Geist Sans)",

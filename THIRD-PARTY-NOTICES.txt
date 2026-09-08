@@ -21,7 +21,7 @@ BUNDLED / EMBEDDED NON-RUST COMPONENTS
       Bundled as lib/libfreetype.so.6 in the .ipk (Skia calls entry points the on-device copy lacks below webOS 9 — see taskfiles/toolchain.yml). FreeType License (BSD-style with credit clause).
       https://freetype.org
   GNU libstdc++
-      Bundled as lib/libstdc++.so.6 in the .ipk (the SDK builds against a newer GLIBCXX than the TV ships). GPL-3.0 with the GCC Runtime Library Exception.
+      Linked statically into the binary (a bundled .so would shadow the TV's own through DT_RPATH — see scripts/cc-shim.sh). GPL-3.0 with the GCC Runtime Library Exception.
       https://gcc.gnu.org/onlinedocs/libstdc++/
   Geist (Geist Sans)
       punktfunk's brand typeface, embedded into the binary by the console kit (pf-console-ui). SIL Open Font License 1.1.

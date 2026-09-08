@@ -108,11 +108,9 @@ tasks:
         mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib"
         cp target/{{.TARGET}}/release/punktfunk-webos "$STAGE_DIR/bin/"
         cp -L {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0 "$STAGE_DIR/lib/libSDL2-2.0.so.0"
-        # Skia is C++, and this SDK builds against libstdc++ 6.0.30 while the TV ships 6.0.29 —
-        # whose newest symbol set is GLIBCXX_3.4.29. The binary asks for GLIBCXX_3.4.30, so
-        # without the SDK's copy here the app dies before `main` with nothing on screen and
-        # nothing in its own log. The `$ORIGIN/../lib` rpath that already finds libSDL2 covers it.
-        cp -L {{.SYSROOT}}/usr/lib/libstdc++.so.6 "$STAGE_DIR/lib/libstdc++.so.6"
+        # No libstdc++ here: it is linked statically (scripts/cc-shim.sh). A bundled one wins
+        # over the TV's through DT_RPATH and is then used by the TV's own libraries too, which
+        # breaks the moment a firmware wants a newer GLIBCXX than this SDK ever had.
         # Skia calls FreeType 2.13's COLRv1 and variable-font entry points (FT_Get_Paint,
         # FT_Palette_Select, FT_Set_Default_Properties); webOS ships a FreeType that has them
         # only from 9.0, and below that the app dies before `main` the same way. Ships on every
@@ -120,7 +118,7 @@ tasks:
         cp -L {{.SYSROOT}}/usr/lib/libfreetype.so.6 "$STAGE_DIR/lib/libfreetype.so.6"
         {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-strip \
           "$STAGE_DIR/bin/punktfunk-webos" "$STAGE_DIR/lib/libSDL2-2.0.so.0" \
-          "$STAGE_DIR/lib/libstdc++.so.6" "$STAGE_DIR/lib/libfreetype.so.6"
+          "$STAGE_DIR/lib/libfreetype.so.6"
         # PROBES=1 ships the headless diagnostic CLI (`pfprobe`) alongside the app, for running
         # over SSH against a host. Off by default: it is a quarter megabyte the store package has
         # no use for, and nothing in the app launches it.
