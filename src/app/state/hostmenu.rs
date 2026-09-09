@@ -23,14 +23,13 @@ pub(crate) enum HostAction {
     /// it is right now is [`App::host_menu_power_row`].
     Power,
     /// This host's power settings (`Screen::HostPower`): wake automatically, exit behaviour.
+    /// A row of its own only where there is no power row to hang its ⋯ button off — an
+    /// unpaired host, which can be neither woken nor put down from here.
     PowerSettings,
     /// Stream the desktop once with a picked profile.
     ConnectWith,
-    /// The profile a title with no binding streams with.
-    DefaultProfile,
     /// Which profiles are cards under this host in the sidebar.
     Pin,
-    Edit,
     Forget,
 }
 
@@ -88,10 +87,28 @@ fn host_menu_row(action: HostAction, paired: bool, power: Option<ExitAction>) ->
         HostAction::Power => FocusRow::action(icons::ICON_POWER, power_row_label(power)),
         HostAction::PowerSettings => FocusRow::action(icons::ICON_SETTINGS, "Power settings"),
         HostAction::ConnectWith => FocusRow::action(icons::ICON_PLAY, "Connect with\u{2026}"),
-        HostAction::DefaultProfile => FocusRow::action(icons::ICON_WRENCH, "Default profile\u{2026}"),
         HostAction::Pin => FocusRow::action(icons::ICON_PIN, "Pin to sidebar\u{2026}"),
-        HostAction::Edit => FocusRow::action(icons::ICON_EDIT, "Edit address"),
         HostAction::Forget => FocusRow::action(icons::ICON_DELETE, "Forget host").danger(),
+    }
+}
+
+/// Connect's trailing button: the host's address, which is what a failed connect sends the
+/// user to change.
+const EDIT_MARKS: &[&str] = &[crate::app::view::icons::ICON_EDIT];
+
+/// The ⋯ a row wears when it does one thing now and holds the settings behind it: the power
+/// row's card, and the profile "Connect with…" streams a title with by default.
+const MORE_MARKS: &[&str] = &[crate::app::view::icons::ICON_MORE];
+
+/// The trailing buttons an action's row carries: the power row's ⋯ onto its settings,
+/// Connect's pencil onto the address behind it, and "Connect with…"'s ⋯ onto the profile it
+/// defaults to. Each is a modal that would otherwise need a row of its own. `saved` gates the
+/// address: a discovered host has none of ours to edit.
+pub(crate) fn marks_of(action: HostAction, saved: bool) -> &'static [&'static str] {
+    match action {
+        HostAction::Power | HostAction::ConnectWith => MORE_MARKS,
+        HostAction::Connect if saved => EDIT_MARKS,
+        _ => &[],
     }
 }
 
@@ -201,21 +218,31 @@ impl App {
         // a host with no MAC still gets the row once it is up.
         if paired && (!entry.mac().is_empty() || power.is_some()) {
             actions.push(HostAction::Power);
-        }
-        if saved {
+        } else if saved {
             actions.push(HostAction::PowerSettings);
         }
         // The profile rows need a paired, saved host and a catalog with something in it.
         if saved && paired && !self.profiles.is_empty() {
             actions.push(HostAction::ConnectWith);
-            actions.push(HostAction::DefaultProfile);
             actions.push(HostAction::Pin);
         }
         if saved {
-            actions.push(HostAction::Edit);
             actions.push(HostAction::Forget);
         }
         actions
+    }
+
+    /// Whether the menu's host is one this TV has saved — a discovered host has no address of
+    /// ours to edit. What [`marks_of`] gates Connect's pencil on.
+    pub(crate) fn host_menu_saved_entry(&self) -> bool {
+        matches!(self.host_menu_entry(), Some(HostEntry::Known(_)))
+    }
+
+    /// [`marks_of`] for row `row` — the index the pointer and the d-pad name a row by. The
+    /// painter has the action in hand already and calls [`marks_of`] directly.
+    pub(crate) fn host_menu_row_marks(&self, row: usize) -> &'static [&'static str] {
+        let saved = self.host_menu_saved_entry();
+        self.host_menu_actions().get(row).map_or(&[], |&a| marks_of(a, saved))
     }
 
     /// The host's name — the menu's title.
@@ -237,7 +264,11 @@ impl App {
             return;
         }
         match ev {
+            // On a row's button, Confirm means what that button opens rather than the row's
+            // own action.
+            MenuEvent::Confirm if self.screens.row_button.is_some() => self.confirm_host_menu_button(),
             MenuEvent::Confirm => self.confirm_host_menu_row(),
+            MenuEvent::Right | MenuEvent::Left if self.step_row_button(ev == MenuEvent::Right) => {}
             MenuEvent::Back => {
                 self.screens.host_menu_index = None;
                 self.nav.screen = Screen::Home;
@@ -267,6 +298,31 @@ impl App {
         self.start_power_action(&host, port, action, &name);
     }
 
+    /// The focused row's trailing button: the modal it stands for.
+    fn confirm_host_menu_button(&mut self) {
+        let actions = self.host_menu_actions();
+        let Some(action) = actions.get(self.nav.cursor(ScreenKey::HostMenu)) else {
+            return;
+        };
+        let Some(idx) = self.screens.host_menu_index else {
+            return;
+        };
+        match action {
+            HostAction::Power => self.open_host_power(),
+            HostAction::Connect => self.open_edit_host(idx),
+            // The row streams the desktop with a profile picked now; its ⋯ picks the one a
+            // title with no binding of its own streams with every time.
+            HostAction::ConnectWith => {
+                let Some(entry) = self.hosts.entries.get(idx) else {
+                    return;
+                };
+                let (host, port) = (entry.host().to_string(), entry.port());
+                self.open_pick_profile(ProfilePick::HostDefault { host, port });
+            }
+            _ => {}
+        }
+    }
+
     /// Runs focused row's action; every arm navigates away or closes menu.
     pub(crate) fn confirm_host_menu_row(&mut self) {
         let actions = self.host_menu_actions();
@@ -291,19 +347,17 @@ impl App {
             HostAction::SpeedTest => self.open_speed_test(idx),
             HostAction::Power => self.confirm_power_row(idx),
             HostAction::PowerSettings => self.open_host_power(),
-            HostAction::ConnectWith | HostAction::DefaultProfile | HostAction::Pin => {
+            HostAction::ConnectWith | HostAction::Pin => {
                 let Some(entry) = self.hosts.entries.get(idx) else {
                     return;
                 };
                 let (host, port) = (entry.host().to_string(), entry.port());
                 let pick = match action {
                     HostAction::ConnectWith => ProfilePick::ConnectWith { host, port },
-                    HostAction::DefaultProfile => ProfilePick::HostDefault { host, port },
                     _ => ProfilePick::Pin { host, port },
                 };
                 self.open_pick_profile(pick);
             }
-            HostAction::Edit => self.open_edit_host(idx),
             HostAction::Forget => self.open_forget_host(idx),
         }
     }

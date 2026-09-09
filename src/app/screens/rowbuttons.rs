@@ -71,6 +71,10 @@ impl App {
         match self.nav.screen {
             // One row, one button: the tick that finishes the measurement.
             Screen::HdrCalibration => RowButtons::trailing(view::hdrcalibration::ACTION_MARKS),
+            // The power row's ⋯ and Connect's pencil; every other row has no ends.
+            Screen::HostMenu => RowButtons::trailing(self.host_menu_row_marks(row)),
+            // The calibrate row's bin, once this TV has a calibration to throw away.
+            Screen::SettingsPage => RowButtons::trailing(self.settings_page_row_marks(row)),
             Screen::Collections => self
                 .selected_known_host()
                 .and_then(|host| host.collections().get(row))

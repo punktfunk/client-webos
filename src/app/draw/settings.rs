@@ -143,7 +143,7 @@ pub(crate) fn draw(
                 c,
                 p.label(),
                 f64::from(r.left + 44.0 * k),
-                f64::from(r.center_y() + ENTRY_SIZE as f32 * k * 0.35),
+                f64::from(r.center_y()) + ENTRY_SIZE * f64::from(k) * 0.35,
                 if open { W::SemiBold } else { W::Medium },
                 ENTRY_SIZE * f64::from(k),
                 color,

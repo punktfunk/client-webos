@@ -96,8 +96,8 @@ impl App {
     /// The modal's rows, `None` off the screen or with no host selected.
     pub(crate) fn collections_rows(&self) -> Option<Vec<FocusRow>> {
         let host = self.selected_known_host()?;
-        let target = self.screens.collections.target.as_deref()?;
-        Some(view::collections::rows(host, host.collection_of(target)))
+        self.screens.collections.target.as_ref()?;
+        Some(view::collections::rows(host))
     }
 
     pub(crate) fn collections_row_count(&self) -> usize {

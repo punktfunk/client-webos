@@ -90,17 +90,13 @@ pub(crate) fn name_hint(host: &KnownHost, at: Option<usize>, typed: &str) -> Opt
     (!typed.is_empty() && !host.can_name(at, typed)).then_some("Already used")
 }
 
-/// One row per entry in grid order, Library included. `holding` is the collection the card
-/// being moved is in right now (`None` for Library, its implicit home) — that row wears the
-/// mark dot, so the list opens saying where the card already is instead of leaving the user
-/// to work it out.
-pub(crate) fn rows(host: &KnownHost, holding: Option<usize>) -> Vec<FocusRow> {
-    let library = host.library_index();
+/// One row per entry in grid order, Library included. Where the card already sits is said by
+/// the cursor, which opens on that row (`App::open_collections`).
+pub(crate) fn rows(host: &KnownHost) -> Vec<FocusRow> {
     let mut rows: Vec<FocusRow> = host
         .collections()
         .iter()
-        .enumerate()
-        .map(|(i, collection)| {
+        .map(|collection| {
             let count = if collection.dynamic {
                 // Library's members are whatever no one else claims, so its count is not in
                 // the vector — and saying "0 games" of it would be a lie.
@@ -114,16 +110,11 @@ pub(crate) fn rows(host: &KnownHost, holding: Option<usize>) -> Vec<FocusRow> {
             let row = FocusRow::action_with_value(icons::ICON_REORDER, collection.name.clone(), count_label(count))
                 .with_trailing(trailing(collection.dynamic))
                 .with_leading_button();
-            let row = match count {
+            match count {
                 // An empty collection is hidden in the grid, which reads as a vanished one
                 // unless the row that still lists it says so.
                 Some(0) => row.with_subtext(ui::widgets::RowSubtext::hint("Hidden until you add a game")),
                 _ => row,
-            };
-            if holding == Some(i) || (holding.is_none() && library == Some(i)) {
-                row.marked()
-            } else {
-                row
             }
         })
         .collect();
@@ -132,8 +123,7 @@ pub(crate) fn rows(host: &KnownHost, holding: Option<usize>) -> Vec<FocusRow> {
     if host.can_add_collection() {
         rows.push(FocusRow::action(icons::ICON_ADD, ADD_ROW.to_string()));
     }
-    // Library has no Remove and one row wears the mark dot, both of which would otherwise
-    // shift that row's count.
+    // Library has no Remove, which would otherwise shift that row's count.
     ui::widgets::align_values(&mut rows);
     rows
 }

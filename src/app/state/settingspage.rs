@@ -16,6 +16,8 @@ use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
 use pf_console_ui::widgets::{Control, RowSpec};
 
 use crate::app::nav::ScreenKey;
+use crate::app::screens::rowbuttons::RowButton;
+use crate::app::view::icons;
 use crate::app::{menu, App};
 use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
@@ -91,8 +93,6 @@ pub(crate) enum Row {
     GameMode,
     /// The three-step calibration screen.
     CalibrateHdr,
-    /// "Clear HDR calibration?", once one has been saved.
-    ResetHdr,
     /// One detected controller, or the "none" placeholder.
     Pad,
     Version,
@@ -148,7 +148,6 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             push(Row::Kit(K::Hdr), None);
             if !profile {
                 push(Row::CalibrateHdr, None);
-                push(Row::ResetHdr, None);
                 push(Row::GameMode, Some("TV"));
             }
         }
@@ -265,6 +264,16 @@ pub(crate) enum RowStep {
     Clear,
 }
 
+/// The trailing buttons a row carries: the bin that throws away an HDR calibration, on the row
+/// that made it. Nothing wears one until there is something to clear, so the button's presence
+/// is the answer to "is this TV calibrated".
+fn marks_of(row: Row, calibrated: bool) -> &'static [&'static str] {
+    match row {
+        Row::CalibrateHdr if calibrated => &[icons::ICON_DELETE],
+        _ => &[],
+    }
+}
+
 pub(crate) fn settings_nav(column: bool, ev: MenuEvent) -> NavStep {
     if column {
         return match ev {
@@ -291,6 +300,9 @@ impl App {
     /// card menu edits a title's profile, and a stale scope silently edits the wrong one.
     pub(crate) fn open_settings_page(&mut self, scope: Scope) {
         self.screens.settings_page.scope = scope;
+        // One field serves every row list, so a button left focused on the screen that raised
+        // this one would arrive as this page's — and swallow Confirm on a row that draws none.
+        self.screens.row_button = None;
         // The page column takes focus first; OK or Right on a page moves into its rows.
         self.screens.settings_page.column = true;
         self.nav.enter(Screen::SettingsPage, 0);
@@ -359,6 +371,15 @@ impl App {
             .collect()
     }
 
+    /// [`marks_of`] for row `row` — the index the pointer and the d-pad name a row by. The
+    /// painter has the row in hand already and calls [`marks_of`] directly.
+    pub(crate) fn settings_page_row_marks(&self, row: usize) -> &'static [&'static str] {
+        let calibrated = self.settings_ui.settings.hdr_calibrated();
+        self.settings_page_rows()
+            .get(row)
+            .map_or(&[], |&(row, _)| marks_of(row, calibrated))
+    }
+
     /// The rows of the open page, gated: the plan's positive list, the console's platform
     /// gate, then its applicability filter.
     pub(crate) fn settings_page_rows(&self) -> Rows {
@@ -374,7 +395,6 @@ impl App {
                 }
                 let shown = match row {
                     Row::Kit(id) => engine::row_on(id, pf_console_ui::Platform::WebOS) && engine::row_applies(id, ctx),
-                    Row::ResetHdr => self.settings_ui.settings.hdr_calibrated(),
                     _ => true,
                 };
                 if shown {
@@ -387,6 +407,9 @@ impl App {
 
     /// The open page's rows as the kit draws them.
     pub(crate) fn settings_page_specs(&self) -> Vec<RowSpec> {
+        let cursor = self.nav.cursor(ScreenKey::SettingsPage);
+        let lit = self.screens.row_button;
+        let calibrated = self.settings_ui.settings.hdr_calibrated();
         let mut settings = self.scope_settings();
         let overlay = self.scope_profile().map(|p| p.overrides.clone());
         let rows = self.settings_page_rows();
@@ -394,7 +417,8 @@ impl App {
         let core = self.settings_ui.settings.clone();
         self.with_engine(&mut settings, |ctx| {
             rows.iter()
-                .map(|&(row, header)| {
+                .enumerate()
+                .map(|(i, &(row, header))| {
                     let mut spec = match row {
                         Row::Kit(id) => {
                             let mut spec = engine::row_spec(id, ctx, &profiles);
@@ -406,7 +430,7 @@ impl App {
                             spec.dot = overlay.as_ref().is_some_and(|o| overridden(o, id));
                             spec
                         }
-                        Row::Editing => RowSpec::choice("Editing", self.scope_label()),
+                        Row::Editing => RowSpec::choice("Profile", self.scope_label()),
                         Row::GameMode => {
                             let spec = RowSpec::toggle("Game mode", core.game_mode())
                                 .with_note("Asks the TV to switch its picture mode for the stream");
@@ -424,10 +448,6 @@ impl App {
                                 spec.locked("Turn HDR on to calibrate")
                             }
                         }
-                        Row::ResetHdr => RowSpec {
-                            danger: true,
-                            ..RowSpec::action("Clear HDR calibration…", true)
-                        },
                         Row::Pad => match self.detected_gamepad_type {
                             Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
@@ -450,7 +470,11 @@ impl App {
                         Row::NewProfile => RowSpec::action("New profile…", true),
                         Row::Rename => RowSpec::action("Rename…", true),
                         Row::Duplicate => RowSpec::action("Duplicate", true),
-                        Row::Delete => RowSpec::action("Delete…", true),
+                        // The one row here that destroys saved state, in the kit's loss colour.
+                        Row::Delete => RowSpec {
+                            danger: true,
+                            ..RowSpec::action("Delete…", true)
+                        },
                     };
                     spec.header = header;
                     // The engine draws every boolean as text with chevrons, while this app's
@@ -466,7 +490,7 @@ impl App {
                         // The switch is the affordance: no chevrons, and no value to slide.
                         spec.adjustable = false;
                     }
-                    spec
+                    crate::app::draw::list::with_row_buttons(spec, marks_of(row, calibrated), i == cursor, lit)
                 })
                 .collect()
         })
@@ -498,6 +522,14 @@ impl App {
     /// One menu event on the page. Left/Right on the column switch pages; on a row they step
     /// it. Confirm activates. Secondary clears an override in profile scope.
     pub(crate) fn handle_settings_page_event(&mut self, ev: MenuEvent) {
+        // The focused row's buttons come first, exactly as on a collections row: Right steps
+        // onto them, Left back off, and neither reaches the value stepper while one is lit.
+        if !self.screens.settings_page.column
+            && matches!(ev, MenuEvent::Left | MenuEvent::Right)
+            && self.step_row_button(ev == MenuEvent::Right)
+        {
+            return;
+        }
         let sp = &self.screens.settings_page;
         match settings_nav(sp.column, ev) {
             NavStep::Page(delta) => {
@@ -510,7 +542,12 @@ impl App {
                 self.show_page(Page::ALL[next]);
             }
             NavStep::EnterRows => self.screens.settings_page.column = false,
-            NavStep::ToColumn => self.screens.settings_page.column = true,
+            // A trailing button belongs to the row it is on, so leaving the rows leaves it —
+            // the same rule `list_nav_event` applies when the cursor moves between rows.
+            NavStep::ToColumn => {
+                self.screens.settings_page.column = true;
+                self.screens.row_button = None;
+            }
             NavStep::Leave => self.leave_settings_page(),
             NavStep::Row(step) => {
                 if self.list_nav_event(ev) {
@@ -526,7 +563,15 @@ impl App {
                 };
                 match step {
                     RowStep::Step(delta) => self.step_row(row, delta, false),
-                    RowStep::Activate => self.activate_row(row),
+                    // A row's button acts on the row it is on, read by icon rather than by
+                    // index, exactly as a collection row's is (`confirm_collections_row`).
+                    RowStep::Activate => match self.screens.row_button {
+                        Some(RowButton::Trailing(i)) => match self.row_trailing_button(cursor, i) {
+                            Some(icons::ICON_DELETE) => self.open_reset_hdr_calibration(),
+                            _ => self.activate_row(row),
+                        },
+                        _ => self.activate_row(row),
+                    },
                     RowStep::Clear => self.clear_override(row),
                 }
             }
@@ -537,6 +582,7 @@ impl App {
     pub(crate) fn show_page(&mut self, page: Page) {
         if self.screens.settings_page.page != page {
             self.screens.settings_page.page = page;
+            self.screens.row_button = None;
             self.nav.set_cursor(ScreenKey::SettingsPage, 0);
             self.render.modal.focus_anim = Some(std::time::Instant::now());
         }
@@ -566,7 +612,6 @@ impl App {
                 self.persist();
             }
             Row::SendLogs => self.send_logs_action(),
-            Row::ResetHdr => self.open_reset_hdr_calibration(),
             Row::Licences => self.open_about(),
             Row::NewProfile => self.new_profile(),
             Row::Rename => self.open_rename_profile(),
@@ -595,7 +640,7 @@ impl App {
                 let mut after = before.clone();
                 let changed = self.with_engine(&mut after, |ctx| engine::adjust(id, delta, wrap, ctx));
                 if changed {
-                    self.write_scope(&before, &after);
+                    self.write_scope(&before, &after, overlay_field(id));
                 }
             }
             _ => {}
@@ -603,8 +648,9 @@ impl App {
     }
 
     /// Persist an edited document: the global one, clamped to the TV's caps and projected onto
-    /// this client's own struct; or the profile's overlay, absorbing what changed.
-    fn write_scope(&mut self, before: &trust::Settings, after: &trust::Settings) {
+    /// this client's own struct; or the profile's overlay, absorbing what changed. `field` is
+    /// the overlay key the edited row pins, if any.
+    fn write_scope(&mut self, before: &trust::Settings, after: &trust::Settings, field: Option<&'static str>) {
         match self.screens.settings_page.scope.clone() {
             Scope::Global => {
                 let mut document = after.clone();
@@ -613,8 +659,18 @@ impl App {
                 self.persist();
             }
             Scope::Profile(id) => {
+                let global = self.settings_ui.settings.clone();
                 if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
                     p.overrides.absorb(before, after);
+                    // `absorb` pins a value even when it equals the global one, but the dot
+                    // reads as "differs from Default settings" — so an edit that lands back on
+                    // the global value drops its pin instead of keeping a no-op override.
+                    if let Some(field) = field {
+                        let mut without = p.overrides.clone();
+                        if without.clear(field) && without.apply(&global) == p.overrides.apply(&global) {
+                            p.overrides = without;
+                        }
+                    }
                     self.persist();
                 }
             }
