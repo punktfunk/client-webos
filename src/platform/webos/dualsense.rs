@@ -678,9 +678,8 @@ const BUS_SEND_INTERVAL: Duration = Duration::from_millis(16);
 /// tables of a process holding SDL, the decoder and its frame buffers. **Unthrottled, this
 /// blacked out the video plane on a real stream**: a Steam/Gamescope host animates the
 /// `DualSense` lightbar continuously, which turned every animation step into a process spawn —
-/// dozens per second on a 2-3 core TV. Frames kept decoding (that thread is priority-boosted)
-/// while the compositor never got to present, so the panel stayed black with the frame counter
-/// climbing and nothing dropped.
+/// dozens per second on a 2-3 core TV. Frames kept decoding while the compositor never got to
+/// present, so the panel stayed black with the frame counter climbing and nothing dropped.
 ///
 /// 250 ms is far finer than a trigger effect meaningfully changes (weapon swaps, state
 /// transitions) and caps the cost at four spawns a second in the worst case.

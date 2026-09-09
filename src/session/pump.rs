@@ -12,10 +12,8 @@ use punktfunk_core::packet::{FLAG_SOF, USER_FLAG_RECOVERY_ANCHOR};
 use punktfunk_core::reanchor::DROP_CREDIT_WINDOW;
 use punktfunk_core::PunktfunkError;
 
-use crate::platform::webos::device::boost_current_thread;
 use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::session::audio::AudioStage;
-use crate::session::priority::{boost_hot_threads, spawn_vendor_decode_thread_renicer};
 use crate::session::stage::{SinkResult, VideoStage, WireFrame};
 use crate::session::StreamStats;
 
@@ -312,7 +310,7 @@ impl VideoPump {
     }
 }
 
-/// The video thread's body: boost the threads that carry the stream, then pump until `stop`.
+/// The video thread's body: pump until `stop`.
 // The thread body owns everything it is handed — the `Arc`s die with it, which is what keeps
 // the client and the stats alive for exactly as long as the pump runs.
 #[allow(clippy::needless_pass_by_value)]
@@ -323,9 +321,6 @@ pub(super) fn video_pump(
     stats: Arc<StreamStats>,
     is_hdr: bool,
 ) {
-    client.register_hot_thread();
-    boost_hot_threads(&client);
-    spawn_vendor_decode_thread_renicer();
     VideoPump::new(client, stage, stats, is_hdr).run(&stop);
 }
 
@@ -346,9 +341,6 @@ const AUDIO_WAIT: Duration = Duration::from_millis(100);
 /// `next_audio` docs ask for exactly this thread ("packets arrive every 5 ms"), and its pull
 /// methods are one-thread-per-plane safe by contract.
 fn audio_drain(client: &NativeClient, stop: &AtomicBool, what: &str, mut play: impl FnMut(&AudioPacket)) {
-    // Same boost the video pump requests for itself — 5 ms packets are the most
-    // latency-sensitive cadence in the session.
-    boost_current_thread();
     while !stop.load(Ordering::Relaxed) {
         match client.next_audio(AUDIO_WAIT) {
             Ok(packet) => play(&packet),

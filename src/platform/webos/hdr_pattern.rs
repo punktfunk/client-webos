@@ -137,7 +137,7 @@ fn run(stop: &Arc<AtomicBool>, rx: &mpsc::Receiver<Command>, meta: HdrMeta, patt
     video.set_color_info(Some(&meta), color)?;
     // NDL paces the video plane off a fed audio plane; without one it ignores presentation times
     // and the picture stalls. A silent clock plane is the whole fix — the same one a
-    // software-audio stream runs, spawned the same way so it gets the same priority boost.
+    // software-audio stream runs.
     let clock = video
         .audio_plane()
         .map(|plane| ndl::spawn_clock_plane(plane, Arc::clone(stop), false))
