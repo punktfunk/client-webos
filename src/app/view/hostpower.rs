@@ -82,6 +82,8 @@ pub fn refusal_message(e: &crate::services::library::LibraryError) -> String {
         LibraryError::NotPaired => "This device isn't allowed to control the host's power.".into(),
         LibraryError::Http(409) => "The host is refusing — another device is still streaming.".into(),
         LibraryError::Http(501) => "This host can't do that.".into(),
-        other => format!("Couldn't reach the host: {other}"),
+        // Already a whole sentence naming what did not happen; a "couldn't reach" prefix
+        // would both double it up and claim the host is down when it answered.
+        other => other.to_string(),
     }
 }

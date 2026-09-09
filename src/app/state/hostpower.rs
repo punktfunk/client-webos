@@ -124,9 +124,9 @@ impl App {
         let rx = &job.rx;
         let result = match rx.try_recv() {
             Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(
-                crate::services::library::LibraryError::Unreachable("power action thread died".into()),
-            ),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(crate::services::library::LibraryError::BadReply(
+                "power action thread died".into(),
+            )),
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
         };
         self.jobs.power_action = None;

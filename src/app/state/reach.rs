@@ -15,9 +15,10 @@ pub(crate) struct Reachability {
     pub(crate) online: bool,
 }
 
-/// Whether a management-API failure means the host never answered. Every other error is a
-/// reply — `NotPaired` is a 401/403, `Http` carries a status, and `PinMismatch` is a
-/// certificate the host presented — so only the transport ones count as the host being down.
+/// Whether a management-API failure means the host never answered. Every other error proves
+/// it did: `NotPaired` is a 401/403, `Http` carries a status, `PinMismatch` and `Tls` are a
+/// handshake on an open socket, `Timeout` and `BadReply` are a connection the host accepted,
+/// and `Identity` never left this device. Only `Unreachable` is the host being down.
 /// Same split `handle_library_error` makes when it decides whether Wake-on-LAN would help.
 pub(crate) fn api_error_is_offline(e: &crate::services::library::LibraryError) -> bool {
     use crate::services::library::LibraryError;
@@ -134,5 +135,52 @@ impl App {
 
     pub(crate) fn new_reachability() -> HashMap<(String, u16), bool> {
         HashMap::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_error_is_offline;
+    use crate::services::library::LibraryError;
+
+    /// The wake dialog and the sidebar dot both hang off this one answer, so a host that
+    /// answered — however badly — must never be reported as down.
+    #[test]
+    fn only_an_unanswered_host_is_offline() {
+        assert!(api_error_is_offline(&LibraryError::Unreachable("refused".into())));
+        for answered in [
+            LibraryError::Timeout("timeout: Global".into()),
+            LibraryError::BadReply("bad JSON: eof".into()),
+            LibraryError::Tls("handshake".into()),
+            LibraryError::Identity("client key pem".into()),
+            LibraryError::NotPaired,
+            LibraryError::PinMismatch,
+            LibraryError::Http(500),
+        ] {
+            assert!(
+                !api_error_is_offline(&answered),
+                "{answered:?} is not the host being down"
+            );
+        }
+    }
+
+    /// Every line here is read off a status bar or a modal body, so each stays one sentence.
+    #[test]
+    fn each_reason_is_one_short_sentence() {
+        for e in [
+            LibraryError::Unreachable("refused".into()),
+            LibraryError::Timeout("timeout: Global".into()),
+            LibraryError::BadReply("bad JSON: eof".into()),
+            LibraryError::Tls("handshake".into()),
+            LibraryError::Identity("client key pem".into()),
+        ] {
+            let line = e.to_string();
+            assert!(line.len() <= 60, "too long for a status line: {line}");
+            assert_eq!(line.matches('.').count(), 1, "one sentence: {line}");
+            assert!(
+                !line.contains("refused") && !line.contains("pem"),
+                "cause leaked: {line}"
+            );
+        }
     }
 }

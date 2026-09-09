@@ -528,7 +528,7 @@ impl App {
                 self.regroup_games();
             }
             Err(e) => {
-                tracing::warn!("library fetch failed ({host}:{mgmt_port}): {e}");
+                tracing::warn!("library fetch failed ({host}:{mgmt_port}): {e:?}");
                 self.handle_library_error(host, port, &e);
             }
         }
@@ -539,8 +539,8 @@ impl App {
     /// Shared handling for a failed library fetch/reachability check, used by both
     /// `drain_games` and `drain_launch_check`. `Unreachable` opens the Wake dialog
     /// (even with no MAC on record — `start_wake`/`render_wake` just hide the send
-    /// controls then); `NotPaired`/`PinMismatch`/`Http` mean the host answered, so
-    /// Wake-on-LAN wouldn't help — those stay a plain status line.
+    /// controls then); every other variant means the host answered (or that the fault is
+    /// this device's), so Wake-on-LAN wouldn't help — those stay a plain status line.
     pub(crate) fn handle_library_error(&mut self, host: String, port: u16, e: &crate::services::library::LibraryError) {
         let reason = e.to_string();
         // A live problem with the host beats the previous launch's reason for bouncing.

@@ -458,10 +458,14 @@ impl Service {
         let games = match loaded.result {
             Ok(games) => games,
             Err(e) => {
-                tracing::warn!("console: library fetch failed: {e}");
-                // A transport failure is the one worth retrying; a rejected certificate does
-                // not become acceptable by asking again.
-                let can_retry = matches!(e, LibraryError::Unreachable(_));
+                tracing::warn!("console: library fetch failed: {e:?}");
+                // Retry only what asking again could answer differently. A rejected certificate
+                // does not become acceptable by repeating the question, and neither does an
+                // identity this device can't load.
+                let can_retry = matches!(
+                    e,
+                    LibraryError::Unreachable(_) | LibraryError::Timeout(_) | LibraryError::BadReply(_)
+                );
                 self.handles.library.set_phase(LibraryPhase::Error {
                     title: "Couldn't load the library".into(),
                     body: e.to_string(),

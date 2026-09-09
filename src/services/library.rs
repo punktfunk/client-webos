@@ -20,14 +20,39 @@ pub use crate::core::model::GameEntry;
 pub const DEFAULT_MGMT_PORT: u16 = 47990;
 
 /// Errors surfaced to the UI so it can explain what to do next.
+///
+/// [`Unreachable`](Self::Unreachable) is the only variant that means the host never answered,
+/// so it is the only one Wake-on-LAN can help with — everything below it is a host that is
+/// demonstrably up. Keeping them apart is what stops a cut reply or an unreadable identity
+/// telling the user their PC is asleep.
+///
+/// Each carries the operator-side cause for the log (`{e:?}`); `Display` is the user register
+/// and stays one short sentence, because these land on a status line and a modal body.
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the causes are read as `{e:?}` in the log lines, never on screen"
+)]
 pub enum LibraryError {
     /// The host rejected our certificate — this device isn't on its paired list.
     NotPaired,
     /// The host's certificate didn't hash to the pinned fingerprint.
     PinMismatch,
     Http(u16),
+    /// Nothing answered: a refused connection, no route, or the connect budget spent.
     Unreachable(String),
+    /// Connected, then the whole-request budget ran out. The host is up and too slow, or
+    /// busy building the answer.
+    Timeout(String),
+    /// The host answered and the answer didn't survive: a cut body, malformed HTTP, or JSON
+    /// this build can't read.
+    BadReply(String),
+    /// The socket opened and TLS failed. Not [`PinMismatch`](Self::PinMismatch), which is the
+    /// pin check specifically.
+    Tls(String),
+    /// This device's own certificate, key or TLS setup wouldn't load. Says nothing about the
+    /// host at all.
+    Identity(String),
 }
 
 impl std::fmt::Display for LibraryError {
@@ -36,7 +61,11 @@ impl std::fmt::Display for LibraryError {
             Self::NotPaired => f.write_str("Not paired — pair with the host first."),
             Self::PinMismatch => f.write_str("Host certificate changed — re-pair with a PIN."),
             Self::Http(code) => write!(f, "Management API returned HTTP {code}."),
-            Self::Unreachable(why) => write!(f, "Couldn't reach the host's management API: {why}."),
+            Self::Unreachable(_) => f.write_str("The host isn't answering."),
+            Self::Timeout(_) => f.write_str("The host is answering too slowly."),
+            Self::BadReply(_) => f.write_str("Couldn't read the host's reply."),
+            Self::Tls(_) => f.write_str("Couldn't secure the connection to the host."),
+            Self::Identity(_) => f.write_str("Couldn't load this device's pairing identity."),
         }
     }
 }
@@ -64,7 +93,9 @@ pub fn agent_within(
     budget: std::time::Duration,
 ) -> Result<ureq::Agent, LibraryError> {
     use rustls::pki_types::pem::PemObject;
-    let bad = |what: &str, e: &dyn std::fmt::Display| LibraryError::Unreachable(format!("{what}: {e}"));
+    // Every failure below is this device's own PEMs or crypto setup, not the host's — the
+    // agent is built before anything is dialled.
+    let bad = |what: &str, e: &dyn std::fmt::Display| LibraryError::Identity(format!("{what}: {e}"));
     // aws-lc-rs, matching punktfunk-core's QUIC for consistent crypto — the invariant this
     // comment always claimed, now that core has moved off ring too. Naming a provider here
     // (rather than letting rustls infer one) is also what keeps this path working if a second
@@ -114,10 +145,10 @@ pub(crate) fn get_json<T: serde::de::DeserializeOwned>(
         Ok(mut resp) => resp
             .body_mut()
             .read_to_string()
-            .map_err(|e| LibraryError::Unreachable(format!("read body: {e}")))?,
+            .map_err(|e| LibraryError::BadReply(format!("read body: {e}")))?,
         Err(e) => return Err(classify(e)),
     };
-    serde_json::from_str(&body).map_err(|e| LibraryError::Unreachable(format!("bad JSON: {e}")))
+    serde_json::from_str(&body).map_err(|e| LibraryError::BadReply(format!("bad JSON: {e}")))
 }
 
 /// Fetch the host's library.
@@ -181,7 +212,7 @@ pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str
         Ok(mut resp) => resp
             .body_mut()
             .read_to_vec()
-            .map_err(|e| LibraryError::Unreachable(format!("read art body: {e}"))),
+            .map_err(|e| LibraryError::BadReply(format!("read art body: {e}"))),
         Err(e) => Err(classify(e)),
     }
 }
@@ -194,11 +225,14 @@ fn fetch_external_art(url: &str) -> Result<Vec<u8>, LibraryError> {
         Ok(mut resp) => resp
             .body_mut()
             .read_to_vec()
-            .map_err(|e| LibraryError::Unreachable(format!("read external art body: {e}"))),
+            .map_err(|e| LibraryError::BadReply(format!("read external art body: {e}"))),
         Err(e) => Err(classify(e)),
     }
 }
 
+/// Sorts one transport failure into "the host never answered" and the several ways a host that
+/// *did* answer can still fail us. The split is what the Wake dialog and the reachability dot
+/// key off, so a wrong bucket here tells the user to go and switch their PC on.
 pub(crate) fn classify(e: ureq::Error) -> LibraryError {
     match e {
         ureq::Error::StatusCode(401 | 403) => LibraryError::NotPaired,
@@ -209,6 +243,17 @@ pub(crate) fn classify(e: ureq::Error) -> LibraryError {
         ureq::Error::Rustls(rustls::Error::InvalidCertificate(
             rustls::CertificateError::ApplicationVerificationFailure,
         )) => LibraryError::PinMismatch,
+        // TLS runs on an open socket, so the host is up whatever the handshake decided.
+        ureq::Error::Rustls(e) => LibraryError::Tls(e.to_string()),
+        ureq::Error::Tls(what) => LibraryError::Tls(what.to_string()),
+        // Connect carries its own (shorter) budget, so it is what expires when nothing is
+        // listening; any later timeout means the connection came up and the host went quiet.
+        ureq::Error::Timeout(t @ (ureq::Timeout::Connect | ureq::Timeout::Resolve)) => {
+            LibraryError::Unreachable(format!("timeout: {t:?}"))
+        }
+        ureq::Error::Timeout(t) => LibraryError::Timeout(format!("timeout: {t:?}")),
+        // Malformed HTTP is still a reply.
+        ureq::Error::Protocol(e) => LibraryError::BadReply(e.to_string()),
         other => LibraryError::Unreachable(other.to_string()),
     }
 }
