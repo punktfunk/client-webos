@@ -5,7 +5,7 @@
 //! on a host switch (`App::clear_selected_host`).
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::services::art::CardArt;
 
@@ -29,6 +29,14 @@ pub(crate) struct Library {
     pub(crate) groups: Vec<Group>,
     /// Cover art pixmaps by game id.
     pub(crate) art: HashMap<String, CardArt>,
+    /// Ids the host said it has launched, from its last `/api/v1/status` answer
+    /// (`services::library::load_running_async`). A set, not a list: the only question the
+    /// grid asks is whether the card it is about to paint is one of them, once per visible
+    /// card per frame.
+    pub(crate) running: HashSet<String>,
+    /// When the poll behind [`Self::running`] last went out. `None` re-arms it, which is what
+    /// makes a host switch ask immediately instead of waiting out the interval.
+    pub(crate) running_last: Option<std::time::Instant>,
 }
 
 /// The Desktop card, as an ordinary library entry. It is a card the *client* offers rather
@@ -202,5 +210,7 @@ impl Library {
         self.games = Vec::new();
         self.clear_groups();
         self.art.clear();
+        self.running.clear();
+        self.running_last = None;
     }
 }

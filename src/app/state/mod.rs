@@ -15,6 +15,7 @@ mod pairing;
 pub(crate) mod profilepick;
 pub(crate) mod profiles;
 pub(crate) mod reach;
+pub(crate) mod running;
 pub(crate) mod sendlogs;
 pub(crate) mod settingspage;
 pub(crate) mod speedtest;

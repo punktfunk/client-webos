@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_console_ui::{
-    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, Stale, WakeStatus,
+    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, SpeedPhase, Stale,
+    WakeStatus,
 };
 
 use crate::core::model::{GameEntry, KnownHost};
@@ -62,6 +63,9 @@ fn chip(p: &pf_client_core::profiles::StreamProfile) -> pf_console_ui::ProfileCh
         id: p.id.clone(),
         name: p.name.clone(),
         accent: p.accent.clone(),
+        // Only the speed test reads this: a profile that PINS bitrate is the layer its host
+        // streams at, so the shell must not offer to write the global default instead.
+        bitrate_kbps: p.overrides.bitrate_kbps,
     }
 }
 
@@ -333,6 +337,13 @@ impl Service {
                 self.handles.console.set_wake(None);
             }
             ConsoleCmd::Probe => self.start_sweep(),
+            ConsoleCmd::SpeedTest {
+                key,
+                addr,
+                port,
+                fp_hex,
+                host_name,
+            } => self.speed_test(key, addr, port, &fp_hex, host_name),
             // Nothing this client draws: it has no licences screen of its own, and the pad
             // grants and rumble tests are Android's `InputDevice` API.
             ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
@@ -786,6 +797,56 @@ impl Service {
             )
             .ok();
     }
+
+    /// Measure the path to one host over the real data plane and report the phases back.
+    ///
+    /// The shell has already raised the takeover and holds Apply; this only advances the
+    /// phase, and `advance_speed` drops a report for a test the player has dismissed. The
+    /// probe is `session::probe`'s — the same one `Screen::SpeedTest` runs — so the two UIs
+    /// measure identically and the recommendation keeps the same headroom every client does.
+    fn speed_test(&self, key: String, addr: String, port: u16, fp_hex: &str, host_name: String) {
+        let identity = self.identity.clone();
+        let pin = shared::parse_fp(fp_hex);
+        let console = self.handles.console.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-speedtest".into())
+            .spawn(move || {
+                let progress = {
+                    let console = console.clone();
+                    let key = key.clone();
+                    move |_| console.advance_speed(&key, SpeedPhase::Measuring)
+                };
+                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, progress) {
+                    Ok(r) => {
+                        let kbps = r.outcome.throughput_kbps;
+                        tracing::info!(
+                            "console: speed test on {host_name} — {kbps} kbps, {:.1}% loss (confirmed={})",
+                            r.outcome.loss_pct,
+                            r.confirmed,
+                        );
+                        console.advance_speed(
+                            &key,
+                            SpeedPhase::Done {
+                                throughput_kbps: kbps,
+                                loss_pct: r.outcome.loss_pct,
+                                recommended_kbps: recommended_kbps(kbps),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("console: speed test on {host_name} failed: {e}");
+                        console.advance_speed(&key, SpeedPhase::Failed(crate::core::errors::friendly(&e)));
+                    }
+                }
+            })
+            .ok();
+    }
+}
+
+/// Headroom every punktfunk client keeps under a measurement, for FEC and for real loss.
+/// Integer arithmetic in this order (not `* 0.7`), so every client recommends the same kilobit.
+fn recommended_kbps(throughput_kbps: u32) -> u32 {
+    throughput_kbps / 10 * 7
 }
 
 /// Whether a saved record and a live advert are the same host.

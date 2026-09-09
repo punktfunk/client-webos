@@ -41,4 +41,8 @@ pub(crate) struct RenderState {
     /// When the sidebar first drew the brand mark — the start of its one-shot entrance
     /// (`pf_console_ui::brand`). `None` until then.
     pub(crate) mark_shown_at: Option<std::time::Instant>,
+    /// Phase origin for the running dot's pulse (`app::draw::home::running_dot`). Stamped on
+    /// the first frame that draws one, so the pulse starts at its brightest rather than
+    /// wherever a process-lifetime clock happened to be.
+    pub(crate) running_pulse_since: Option<std::time::Instant>,
 }
