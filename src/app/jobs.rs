@@ -15,6 +15,7 @@ use crate::services::art::ArtLoader;
 use crate::services::discovery::Discovery;
 use crate::services::library::{GamesLoaded, LibraryError};
 use crate::services::power::PowerRights;
+use crate::services::status::RunningLoaded;
 use crate::services::store::ExitAction;
 
 #[derive(Default)]
@@ -22,6 +23,8 @@ pub(crate) struct Jobs {
     /// `None` if the mDNS daemon didn't start. Owned here so it stops with the menu.
     pub(crate) discovery: Option<Discovery>,
     pub(crate) games: Option<Receiver<GamesLoaded>>,
+    /// Answers [`App::tick_running`].
+    pub(crate) running: Option<Receiver<RunningLoaded>>,
     pub(crate) art: Option<ArtLoader>,
     /// Drained each tick by `drain_pairing`; dropping it (Back while busy) cancels.
     pub(crate) pairing: Option<Receiver<PairingOutcome>>,
@@ -76,6 +79,7 @@ impl Jobs {
     pub(crate) fn cancel_library(&mut self) {
         self.games = None;
         self.art = None;
+        self.running = None;
     }
 }
 
@@ -87,6 +91,7 @@ impl crate::app::App {
         let mut dirty = self.drain_discovery();
         dirty |= self.drain_art();
         dirty |= self.drain_games();
+        dirty |= self.drain_running();
         dirty |= self.drain_pairing();
         dirty |= self.drain_rooted();
         dirty |= self.drain_power_access();

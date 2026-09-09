@@ -15,6 +15,7 @@ mod pairing;
 pub(crate) mod profilepick;
 pub(crate) mod profiles;
 pub(crate) mod reach;
+pub(crate) mod running;
 pub(crate) mod sendlogs;
 pub(crate) mod settingspage;
 pub(crate) mod speedtest;
@@ -30,6 +31,7 @@ impl App {
     pub(crate) fn tick_screens(&mut self) -> bool {
         let mut changed = self.tick_wake();
         changed |= self.tick_hdr_pattern();
+        self.tick_running();
         changed
     }
 

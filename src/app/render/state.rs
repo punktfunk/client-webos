@@ -41,4 +41,55 @@ pub(crate) struct RenderState {
     /// When the sidebar first drew the brand mark — the start of its one-shot entrance
     /// (`pf_console_ui::brand`). `None` until then.
     pub(crate) mark_shown_at: Option<std::time::Instant>,
+    pub(crate) running_pulse: RunningPulse,
+}
+
+/// The running dot's pulse: its phase, how often it is worth redrawing, and the one value the
+/// painter reads.
+///
+/// Stepped rather than continuous, because reporting `animating` is what keeps the menu loop
+/// off `wait_for_event`: a smooth 60 Hz breath would hold this `SoC` at a full grid redraw per
+/// frame for as long as a game is up, to move one dot on a near-two-second cycle. Eighteen
+/// steps is ~10 Hz, past what anyone resolves in a slow fade and a sixth of the redraws.
+///
+/// One clock for both jobs, so the value drawn and the frame it is drawn on cannot drift: the
+/// painter reads [`Self::breath`], and [`Self::tick`] is the only writer.
+#[derive(Default)]
+pub(crate) struct RunningPulse {
+    /// Stamped on first live tick. `None` while nothing is running, so the next breath starts
+    /// at its peak rather than mid-fall.
+    since: Option<std::time::Instant>,
+    /// Last computed step; `None` forces first computation.
+    step: Option<u32>,
+    pub(crate) breath: f32,
+}
+
+/// One full breath. Slow on purpose — a dot that blinks reads as an alarm.
+const PULSE_SECS: f32 = 1.8;
+const PULSE_STEPS: u32 = 18;
+
+impl RunningPulse {
+    /// Advances the breath and reports whether this frame owes a redraw for it. `live` is
+    /// whether the dot is on screen at all — a false one parks the clock rather than freezing
+    /// it mid-fade.
+    pub(crate) fn tick(&mut self, now: std::time::Instant, live: bool) -> bool {
+        if !live {
+            self.since = None;
+            self.step = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        let phase = now.duration_since(since).as_secs_f32() / PULSE_SECS;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let step = (phase.fract() * PULSE_STEPS as f32) as u32;
+        if self.step == Some(step) {
+            return false;
+        }
+        self.step = Some(step);
+        // Off the step, not off `phase`: the value drawn is then exactly the one this frame was
+        // woken for, and two cards in one frame cannot land on different points of the breath.
+        let at = step as f32 / PULSE_STEPS as f32;
+        self.breath = 0.5 + 0.5 * (at * std::f32::consts::TAU).cos();
+        true
+    }
 }

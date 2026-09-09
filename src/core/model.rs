@@ -539,6 +539,12 @@ pub const BITRATE_MIN_KBPS: u32 = 10_000;
 /// could climb past what the slider allows would just be a second, hidden setting.
 pub const BITRATE_MAX_KBPS: u32 = 200_000;
 
+/// 70% of measured goodput (headroom for FEC, loss).
+/// Integer arithmetic order matters (`/ 10 * 7`, not `* 0.7`) — all clients must agree exactly.
+pub fn recommended_bitrate_kbps(throughput_kbps: u32) -> u32 {
+    throughput_kbps / 10 * 7
+}
+
 /// A slider's discrete positions: a closed range walked in fixed steps.
 ///
 /// One value type for every slider — the three HDR measurements and Bitrate — so the range, the

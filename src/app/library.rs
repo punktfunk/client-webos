@@ -5,7 +5,7 @@
 //! on a host switch (`App::clear_selected_host`).
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::services::art::CardArt;
 
@@ -29,6 +29,10 @@ pub(crate) struct Library {
     pub(crate) groups: Vec<Group>,
     /// Cover art pixmaps by game id.
     pub(crate) art: HashMap<String, CardArt>,
+    /// Running game ids from last status poll. Queried per visible card per frame.
+    pub(crate) running: HashSet<String>,
+    /// Poll timestamp. `None` re-arms immediately on host switch.
+    pub(crate) running_last: Option<std::time::Instant>,
 }
 
 /// The Desktop card, as an ordinary library entry. It is a card the *client* offers rather
@@ -202,5 +206,7 @@ impl Library {
         self.games = Vec::new();
         self.clear_groups();
         self.art.clear();
+        self.running.clear();
+        self.running_last = None;
     }
 }

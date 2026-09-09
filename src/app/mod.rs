@@ -677,6 +677,12 @@ impl App {
         {
             animating = true;
         }
+        // Stepped animation: always tick for state consistency, but only animate when
+        // visible (Home + running game). See RunningPulse.
+        let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
+        if self.render.running_pulse.tick(now, dot_live) {
+            animating = true;
+        }
         // The mark's entrance, from the sidebar's first frame.
         if self
             .render

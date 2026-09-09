@@ -9,5 +9,6 @@ pub mod paths;
 pub mod pinned_tls;
 pub mod power;
 pub mod recents;
+pub mod status;
 pub mod store;
 pub mod wol;

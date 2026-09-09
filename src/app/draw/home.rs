@@ -39,6 +39,11 @@ const SIDEBAR_ICON: f32 = 30.0;
 const SIDEBAR_ICON_PAD: f32 = 20.0;
 const MENU_GLYPH: f32 = 26.0;
 const PRESENCE_DOT: f32 = 9.0;
+/// Larger than [`PRESENCE_DOT`]: must read over cover art from a distance.
+const RUNNING_DOT: f32 = 14.0;
+const RUNNING_DOT_INSET: f32 = 14.0;
+/// Flat circles, not `MaskFilter::blur`: avoids per-call filter alloc. Both read the same at 14 px.
+const RUNNING_HALO_RINGS: usize = 3;
 const STRIP_PAD: f32 = 16.0;
 const STRIP_INSET: f32 = 8.0;
 pub(crate) const MENU_ROW_H: f32 = 54.0;
@@ -394,6 +399,7 @@ impl App {
             let r = sk(pop_in_rect(card_rect(idx), pop, shrink));
             draw_card_shadow(c, r, 0.45 * alpha);
             self.poster(f, r, game, alpha);
+            self.running_dot(f, r, game, alpha);
         }
         // One heading per section, scrolled with the cards it names.
         let size = px(f, TITLE);
@@ -496,6 +502,40 @@ impl App {
         }
     }
 
+    /// The mark for a title the host has launched right now: a green dot pulsing in the card's
+    /// top-right corner, over the art and under the title strip.
+    ///
+    /// Drawn from the two card call sites rather than inside [`Self::poster`], which returns
+    /// early down four different branches — and the dot belongs over the cover either way. The
+    /// membership test is a hash lookup per visible card, so it stays O(visible) like the rest
+    /// of the grid.
+    fn running_dot(&self, f: &Frame<'_>, r: Rect, game: &GameEntry, alpha: f32) {
+        // Cheap guard: most frames have no running game.
+        if self.library.running.is_empty() || !self.library.running.contains(&game.id) {
+            return;
+        }
+        let breath = self.render.running_pulse.breath;
+        let side = super::px_1080(f.h, RUNNING_DOT);
+        let inset = super::px_1080(f.h, RUNNING_DOT_INSET);
+        let (cx, cy) = (r.right() - inset, r.top() + inset);
+        let c = f.canvas;
+        // A halo that breathes around a dot that stays put: growing the dot itself would make
+        // it read as two different states rather than one thing pulsing.
+        for ring in (1..=RUNNING_HALO_RINGS).rev() {
+            let step = ring as f32 / RUNNING_HALO_RINGS as f32;
+            let tone = fade(theme::ONLINE_GREEN, 0.22 * (1.0 - step) * breath * alpha);
+            c.draw_circle((cx, cy), side / 2.0 + side * step, &theme::fill(tone));
+        }
+        // Ringed in the card's own shadow tone so the dot keeps its edge on a light cover.
+        c.draw_circle((cx, cy), side / 2.0 + 1.5, &theme::fill(fade(panel(), 0.85 * alpha)));
+        let lit = 0.7 + 0.3 * breath;
+        c.draw_circle(
+            (cx, cy),
+            side / 2.0,
+            &theme::fill(fade(theme::ONLINE_GREEN, lit * alpha)),
+        );
+    }
+
     /// The focused card, drawn last and on top of its neighbours: glow, contact shadow,
     /// focus pop, the title strip or the menu panel a hold grew out of it, and the lit edge.
     fn draw_focused_card(&self, f: &Frame<'_>, game: &GameEntry, base: ui::render::Rect, now: Instant) {
@@ -509,6 +549,7 @@ impl App {
         c.draw_rrect(rr(r), &glow);
         draw_card_shadow(c, r, 0.5 * pop);
         self.poster(f, r, game, pop);
+        self.running_dot(f, r, game, pop);
         self.draw_card_strip(f, game, r, pop);
         // The lit edge last, over the art and the strip, so the halo has a boundary to end on.
         c.draw_rrect(rr(r), &theme::stroke(theme::accent(0.82 * focus * pop), 1.5));

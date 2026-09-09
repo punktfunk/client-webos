@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_console_ui::{
-    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, Stale, WakeStatus,
+    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, SpeedPhase, Stale,
+    WakeStatus,
 };
 
 use crate::core::model::{GameEntry, KnownHost};
@@ -62,6 +63,9 @@ fn chip(p: &pf_client_core::profiles::StreamProfile) -> pf_console_ui::ProfileCh
         id: p.id.clone(),
         name: p.name.clone(),
         accent: p.accent.clone(),
+        // Speed test uses this; a pinned profile is the layer its host streams at,
+        // so the shell must not write the global default instead.
+        bitrate_kbps: p.overrides.bitrate_kbps,
     }
 }
 
@@ -333,6 +337,13 @@ impl Service {
                 self.handles.console.set_wake(None);
             }
             ConsoleCmd::Probe => self.start_sweep(),
+            ConsoleCmd::SpeedTest {
+                key,
+                addr,
+                port,
+                fp_hex,
+                host_name,
+            } => self.speed_test(key, addr, port, &fp_hex, host_name),
             // Nothing this client draws: it has no licences screen of its own, and the pad
             // grants and rumble tests are Android's `InputDevice` API.
             ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
@@ -784,6 +795,43 @@ impl Service {
                     }
                 },
             )
+            .ok();
+    }
+
+    /// Measure the path to one host and report phases. Shell has already raised takeover;
+    /// this uses the same probe as `Screen::SpeedTest` so both UIs measure identically.
+    fn speed_test(&self, key: String, addr: String, port: u16, fp_hex: &str, host_name: String) {
+        let identity = self.identity.clone();
+        let pin = shared::parse_fp(fp_hex);
+        let console = self.handles.console.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-speedtest".into())
+            .spawn(move || {
+                // Raise `Measuring` once; it carries nothing, so the shell's takeover narrates the wait.
+                console.advance_speed(&key, SpeedPhase::Measuring);
+                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |_| {}) {
+                    Ok(r) => {
+                        let kbps = r.outcome.throughput_kbps;
+                        tracing::info!(
+                            "console: speed test on {host_name} — {kbps} kbps, {:.1}% loss (confirmed={})",
+                            r.outcome.loss_pct,
+                            r.confirmed,
+                        );
+                        console.advance_speed(
+                            &key,
+                            SpeedPhase::Done {
+                                throughput_kbps: kbps,
+                                loss_pct: r.outcome.loss_pct,
+                                recommended_kbps: crate::core::model::recommended_bitrate_kbps(kbps),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("console: speed test on {host_name} failed: {e}");
+                        console.advance_speed(&key, SpeedPhase::Failed(crate::core::errors::friendly(&e)));
+                    }
+                }
+            })
             .ok();
     }
 }

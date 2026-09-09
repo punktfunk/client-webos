@@ -172,8 +172,8 @@ MANIFEST (crate version — SPDX license — source)
   opus 0.3.1 — MIT/Apache-2.0 — https://github.com/SpaceManiac/opus-rs
   pem 4.0.0 — MIT — https://github.com/jcreekmore/pem-rs.git
   percent-encoding 2.3.2 — MIT OR Apache-2.0 — https://github.com/servo/rust-url/
-  pf-client-core 0.34.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
-  pf-console-ui 0.34.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-client-core 0.35.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-console-ui 0.35.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   pin-project-lite 0.2.17 — Apache-2.0 OR MIT — https://github.com/taiki-e/pin-project-lite
   pkg-config 0.3.34 — MIT OR Apache-2.0 — https://github.com/rust-lang/pkg-config-rs
   png 0.18.1 — MIT OR Apache-2.0 — https://github.com/image-rs/image-png
@@ -184,7 +184,7 @@ MANIFEST (crate version — SPDX license — source)
   ppv-lite86 0.2.21 — MIT OR Apache-2.0 — https://github.com/cryptocorrosion/cryptocorrosion
   prettyplease 0.2.37 — MIT OR Apache-2.0 — https://github.com/dtolnay/prettyplease
   proc-macro2 1.0.107 — MIT OR Apache-2.0 — https://github.com/dtolnay/proc-macro2
-  punktfunk-core 0.34.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  punktfunk-core 0.35.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   pxfm 0.1.30 — BSD-3-Clause OR Apache-2.0 — https://github.com/awxkee/pxfm
   quinn 0.11.11 — MIT OR Apache-2.0 — https://github.com/quinn-rs/quinn
   quinn-proto 0.11.17 — MIT OR Apache-2.0 — https://github.com/quinn-rs/quinn
@@ -296,8 +296,8 @@ MANIFEST (crate version — SPDX license — source)
 Crates whose package did not embed a license file (SPDX + source only)
 ----------------------------------------------------------------------------
   asn1-rs-impl 0.2.0 — MIT/Apache-2.0 — https://github.com/rusticata/asn1-rs.git
-  pf-client-core 0.34.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
-  punktfunk-core 0.34.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-client-core 0.35.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  punktfunk-core 0.35.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   sdl2-sys 0.38.0 — MIT AND Zlib — https://github.com/rust-sdl2/rust-sdl2
   skia-bindings 0.99.0 — MIT — https://github.com/rust-skia/rust-skia
   skia-safe 0.99.0 — MIT — https://github.com/rust-skia/rust-skia
@@ -7965,7 +7965,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ----------------------------------------------------------------------------
-The following license (LUCIDE-LICENSE) applies to: pf-console-ui 0.34.0
+The following license (LUCIDE-LICENSE) applies to: pf-console-ui 0.35.0
 ----------------------------------------------------------------------------
 ISC License
 
