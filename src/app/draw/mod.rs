@@ -9,7 +9,7 @@
 //! (`height / 800`) the shell applies, so a row here is a row there.
 
 pub(crate) mod about;
-mod card_rim;
+mod card_material;
 pub(crate) mod dialog;
 pub(crate) mod form;
 pub(crate) mod glass;
@@ -65,8 +65,7 @@ pub(crate) const fn is_list(screen: Screen) -> bool {
     )
 }
 
-/// The screens whose rows are the kit's row widget — every list card, plus the settings page,
-/// which draws the same rows inside its own card. What the pointer hit tests are answerable on.
+/// Screens with kit rows — what pointer hit tests can answer on.
 pub(crate) const fn draws_kit_rows(screen: Screen) -> bool {
     is_list(screen) || matches!(screen, Screen::SettingsPage)
 }
@@ -201,13 +200,6 @@ pub(crate) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Ve
 
 pub(crate) fn surface() -> skia_safe::Color4f {
     theme::card_face(0.16)
-}
-
-pub(crate) fn scrim(canvas: &Canvas, w: f32, h: f32, alpha: f32) {
-    canvas.draw_rect(
-        Rect::from_xywh(0.0, 0.0, w, h),
-        &theme::fill(theme::shade(0.45 * alpha)),
-    );
 }
 
 /// Plain bilinear sampling, no mipmaps: what every image this app draws is scaled with.
@@ -386,16 +378,17 @@ impl App {
     /// One ported card. `live` is whether it is the screen the cursor is on: a card on its
     /// way out keeps its last focus but takes no pop and no press.
     fn draw_modal_screen(&mut self, f: &Frame<'_>, screen: Screen, alpha: f32, live: bool, dt: f64) {
-        // Over live video the card is all there is; over the menu it sits on a dim. The dim
-        // goes on after the page was snapshotted, so it darkens around the card, not through it.
-        let over_video = crate::app::screens::over_video(screen);
-        let mut solid = *f;
-        if over_video {
-            solid.backdrop = None;
-        } else {
-            scrim(f.canvas, f.w, f.h, alpha);
+        // Over live video the card is all there is and it stays opaque; over the menu it is
+        // glass on the page, with nothing dimmed behind it. The dim these cards used to lay
+        // down darkened everything BUT the card — the card's own backdrop is the page as it
+        // stood before it — so the two sides of the glass disagreed and the card read as a
+        // lighter tint than the material actually is. The quit dialog never drew one, which is
+        // why it looked right, and now nothing does.
+        let mut card = *f;
+        if crate::app::screens::over_video(screen) {
+            card.backdrop = None;
         }
-        let f = &solid;
+        let f = &card;
         let dy = ui::animation::modal_rise(alpha) as f32;
         let focus = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
         if matches!(
@@ -605,7 +598,6 @@ impl App {
         })
     }
 
-    /// The HDR card sits at the bottom, under the pattern.
     fn list_layout(&self, screen: Screen, card: &ListCard, fw: f32, fh: f32, k: f32) -> list::Layout {
         let headers = card.rows.iter().filter(|r| r.header.is_some()).count();
         let l = list::layout(
