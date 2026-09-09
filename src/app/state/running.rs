@@ -34,8 +34,7 @@ impl App {
         let Some((host, port)) = self.library.selected_host.clone() else {
             return;
         };
-        // Nothing to join the answer onto yet. Not a wasted request either way, but stamping
-        // the interval here would push the first useful poll 20 s past the library landing.
+        // Stamping here delays first poll by 20s; wait for library load.
         if self.library.games.is_empty() {
             return;
         }
@@ -62,8 +61,7 @@ impl App {
         let Some(rx) = &self.jobs.running else { return false };
         let Ok(loaded) = rx.try_recv() else { return false };
         self.jobs.running = None;
-        // The poll outlives a host switch: its answer describes the host it asked, not the one
-        // now selected, and lighting a card by id across those two would be a lie.
+        // Poll may outlive host switch; discard if not from current host.
         if self.library.selected_host.as_ref() != Some(&(loaded.host, loaded.port)) {
             return false;
         }

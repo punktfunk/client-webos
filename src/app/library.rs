@@ -29,13 +29,9 @@ pub(crate) struct Library {
     pub(crate) groups: Vec<Group>,
     /// Cover art pixmaps by game id.
     pub(crate) art: HashMap<String, CardArt>,
-    /// Ids the host said it has launched, from its last `/api/v1/status` answer
-    /// (`services::library::load_running_async`). A set, not a list: the only question the
-    /// grid asks is whether the card it is about to paint is one of them, once per visible
-    /// card per frame.
+    /// Running game ids from last status poll. Queried per visible card per frame.
     pub(crate) running: HashSet<String>,
-    /// When the poll behind [`Self::running`] last went out. `None` re-arms it, which is what
-    /// makes a host switch ask immediately instead of waiting out the interval.
+    /// Poll timestamp. `None` re-arms immediately on host switch.
     pub(crate) running_last: Option<std::time::Instant>,
 }
 

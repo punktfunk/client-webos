@@ -63,8 +63,8 @@ fn chip(p: &pf_client_core::profiles::StreamProfile) -> pf_console_ui::ProfileCh
         id: p.id.clone(),
         name: p.name.clone(),
         accent: p.accent.clone(),
-        // Only the speed test reads this: a profile that PINS bitrate is the layer its host
-        // streams at, so the shell must not offer to write the global default instead.
+        // Speed test uses this; a pinned profile is the layer its host streams at,
+        // so the shell must not write the global default instead.
         bitrate_kbps: p.overrides.bitrate_kbps,
     }
 }
@@ -798,12 +798,8 @@ impl Service {
             .ok();
     }
 
-    /// Measure the path to one host over the real data plane and report the phases back.
-    ///
-    /// The shell has already raised the takeover and holds Apply; this only advances the
-    /// phase, and `advance_speed` drops a report for a test the player has dismissed. The
-    /// probe is `session::probe`'s — the same one `Screen::SpeedTest` runs — so the two UIs
-    /// measure identically and the recommendation keeps the same headroom every client does.
+    /// Measure the path to one host and report phases. Shell has already raised takeover;
+    /// this uses the same probe as `Screen::SpeedTest` so both UIs measure identically.
     fn speed_test(&self, key: String, addr: String, port: u16, fp_hex: &str, host_name: String) {
         let identity = self.identity.clone();
         let pin = shared::parse_fp(fp_hex);
@@ -811,8 +807,7 @@ impl Service {
         std::thread::Builder::new()
             .name("punktfunk-webos-console-speedtest".into())
             .spawn(move || {
-                // `Measuring` carries nothing, so the phase is raised once here rather than
-                // re-sent from every partial poll — the shell's takeover narrates the wait.
+                // Raise `Measuring` once; it carries nothing, so the shell's takeover narrates the wait.
                 console.advance_speed(&key, SpeedPhase::Measuring);
                 match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |_| {}) {
                     Ok(r) => {

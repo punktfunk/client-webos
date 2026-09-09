@@ -539,14 +539,8 @@ pub const BITRATE_MIN_KBPS: u32 = 10_000;
 /// could climb past what the slider allows would just be a second, hidden setting.
 pub const BITRATE_MAX_KBPS: u32 = 200_000;
 
-/// The share of a measured goodput worth streaming at, in kbps: 70 %, the rest left as headroom
-/// for FEC overhead and the loss a real stream meets.
-///
-/// Every punktfunk client recommends the same kilobit off this — integer arithmetic in this
-/// order, never `* 0.7`, which is what makes them agree exactly. Both readers here are peers
-/// above it: `app::state::speedtest` puts a floor and the slider's own clamp on top for the
-/// Settings screen, and `console::model` hands it to the shell raw because the kit clamps it to
-/// the platform ceiling itself.
+/// 70% of measured goodput (headroom for FEC, loss).
+/// Integer arithmetic order matters (`/ 10 * 7`, not `* 0.7`) — all clients must agree exactly.
 pub fn recommended_bitrate_kbps(throughput_kbps: u32) -> u32 {
     throughput_kbps / 10 * 7
 }

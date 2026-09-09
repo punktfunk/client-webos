@@ -39,15 +39,10 @@ const SIDEBAR_ICON: f32 = 30.0;
 const SIDEBAR_ICON_PAD: f32 = 20.0;
 const MENU_GLYPH: f32 = 26.0;
 const PRESENCE_DOT: f32 = 9.0;
-/// The running dot's diameter and the inset of its centre from the card's top-right corner,
-/// both px at 1080p like every other size here. Larger than [`PRESENCE_DOT`]: that one sits in
-/// a quiet sidebar row, this one has to read over cover art from across a room.
+/// Larger than [`PRESENCE_DOT`]: must read over cover art from a distance.
 const RUNNING_DOT: f32 = 14.0;
 const RUNNING_DOT_INSET: f32 = 14.0;
-/// Rings drawn outward from the dot for its halo, each at a fraction of the last one's alpha.
-/// Flat circles rather than a `MaskFilter::blur`: a blur allocates a filter and forces its own
-/// mask raster per call, and this runs per visible card per frame — at 14 px the two read the
-/// same.
+/// Flat circles, not `MaskFilter::blur`: avoids per-call filter alloc. Both read the same at 14 px.
 const RUNNING_HALO_RINGS: usize = 3;
 const STRIP_PAD: f32 = 16.0;
 const STRIP_INSET: f32 = 8.0;
@@ -515,8 +510,7 @@ impl App {
     /// membership test is a hash lookup per visible card, so it stays O(visible) like the rest
     /// of the grid.
     fn running_dot(&self, f: &Frame<'_>, r: Rect, game: &GameEntry, alpha: f32) {
-        // Emptiness first: no game is running on most frames, and this skips the id hash the
-        // membership test would otherwise pay for every visible card.
+        // Cheap guard: most frames have no running game.
         if self.library.running.is_empty() || !self.library.running.contains(&game.id) {
             return;
         }

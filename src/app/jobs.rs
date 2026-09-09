@@ -23,7 +23,7 @@ pub(crate) struct Jobs {
     /// `None` if the mDNS daemon didn't start. Owned here so it stops with the menu.
     pub(crate) discovery: Option<Discovery>,
     pub(crate) games: Option<Receiver<GamesLoaded>>,
-    /// Answers [`App::tick_running`] — what the selected host has launched right now.
+    /// Answers [`App::tick_running`].
     pub(crate) running: Option<Receiver<RunningLoaded>>,
     pub(crate) art: Option<ArtLoader>,
     /// Drained each tick by `drain_pairing`; dropping it (Back while busy) cancels.

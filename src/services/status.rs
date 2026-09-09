@@ -58,8 +58,7 @@ fn running_ids(status: HostStatus) -> Vec<String> {
     status
         .games
         .into_iter()
-        // Anything but `exited` is up: `untracked` (the host cannot follow the process) and
-        // `grace` (the session is gone, the process is not) both still light the dot.
+        // Keep non-`exited`; `untracked` and `grace` still indicate running.
         .filter(|g| g.state != "exited")
         .filter_map(|g| g.app_id)
         .collect()

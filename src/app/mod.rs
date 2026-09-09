@@ -677,9 +677,8 @@ impl App {
         {
             animating = true;
         }
-        // The running dot's breath, stepped rather than per-frame — see `RunningPulse`. Live
-        // only where the dot is drawn and only while something is up, so an idle Home with no
-        // running game still parks the loop.
+        // Stepped animation: always tick for state consistency, but only animate when
+        // visible (Home + running game). See RunningPulse.
         let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
         if self.render.running_pulse.tick(now, dot_live) {
             animating = true;

@@ -41,7 +41,6 @@ pub(crate) struct RenderState {
     /// When the sidebar first drew the brand mark — the start of its one-shot entrance
     /// (`pf_console_ui::brand`). `None` until then.
     pub(crate) mark_shown_at: Option<std::time::Instant>,
-    /// The running dot's breath (`app::draw::home::running_dot`).
     pub(crate) running_pulse: RunningPulse,
 }
 
@@ -57,19 +56,16 @@ pub(crate) struct RenderState {
 /// painter reads [`Self::breath`], and [`Self::tick`] is the only writer.
 #[derive(Default)]
 pub(crate) struct RunningPulse {
-    /// Phase origin, stamped on the first live tick. `None` while nothing is running, which is
-    /// what makes the next breath start at its peak rather than mid-fall.
+    /// Stamped on first live tick. `None` while nothing is running, so the next breath starts
+    /// at its peak rather than mid-fall.
     since: Option<std::time::Instant>,
-    /// The step [`Self::breath`] was last computed for; `None` forces the first one.
+    /// Last computed step; `None` forces first computation.
     step: Option<u32>,
-    /// 1.0 at the top of the breath, 0.0 at the bottom.
     pub(crate) breath: f32,
 }
 
-/// One full breath. Slow on purpose — a dot that blinks reads as an alarm, and this is only
-/// saying "your host has this up".
+/// One full breath. Slow on purpose — a dot that blinks reads as an alarm.
 const PULSE_SECS: f32 = 1.8;
-/// Redraws per breath. See [`RunningPulse`].
 const PULSE_STEPS: u32 = 18;
 
 impl RunningPulse {
