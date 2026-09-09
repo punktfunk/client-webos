@@ -10,11 +10,12 @@ use pf_console_ui::icons::{by_name, draw_icon};
 use pf_console_ui::theme::{self, W};
 use pf_console_ui::{brand, launcher_icons, os_marks};
 use skia_safe::{
-    images, BlendMode, BlurStyle, ClipOp, Color4f, Data, FilterMode, Image, ImageInfo, MaskFilter, MipmapMode, Paint,
-    RRect, Rect, SamplingOptions,
+    images, BlendMode, BlurStyle, ClipOp, Color4f, Data, FilterMode, IRect, Image, ImageInfo, MaskFilter, Paint, RRect,
+    Rect,
 };
 
-use super::{focus_face, line_h, panel, sk, with_pop, Frame};
+use super::{focus_face, line_h, linear, panel, sk, with_pop, Frame};
+use crate::app::draw::glass;
 use crate::app::grid::{Entrance, GridLayout};
 use crate::app::hosts::HostEntry;
 use crate::app::state::cardmenu::CardMenuRow;
@@ -47,12 +48,70 @@ const MENU_ICON_INSET: f32 = 14.0;
 const GLOW_BLUR: f32 = 18.0;
 const SPINNER_R: f64 = 24.0;
 
-fn px(f: &Frame<'_>, size: f32) -> f64 {
-    f64::from(super::px_1080(f.h, size))
+/// The drop shadow every grid card wears: one small raster, stretched as a nine-patch.
+///
+/// `theme::drop_shadow` runs a `MaskFilter` blur per draw, and on this chip that is not the
+/// analytic rounded-rect path it is on a desktop GPU — one per visible card cost about 6ms of
+/// the grid's ~14ms of GPU time per frame, which is most of what made scrolling drop frames.
+///
+/// A nine-patch rather than one raster per card size, because there is never just one size: the
+/// focused card is zoomed and entering cards are mid-pop, so a cache keyed on size would re-bake
+/// several times a frame — worse than what it replaced. Only the corners carry the shape, so a
+/// single bake stretches to every card, and the alpha rides the paint so cards still fade in.
+fn card_shadow() -> Option<Image> {
+    thread_local! {
+        static SHADOW: std::cell::RefCell<Option<Option<Image>>> = const { std::cell::RefCell::new(None) };
+    }
+    SHADOW.with(|c| c.borrow_mut().get_or_insert_with(bake_card_shadow).clone())
 }
 
-fn linear() -> SamplingOptions {
-    SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+/// The shadow's own bed: a rounded rect blurred with [`SHADOW_MARGIN`] of room to spread into on
+/// every side. The body is wide enough that the middle of each edge reaches full opacity before
+/// the opposite corner's blur reaches it — a narrower one stretches out lighter than the shadow
+/// it is standing in for, since the nine-patch repeats that midpoint across the whole card.
+fn bake_card_shadow() -> Option<Image> {
+    let bed = 2 * SHADOW_MARGIN + SHADOW_BODY;
+    let mut surface = skia_safe::surfaces::raster_n32_premul((bed, bed))?;
+    let canvas = surface.canvas();
+    canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    let mut p = Paint::new(Color4f::new(0.0, 0.0, 0.0, 1.0), None);
+    p.set_anti_alias(true);
+    p.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, SHADOW_SIGMA, None));
+    let (m, side) = (SHADOW_MARGIN as f32, SHADOW_BODY as f32);
+    canvas.draw_rrect(
+        RRect::new_rect_xy(Rect::from_xywh(m, m, side, side), CARD_RADIUS, CARD_RADIUS),
+        &p,
+    );
+    Some(surface.image_snapshot())
+}
+
+/// The blur's reach, its room to spread, and its drop — the kit's own values at `k = 1`
+/// (`theme::drop_shadow`), transcribed because it exports none, so the picture is the one it
+/// drew. A kit bump that retunes them leaves these stale.
+const SHADOW_SIGMA: f32 = 10.0;
+const SHADOW_MARGIN: i32 = 30;
+const SHADOW_DROP: f32 = 10.0;
+/// The baked body, at 8x the sigma so its edge midpoints are saturated. Only the corners carry
+/// shape, so the rest is what the nine-patch stretches.
+const SHADOW_BODY: i32 = 80;
+/// The corner the nine-patch must not stretch: the radius plus what the blur carries past it.
+const SHADOW_EDGE: i32 = CARD_RADIUS as i32;
+
+/// Draw the cached shadow under `r`. A no-op if the bed could not be rasterized — a card with no
+/// shadow beats no card.
+fn draw_card_shadow(c: &skia_safe::Canvas, r: Rect, alpha: f32) {
+    let Some(shadow) = card_shadow() else {
+        return;
+    };
+    let edge = SHADOW_MARGIN + SHADOW_EDGE;
+    let centre = IRect::new(edge, edge, shadow.width() - edge, shadow.height() - edge);
+    let m = SHADOW_MARGIN as f32;
+    let bed = r.with_outset((m, m)).with_offset((0.0, SHADOW_DROP));
+    c.draw_image_nine(&shadow, centre, bed, FilterMode::Linear, Some(&alpha_paint(alpha)));
+}
+
+fn px(f: &Frame<'_>, size: f32) -> f64 {
+    f64::from(super::px_1080(f.h, size))
 }
 
 fn fade(c: Color4f, alpha: f32) -> Color4f {
@@ -313,7 +372,6 @@ impl App {
         let visible = view::home::visible_cards(available_wi, layout, scroll, f.h as i32, pad);
         // A held card's collection dims to the scrim's level while its order is unwritten.
         let unfixed = self.reordering_slots(layout);
-        // The modal scrim's strength: half.
         let dimmed = 0.5;
         let now = Instant::now();
         for idx in visible {
@@ -334,7 +392,7 @@ impl App {
                 continue;
             }
             let r = sk(pop_in_rect(card_rect(idx), pop, shrink));
-            theme::drop_shadow(c, r, CARD_RADIUS, 1.0, 0.45 * alpha);
+            draw_card_shadow(c, r, 0.45 * alpha);
             self.poster(f, r, game, alpha);
         }
         // One heading per section, scrolled with the cards it names.
@@ -449,7 +507,7 @@ impl App {
         let mut glow = theme::stroke(theme::accent(0.85 * focus * pop), 6.0);
         glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, GLOW_BLUR / 2.0, None));
         c.draw_rrect(rr(r), &glow);
-        theme::drop_shadow(c, r, CARD_RADIUS, 1.0, 0.5 * pop);
+        draw_card_shadow(c, r, 0.5 * pop);
         self.poster(f, r, game, pop);
         self.draw_card_strip(f, game, r, pop);
         // The lit edge last, over the art and the strip, so the halo has a boundary to end on.
@@ -482,8 +540,16 @@ impl App {
         c.save();
         c.clip_rrect(rr(r), ClipOp::Intersect, true);
         c.clip_rect(window, ClipOp::Intersect, true);
-        // An opaque strip over the art, the same face every card wears.
-        c.draw_rect(window, &theme::fill(super::surface()));
+        // Frosted over the cover it sits on, opaque where there is no cover to blur. Only the
+        // menu panel earns it: the bare title strip is drawn for the focused card on every
+        // frame, and a per-frame blur of a full cover is what made scrolling the grid lag.
+        let frosted = menu.is_some()
+            && (self.render.covers)
+                .get(&game.id)
+                .is_some_and(|img| glass::frost_over_art(c, pin_id, img, r, window, f.k));
+        if !frosted {
+            c.draw_rect(window, &theme::fill(super::surface()));
+        }
         let size = px(f, VALUE);
         let title_top = window.top;
         f.fonts.draw_clipped(

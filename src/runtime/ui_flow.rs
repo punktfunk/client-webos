@@ -34,7 +34,6 @@ pub(super) fn run_ui_flow(
     // every 40ms spinner frame.
     const TICK_BUDGET: Duration = Duration::from_millis(16);
     canvas.window_mut().show();
-    // Both menus need it now; without a GL context there is nothing to draw with.
     let gl = console_flow::bring_up(gl, canvas).context("menu: GL host")?;
     let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
     tracing::info!(
@@ -56,7 +55,6 @@ pub(super) fn run_ui_flow(
     if initial_status.is_some() {
         app.set_home_status(initial_status, true);
     }
-    // Toast (same as the stream loop). Shown once as Home re-appears.
     let mut notif = Notification::new();
     if let Some(msg) = initial_toast {
         notif.show(msg);
@@ -112,9 +110,8 @@ pub(super) fn run_ui_flow(
     // dialog while streaming — see `DisconnectChord`.
     let mut chord = DisconnectChord::default();
     let mut quit_dialog_was_active = false;
-    // One-shot: warm the modal text/shadow/freetype caches on the first idle tick
-    // (Home already painted by then) so the first Settings/host-menu open doesn't
-    // hitch on cold rasterization. Reset per menu entry — `text_cache` is too.
+    // The blurred page a frosted modal card sits on, held across frames — see the frame block.
+    let mut page: Option<skia_safe::Image> = None;
     'ui: loop {
         // Start of this tick, for the loop's own pacing against `TICK_BUDGET`.
         let frame_start = Instant::now();
@@ -127,7 +124,7 @@ pub(super) fn run_ui_flow(
             crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_YELLOW_SCANCODE);
         if yellow_down && !yellow_held {
             cycle_log_overlay();
-            dirty = true; // force an immediate redraw with the new state
+            dirty = true;
             log_overlay_last = None;
         }
         yellow_held = yellow_down;
@@ -186,8 +183,6 @@ pub(super) fn run_ui_flow(
             hold.fired = true;
             let still_there = matches!(app.nav.screen, Screen::Home) && hold.focus == app.home_focus;
             if still_there {
-                // The hold's whole effect. It no longer pins — pinning is one of the two
-                // rows the menu it raises offers, and the only way to reach it.
                 app.open_card_menu(display_mode.w as u32);
             }
             dirty = true;
@@ -264,8 +259,6 @@ pub(super) fn run_ui_flow(
                 }
                 continue;
             }
-            // Device-level events, handled before anything screen-specific:
-            // shutdown and controller hotplug.
             match event {
                 Event::Quit { .. } => {
                     tracing::info!("quit during UI");
@@ -365,14 +358,12 @@ pub(super) fn run_ui_flow(
             dirty = true;
         }
         quit_dialog_was_active = quit_dialog_active;
-        // Anything the state machine queued this tick (`App::toast`) — a card move, so far.
         if let Some(msg) = app.take_toast() {
             notif.show(msg);
         }
         // Polled every tick like the streaming loop's toast, not gated behind
         // `content_dirty` — its own fade needs frames regardless of anything else.
         let notif_frame = notif.frame().map(|(t, a)| (t.to_string(), a));
-        // The dip has played out (see `App::press`) — the tile springs back.
         if app.poll_press() {
             dirty = true;
         }
@@ -396,7 +387,6 @@ pub(super) fn run_ui_flow(
             continue;
         }
         dirty = false;
-        // Advance per-tick app state (card size, modal fades) exactly once before drawing.
         app.advance_frame(display_mode.w as u32);
         app.prepare_frame(Size::new(display_mode.w as u32, display_mode.h as u32));
         // The log tail's text is read on the 500 ms cadence; between reads the last lines
@@ -411,23 +401,38 @@ pub(super) fn run_ui_flow(
         // documented to differ from the window on webOS (handoff trap 10), so it is scaled
         // rather than assumed equal.
         let (dw, dh) = canvas.window().drawable_size();
+        let dt = last_frame.elapsed().as_secs_f64().min(0.1);
+        last_frame = Instant::now();
         {
             let surface = gl.surface(dw, dh)?;
             let c = surface.canvas();
             c.clear(app.frame_clear_color());
-            c.reset_matrix();
             c.scale((
                 dw as f32 / display_mode.w.max(1) as f32,
                 dh as f32 / display_mode.h.max(1) as f32,
             ));
-            // Home, the modals, the launch transition, then the overlays (`app::draw`,
-            // `runtime::overlay`).
             app.apply_ink();
             kit_fonts.begin_frame();
-            let dt = last_frame.elapsed().as_secs_f64().min(0.1);
-            last_frame = Instant::now();
-            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
-            app.draw_home(&frame, dt);
+            // Scoped so the frame's borrow of the canvas ends before the snapshot below.
+            {
+                let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
+                app.draw_home(&frame, dt);
+            }
+            // The page a frosted card blurs: snapshotted and blurred ONCE, on the first frame
+            // that something frosts, and held until nothing does. Both cost GPU time on the frame
+            // a card opens, and neither result changes while the card is up, because the page it
+            // froze is exactly the page behind it. The quit dialog counts as a frosting card: it
+            // is the same glass, and it only ever opens over Home.
+            if !(app.modal_visible() || quit_dialog_active) {
+                page = None;
+            } else if page.is_none() {
+                let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
+                let k = crate::app::draw::scale(display_mode.h as u32);
+                page = snap.and_then(|snap| crate::app::draw::glass::blur_page(surface, &snap, k));
+            }
+            let c = surface.canvas();
+            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)
+                .with_backdrop(page.as_ref());
             app.draw_modals(&frame, dt);
             app.draw_launch(&frame);
             if let Some(lines) = &log_lines {

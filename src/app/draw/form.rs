@@ -14,7 +14,6 @@ use crate::core::screen::PairingFocus;
 use crate::ui;
 
 const WIDTH_FRAC: f32 = 0.40;
-/// The system keyboard takes roughly the bottom half of the panel (`KEYBOARD_PANEL_FRAC`).
 const KEYBOARD_FRAC: f32 = 0.5;
 /// Design units.
 const PAD: f32 = 26.0;
@@ -41,7 +40,6 @@ pub(crate) struct Layout {
     pub title_baseline: f32,
     pub body_top: f32,
     pub body: Vec<String>,
-    /// Where a caution line goes, under the field.
     pub hint_baseline: f32,
 }
 
@@ -56,8 +54,6 @@ impl Layout {
     }
 }
 
-/// The card for a form with `subtitle`, with room for a hint when `hint`, lifted when the
-/// system keyboard is shown.
 pub(crate) fn layout(fonts: &Fonts, fw: f32, fh: f32, k: f32, subtitle: &str, hint: bool, keyboard: bool) -> Layout {
     let w = (fw * WIDTH_FRAC).round();
     let inner_w = w - 2.0 * PAD * k;
@@ -158,7 +154,6 @@ fn header(
     }
 }
 
-/// Draw the form: `typed` in the field with a caret after it, `hint` under it in the error tone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     f: &Frame<'_>,
@@ -175,7 +170,7 @@ pub(crate) fn draw(
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
+    glass_card(f, l.card, CORNER);
     header(f, l.card, title, l.title_baseline, &l.body, l.body_top, hover_close);
     theme::panel(
         c,
@@ -336,7 +331,7 @@ pub(crate) fn draw_pair(f: &Frame<'_>, l: &PairLayout, s: &PairState<'_>, hover_
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
+    glass_card(f, l.card, CORNER);
     header(
         f,
         l.card,
@@ -373,7 +368,6 @@ pub(crate) fn draw_pair(f: &Frame<'_>, l: &PairLayout, s: &PairState<'_>, hover_
         PAIR_BUTTON_CAPTION,
         theme::fg(0.6),
     );
-    // "or" between two hairlines.
     let or_w = f.fonts.measure("or", W::Medium, size);
     let cx = l.card.center_x();
     let inner_left = l.card.left + PAD * k;

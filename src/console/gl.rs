@@ -10,8 +10,7 @@ use anyhow::{anyhow, Result};
 use skia_safe::gpu::{self, DirectContext, SurfaceOrigin};
 use skia_safe::{ColorType, Surface};
 
-/// Sized internal format of the RGBA8888 default framebuffer.
-const GL_RGBA8: u32 = 0x8058;
+const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 
 /// Skia's resource budget. A quarter of the desktop's 160 MB: this `SoC` shares one memory pool
 /// with the NDL decoder, and covers are the only large thing the console caches.
@@ -24,7 +23,7 @@ pub(crate) struct ConsoleGl {
     /// once per menu entry is a stutter every time a stream ends.
     ctx: sdl2::video::GLContext,
     context: DirectContext,
-    /// Skia over framebuffer 0, with the drawable size it was wrapped at.
+    /// Skia over framebuffer 0; cached to avoid re-wrapping on every frame.
     surface: Option<(Surface, u32, u32)>,
     /// What the window's config actually granted, not what was asked for — Skia must be told
     /// the truth or it clips paths against a buffer that is not there.
@@ -32,7 +31,6 @@ pub(crate) struct ConsoleGl {
 }
 
 impl ConsoleGl {
-    /// Bring up the console's GL context and Skia over it. The context is left current.
     pub(crate) fn new(window: &sdl2::video::Window, video: &sdl2::VideoSubsystem) -> Result<Self> {
         let ctx = window
             .gl_create_context()
@@ -66,15 +64,15 @@ impl ConsoleGl {
         })
     }
 
-    /// Take the screen back from SDL's renderer. Called on every console entry, because the
-    /// old menus and the stream have both made their own context current in between.
+    /// Called on every console entry; old menus and the stream have both made their own
+    /// context current in between.
     pub(crate) fn make_current(&self, window: &sdl2::video::Window) -> Result<()> {
         window
             .gl_make_current(&self.ctx)
             .map_err(|e| anyhow!("console: gl_make_current: {e}"))
     }
 
-    /// The Skia surface over framebuffer 0 at `w`×`h`, re-wrapping when the drawable moves.
+    /// Re-wraps on drawable size change to keep Skia from clipping against a stale buffer.
     pub(crate) fn surface(&mut self, w: u32, h: u32) -> Result<&mut Surface> {
         if !matches!(self.surface, Some((_, sw, sh)) if sw == w && sh == h) {
             self.surface = None;
@@ -97,10 +95,17 @@ impl ConsoleGl {
             self.surface = Some((surface, w, h));
         }
         // The branch above either returned an error or filled it.
-        Ok(&mut self.surface.as_mut().expect("just wrapped").0)
+        let surface = &mut self.surface.as_mut().expect("just wrapped").0;
+        // Handed out at identity. The surface is cached by size and this context is shared by
+        // both menu flows and the stream overlays, so a canvas carries whatever matrix the last
+        // one left on it — the pointer UI scales by the panel correction, which silently cropped
+        // the gamepad shell until this reset existed. Resetting here rather than in each drawer
+        // is what keeps the next flow from having to know that.
+        surface.canvas().reset_matrix();
+        Ok(surface)
     }
 
-    /// Submit the frame's Skia work. SDL still owns the swap.
+    /// SDL still owns the swap.
     pub(crate) fn flush(&mut self) {
         self.context.flush_and_submit();
     }

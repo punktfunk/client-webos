@@ -35,7 +35,6 @@ const MARGIN: f32 = 40.0;
 pub(crate) struct Layout {
     pub card: Rect,
     pub close: Rect,
-    /// Where the `MenuList` draws.
     pub rows: Rect,
     pub title_baseline: f32,
     pub sub_top: f32,
@@ -130,7 +129,7 @@ pub(crate) fn draw(
     c.save();
     c.translate((0.0, dy));
     c.save_layer_alpha_f(Some(l.card), alpha);
-    glass_card(c, l.card, CORNER, k);
+    glass_card(f, l.card, CORNER);
     f.fonts.draw_clipped(
         c,
         title,
