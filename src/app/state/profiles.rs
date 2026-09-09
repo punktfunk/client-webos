@@ -212,14 +212,6 @@ impl App {
         self.persist();
     }
 
-    /// Whether `pin_id` on the selected host is bound to a profile that still exists — the
-    /// card's dot.
-    pub(crate) fn game_is_bound(&self, pin_id: &str) -> bool {
-        self.selected_known_host()
-            .and_then(|h| h.game_profile(pin_id))
-            .is_some_and(|id| self.profiles.iter().any(|p| p.id == id))
-    }
-
     /// The settings one launch runs with — `shared::launch_settings` over this App's document.
     pub(crate) fn launch_settings(
         &self,

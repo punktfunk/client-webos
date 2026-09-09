@@ -595,7 +595,7 @@ impl App {
                 let mut after = before.clone();
                 let changed = self.with_engine(&mut after, |ctx| engine::adjust(id, delta, wrap, ctx));
                 if changed {
-                    self.write_scope(&before, &after);
+                    self.write_scope(&before, &after, overlay_field(id));
                 }
             }
             _ => {}
@@ -603,8 +603,9 @@ impl App {
     }
 
     /// Persist an edited document: the global one, clamped to the TV's caps and projected onto
-    /// this client's own struct; or the profile's overlay, absorbing what changed.
-    fn write_scope(&mut self, before: &trust::Settings, after: &trust::Settings) {
+    /// this client's own struct; or the profile's overlay, absorbing what changed. `field` is
+    /// the overlay key the edited row pins, if any.
+    fn write_scope(&mut self, before: &trust::Settings, after: &trust::Settings, field: Option<&'static str>) {
         match self.screens.settings_page.scope.clone() {
             Scope::Global => {
                 let mut document = after.clone();
@@ -613,8 +614,18 @@ impl App {
                 self.persist();
             }
             Scope::Profile(id) => {
+                let global = self.settings_ui.settings.clone();
                 if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
                     p.overrides.absorb(before, after);
+                    // `absorb` pins a value even when it equals the global one, but the dot
+                    // reads as "differs from Default settings" — so an edit that lands back on
+                    // the global value drops its pin instead of keeping a no-op override.
+                    if let Some(field) = field {
+                        let mut without = p.overrides.clone();
+                        if without.clear(field) && without.apply(&global) == p.overrides.apply(&global) {
+                            p.overrides = without;
+                        }
+                    }
                     self.persist();
                 }
             }

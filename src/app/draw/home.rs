@@ -44,8 +44,6 @@ pub(crate) const MENU_ROW_H: f32 = 54.0;
 pub(crate) const MENU_ROWS_PAD: f32 = 10.0;
 const MENU_BAND_INSET: f32 = 10.0;
 const MENU_ICON_INSET: f32 = 14.0;
-const MARK_DOT_R: f32 = 4.0;
-const MARK_DOT_INSET: f32 = 16.0;
 const GLOW_BLUR: f32 = 18.0;
 const SPINNER_R: f64 = 24.0;
 
@@ -486,16 +484,8 @@ impl App {
         c.clip_rect(window, ClipOp::Intersect, true);
         // An opaque strip over the art, the same face every card wears.
         c.draw_rect(window, &theme::fill(super::surface()));
-        let overridden = self.game_is_bound(pin_id);
         let size = px(f, VALUE);
         let title_top = window.top;
-        let dot_x = r.right - MARK_DOT_INSET - MARK_DOT_R;
-        let marked_title = overridden && menu.is_none();
-        let right_pad = if marked_title {
-            MARK_DOT_INSET + 2.0 * MARK_DOT_R + 8.0
-        } else {
-            STRIP_INSET
-        };
         f.fonts.draw_clipped(
             c,
             &game.title,
@@ -504,15 +494,8 @@ impl App {
             W::Regular,
             size,
             theme::fg(pop),
-            f64::from(r.width() - STRIP_INSET - right_pad),
+            f64::from(r.width() - 2.0 * STRIP_INSET),
         );
-        if marked_title {
-            c.draw_circle(
-                (dot_x, title_top + title_h / 2.0),
-                MARK_DOT_R,
-                &theme::fill(theme::accent(pop)),
-            );
-        }
         if let Some(m) = menu {
             let rows_top = title_top + title_h;
             let band_x = r.left + MENU_BAND_INSET;
@@ -545,12 +528,6 @@ impl App {
                     draw_icon(c, mk, icon_x + 11.0, row.center_y(), 22.0, tone);
                 }
                 let text_x = icon_x + 22.0 + 10.0;
-                let marked = overridden && *kind == CardMenuRow::Settings;
-                let right_pad = if marked {
-                    MARK_DOT_INSET + 2.0 * MARK_DOT_R + 8.0
-                } else {
-                    STRIP_INSET
-                };
                 f.fonts.draw_clipped(
                     c,
                     label,
@@ -559,15 +536,8 @@ impl App {
                     W::Regular,
                     size,
                     tone,
-                    f64::from(row.right - right_pad - text_x),
+                    f64::from(row.right - STRIP_INSET - text_x),
                 );
-                if marked {
-                    c.draw_circle(
-                        (row.right - MARK_DOT_INSET - MARK_DOT_R, row.center_y()),
-                        MARK_DOT_R,
-                        &theme::fill(theme::accent(pop)),
-                    );
-                }
             }
         }
         c.restore();
