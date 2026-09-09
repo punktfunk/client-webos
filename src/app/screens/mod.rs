@@ -45,8 +45,8 @@ pub(crate) const fn is_confirm(screen: Screen) -> bool {
 ///
 /// The patterns the calibration screen measures play on the NDL plane *underneath* the graphics
 /// plane, so everything the menu would normally composite behind a card — the sidebar, the grid,
-/// the status block, the scrim, the frost pane — has to be left out rather than drawn and covered
-/// (see `render::compose`, and `runtime::ui_flow` for the transparent clear that goes with it).
+/// the status block, the frost pane — has to be left out rather than drawn and covered (see
+/// `render::compose`, and `runtime::ui_flow` for the transparent clear that goes with it).
 pub(crate) const fn over_video(screen: Screen) -> bool {
     matches!(screen, Screen::HdrCalibration)
 }
@@ -60,13 +60,12 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
         Screen::HostMenu
         | Screen::HostPower
         | Screen::PickProfile
-        // A list modal like any other, even though it draws over the video plane rather than
-        // over the menu — that difference is `compose_modal`'s, not this family's.
+        // HdrCalibration draws over video, not the menu, but still uses fixed-row list geometry.
         | Screen::HdrCalibration
         => true,
         Screen::Home
         | Screen::Pairing
-        // Settings is a list too, but a scrolling one — see `is_scroll_list`.
+        // Settings scrolls.
         | Screen::AddHost
         | Screen::Wake
         | Screen::ForgetHost
@@ -74,7 +73,7 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
         | Screen::About
         | Screen::SpeedTest
         | Screen::SendLogs
-        // Collections is a scrolling list too, and its name dialog is a text form.
+        // Collections scrolls.
         | Screen::Collections
         | Screen::RenameCollection
         | Screen::RemoveCollection

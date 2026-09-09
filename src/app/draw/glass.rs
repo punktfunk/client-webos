@@ -9,7 +9,7 @@
 use pf_console_ui::theme::{self, PanelStroke};
 use skia_safe::{Canvas, RRect, Rect};
 
-use super::card_rim;
+use super::card_material;
 use super::{surface, Frame};
 
 /// The page as it stood before any modal drew, already blurred by [`blur_page`], for
@@ -21,29 +21,40 @@ use super::{surface, Frame};
 /// since a refraction has to SAMPLE the backdrop at a displaced coordinate.
 ///
 /// Blurred once by whoever takes the snapshot rather than per draw: the page behind a settled
-/// modal does not change, and re-running a 14-unit blur over the whole card every frame was
-/// most of what the card cost.
+/// modal does not change, and re-running [`CARD_BLUR`] over the whole card every frame was most
+/// of what the card cost.
 #[derive(Clone, Copy)]
 pub(crate) struct Backdrop<'a> {
     pub page: &'a skia_safe::Image,
 }
 
 /// How far the backdrop is smeared under a frosted card, in design units (scaled by `k`).
-const CARD_BLUR: f32 = 14.0;
+const CARD_BLUR: f32 = 20.0;
 /// Frost opacity. plx-native measured 0.72 as the legibility floor on a television: more
 /// transparent shows more backdrop and costs the contrast a couch reader needs, and the
 /// binding constraint is the text on the card, not the material. Tuned denser than that.
-const CARD_FROST: f32 = 0.9;
+const CARD_FROST: f32 = 0.93;
+/// The frosted face's tint, against the flat card's 0.16. The blurred page under it lifts the
+/// card, so the glass needs less accent to land at the same weight on screen. Through
+/// `card_face` rather than a plain multiply, so it keeps moving with the palette: on a dark
+/// field a lower tint sits nearer black, on a pale one nearer white.
+const CARD_TINT: f32 = 0.10;
 /// How much smaller everything is blurred than it is drawn. A `CARD_BLUR` gaussian destroys
-/// detail far finer than a quarter-resolution downscale does, so the two are indistinguishable
-/// while the blur covers a sixteenth of the pixels — and it is the difference between a modal
-/// appearing at once and visibly arriving, since a full 1080p blur cost hundreds of
-/// milliseconds on this chip. Both callers draw the result stretched back over the source rect.
-const DOWNSCALE: i32 = 4;
+/// detail far finer than the downscale does, so the two are indistinguishable while the blur
+/// covers a fraction of the pixels — and that is the difference between a modal appearing at
+/// once and visibly arriving, since a full 1080p blur cost hundreds of milliseconds on this
+/// chip. Both callers draw the result stretched back over the source rect.
+///
+/// Half, not the quarter it was: bilinear puts a slope break at every source texel on the way
+/// back up, and at a quarter those breaks are far enough apart to read as contour lines across
+/// the card. Doubling the source halves their spacing, which is what actually removes them —
+/// the grain in `card_material` dithers quantization, but contouring is real signal and no
+/// amount of noise hides it. Still a quarter of the pixels of a full-resolution blur.
+const DOWNSCALE: i32 = 2;
 
-/// `img` blurred into a quarter-size copy of itself on `target`, which is what decides whether
-/// the work lands on the GPU or the CPU: a GPU offscreen for the page, a raster one for a cover
-/// small enough that the deferred GPU filter would cost more than the blur.
+/// `img` blurred into a [`DOWNSCALE`]-smaller copy of itself on `target`, which is what decides
+/// whether the work lands on the GPU or the CPU: a GPU offscreen for the page, a raster one for a
+/// cover small enough that the deferred GPU filter would cost more than the blur.
 fn downscaled_blur(
     target: impl FnOnce(i32, i32) -> Option<skia_safe::Surface>,
     img: &skia_safe::Image,
@@ -79,6 +90,14 @@ pub(crate) fn blur_page(surface: &mut skia_safe::Surface, page: &skia_safe::Imag
     )
 }
 
+/// The card's tint over a backdrop: the flat face, darker and translucent.
+fn frosted_face() -> skia_safe::Color4f {
+    skia_safe::Color4f {
+        a: CARD_FROST,
+        ..theme::card_face(CARD_TINT)
+    }
+}
+
 fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
     let canvas = f.canvas;
     let p = theme::layer();
@@ -100,8 +119,8 @@ fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
     } else {
         (-m.translate_x() / sx, -m.translate_y() / sy)
     };
-    // Linear: the page is a quarter-size blur, so it comes back up 4x and default sampling
-    // would stair-step it.
+    // Linear: the page is a `DOWNSCALE`-smaller blur, so it comes back up scaled and default
+    // sampling would stair-step it.
     canvas.draw_image_rect_with_sampling_options(
         bd.page,
         None,
@@ -135,7 +154,7 @@ fn card_hairline(canvas: &Canvas, rect: Rect, rr: RRect, k: f32) {
 }
 
 /// A raised card. Over the menu it is a pane of frosted glass: the page behind it blurred,
-/// under a translucent face, with [`CARD_RIM_SKSL`]'s chamfer light and hairline over that.
+/// under a translucent face, with [`card_material`]'s light and hairline over that.
 /// Without a backdrop on the frame it stays the opaque face it has always been.
 pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
     let (canvas, k) = (f.canvas, f.k);
@@ -146,11 +165,9 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
         return;
     };
     draw_card_backdrop(f, bd, rr);
-    let mut face = surface();
-    face.a = CARD_FROST;
-    canvas.draw_rrect(rr, &theme::fill(face));
+    canvas.draw_rrect(rr, &theme::fill(frosted_face()));
     // Skip theme::panel on frosted path: its glass fill would re-opacify the translucent face.
-    card_rim::draw(canvas, rr, rect, corner, k);
+    card_material::draw(canvas, rr, rect, corner, k);
     card_hairline(canvas, rect, rr, k);
 }
 
@@ -159,7 +176,8 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
 /// The card menu grows out of one card, so the only thing behind it is that card's cover:
 /// blurring the image straight into the rect it was drawn at needs no surface grab and stays
 /// registered through the card's zoom. `false` when the blur could not be baked, and the caller
-/// draws the strip opaque.
+/// draws the strip opaque. No rim and no grain: the strip is small enough that the upscale has
+/// no room to band.
 ///
 /// The blurred cover is cached under `id`: the menu holds still once it is up, and re-blurring
 /// the same cover every frame is what made it lag on the way in.
@@ -175,9 +193,7 @@ pub(crate) fn frost_over_art(
         return false;
     };
     canvas.draw_image_rect_with_sampling_options(&blurred, None, art, super::linear(), &theme::layer());
-    let mut face = surface();
-    face.a = CARD_FROST;
-    canvas.draw_rect(window, &theme::fill(face));
+    canvas.draw_rect(window, &theme::fill(frosted_face()));
     true
 }
 
@@ -203,8 +219,9 @@ fn blurred_cover(id: &str, img: &skia_safe::Image, art: Rect, k: f32) -> Option<
         let mut c = c.borrow_mut();
         if !matches!(&*c, Some((cached, s, _)) if cached == id && *s == sigma) {
             // Raster rather than a GPU offscreen: the source is already a raster image and a
-            // quarter-size cover is microseconds on the CPU, where a GPU filter would instead
-            // land, deferred, on the flush of the frame the menu opened.
+            // `DOWNSCALE`-smaller cover is cheap on the CPU, where a GPU filter would instead
+            // land, deferred, on the flush of the frame the menu opened. Cached, because at
+            // this downscale it is no longer free enough to redo per frame.
             *c = downscaled_blur(|w, h| skia_safe::surfaces::raster_n32_premul((w, h)), img, sigma as f32)
                 .map(|blurred| (id.to_owned(), sigma, blurred));
         }
