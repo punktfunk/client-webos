@@ -94,3 +94,11 @@ pub(crate) struct HostsState {
     /// Whether this TV is webosbrew-rooted — `None` until `App::start_root_probe` answers.
     pub(crate) rooted: Option<bool>,
 }
+
+impl HostsState {
+    /// Which sidebar row a host sits on now. What every path that has just rebuilt `entries`
+    /// asks, since the rebuild may have moved the row it was acting on.
+    pub(crate) fn entry_index(&self, host: &str, port: u16) -> Option<usize> {
+        self.entries.iter().position(|e| e.host() == host && e.port() == port)
+    }
+}

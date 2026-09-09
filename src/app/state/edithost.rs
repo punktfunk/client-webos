@@ -15,21 +15,16 @@ impl App {
             return;
         };
         self.screens.add_host = TextField::from_host_port(&h.addr, h.port);
-        self.screens.edit_host_index = Some(idx);
-        self.screens.host_menu_index = None;
-        self.nav.screen = Screen::EditHost;
+        self.nav.enter(Screen::EditHost, 0);
     }
 
-    /// Handle menu event. Left/Right stand in for backspace; Confirm commits with 4 octets.
+    /// Left/Right stand in for backspace; Confirm commits with 4 octets.
     pub(crate) fn handle_edit_host_event(&mut self, ev: MenuEvent) {
         match ev {
             MenuEvent::Left => self.screens.add_host.backspace(),
             MenuEvent::Right => self.screens.add_host.advance_field(),
             MenuEvent::Confirm => self.confirm_edit_host(),
-            MenuEvent::Back => {
-                self.screens.edit_host_index = None;
-                self.nav.screen = Screen::Home;
-            }
+            MenuEvent::Back => self.close_edit_host(),
             MenuEvent::Up | MenuEvent::Down | MenuEvent::Secondary => {}
         }
     }
@@ -39,7 +34,7 @@ impl App {
         if !self.screens.add_host.is_complete() {
             return;
         }
-        let Some(idx) = self.screens.edit_host_index else {
+        let Some(idx) = self.screens.host_menu_index else {
             return;
         };
         let Some(HostEntry::Known(old)) = self.hosts.entries.get(idx).cloned() else {
@@ -47,8 +42,7 @@ impl App {
         };
         let (host, port) = self.screens.add_host.host_and_port();
         if host == old.addr && port == old.port {
-            self.screens.edit_host_index = None;
-            self.nav.screen = Screen::Home;
+            self.close_edit_host();
             return;
         }
 
@@ -70,19 +64,24 @@ impl App {
         self.persist();
         self.rebuild_entries();
 
-        // Keep selection updated to new address
         if self.library.selected_host.as_ref() == Some(&(old.addr.clone(), old.port)) {
             self.library.selected_host = Some((host.clone(), port));
         }
-        self.set_home_focus(HomeFocus::Sidebar(
-            self.hosts
-                .entries
-                .iter()
-                .position(|e| e.host() == host && e.port() == port)
-                .unwrap_or(0),
-        ));
-        self.screens.edit_host_index = None;
+        // `rebuild_entries` may have moved the row, and the host menu behind this dialog acts
+        // on the index, so both focus and that index follow the host to its new position.
+        if let Some(row) = self.hosts.entry_index(&host, port) {
+            self.set_home_focus(HomeFocus::Sidebar(row));
+            self.screens.host_menu_index = Some(row);
+        }
         self.render.grid.dirty = true;
-        self.nav.screen = Screen::Home;
+        self.close_edit_host();
+    }
+
+    /// Back to the host menu this dialog was opened from — `resume`, not `enter`, so the
+    /// cursor stays on the Connect row whose pencil opened it. The latch is
+    /// `handle_host_power_event`'s: the menu's subtitle carries the address just changed.
+    fn close_edit_host(&mut self) {
+        self.latch_host_menu_power();
+        self.nav.resume(Screen::HostMenu);
     }
 }
