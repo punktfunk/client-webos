@@ -627,7 +627,7 @@ impl App {
                 let (mark, label) = match kind {
                     CardMenuRow::MoveTo => ("pin", view::collections::menu_row_label(self.card_is_held(pin_id))),
                     CardMenuRow::Remove => ("trash-2", "Remove"),
-                    CardMenuRow::Profile => ("wrench", "Settings profile\u{2026}"),
+                    CardMenuRow::Profile => ("wrench", "Profile"),
                     CardMenuRow::Settings => ("settings", "Settings"),
                 };
                 let icon_x = row.left + MENU_ICON_INSET;

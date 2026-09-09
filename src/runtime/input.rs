@@ -274,11 +274,11 @@ pub(super) struct UiInput {
     /// Hold-to-pin on Home (see `CARD_HOLD`), while OK is held on a pinnable card.
     pub(super) card_held: Option<CardHold>,
     stick_nav: crate::platform::webos::input::StickMenuNav,
-    /// The wheel's claim on focus, while it has one.
-    wheel: WheelFocus,
+    /// The non-pointer input's claim on focus, while it has one.
+    nav_focus: NavFocus,
     /// A click was spent confirming the scrolled focus — its release is the same press and
     /// must not act a second time (as a tap, or as the end of a slider drag).
-    wheel_click: bool,
+    nav_click: bool,
     /// The held direction being autorepeated, if any.
     nav_repeat: Option<NavRepeat>,
 }
@@ -345,31 +345,31 @@ impl UiInput {
     }
 }
 
-/// How far the pointer must travel from where it sat when the wheel took focus before it
-/// takes focus back, in screen px. Scrolling emits motion at the same time — the Magic Remote
-/// keeps moving while its wheel turns, and a hand on a HID mouse never holds still — which
-/// would hand focus to whatever row is under the cursor and undo the scroll. Measured from a
-/// fixed anchor rather than summed, so the wobble of a hand holding still never adds up to a
-/// release, and generous enough to sit outside it; a deliberate reach for a row clears it in
-/// the first few frames of the movement.
-const WHEEL_RELEASE_PX: i32 = 96;
+/// How far the pointer must travel before it takes focus back, in screen px. Motion arrives
+/// alongside the input that claimed — the Magic Remote keeps moving while its wheel turns, and
+/// a hand on a HID mouse never holds still — which would hand focus to whatever row is under
+/// the cursor and undo the move. Measured from a fixed anchor rather than summed, so a held
+/// hand's wobble never adds up to a release; a deliberate reach clears it in a few frames.
+const NAV_RELEASE_PX: i32 = 96;
 
-/// The wheel's claim on focus: it holds from the first detent until the pointer is
-/// deliberately moved (see [`WHEEL_RELEASE_PX`]) or a click spends it. No clock — a user who
-/// scrolls and then sits still keeps the row they scrolled to however long they read it.
+/// A non-pointer input's claim on focus — the wheel's detents, and every key/pad menu event
+/// (stepping rows, and Back). No clock: it holds until the pointer is deliberately moved (see
+/// [`NAV_RELEASE_PX`]) or a click spends it, so a user who steps to a row and then sits still
+/// keeps it however long they read it. This is what stops a resting cursor from re-hovering
+/// whatever slid under it, which on a row list is a Remove button one press away.
 #[derive(Default)]
-struct WheelFocus {
+struct NavFocus {
     /// Where the pointer was when the claim started. `None` while held but not yet placed:
-    /// SDL's wheel event carries scroll deltas, not a position, so the anchor is the first
-    /// motion after the detent.
+    /// neither a wheel detent nor a key carries a position, so the anchor is the first motion
+    /// after the claim.
     anchor: Option<(i32, i32)>,
     held: bool,
 }
 
-impl WheelFocus {
-    /// A detent arrived: the wheel owns focus from here, measured afresh. Re-anchoring on
-    /// every detent is what makes a long scroll safe — drift that stayed under the threshold
-    /// during the last one must not be carried forward into this one and add up to a release.
+impl NavFocus {
+    /// A detent or a menu event arrived: it owns focus from here, measured afresh. Re-anchoring
+    /// on every one is what makes a long scroll safe — drift that stayed under the threshold
+    /// during the last one must not be carried forward and add up to a release.
     fn claim(&mut self) {
         self.held = true;
         self.anchor = None;
@@ -380,13 +380,7 @@ impl WheelFocus {
         *self = Self::default();
     }
 
-    /// Whether the wheel still owns focus — pointer motion ignored, and a click confirming
-    /// what was scrolled to rather than what happens to be under the cursor.
-    fn holds(&self) -> bool {
-        self.held
-    }
-
-    /// Whether this motion should be ignored. The first one after a detent anchors the claim;
+    /// Whether this motion should be ignored. The first one after a claim anchors it;
     /// a later one far enough from that anchor is a deliberate reach and ends it.
     fn swallows_motion(&mut self, x: i32, y: i32) -> bool {
         if !self.held {
@@ -396,7 +390,7 @@ impl WheelFocus {
             self.anchor = Some((x, y));
             return true;
         };
-        if (x - ax).pow(2) + (y - ay).pow(2) > WHEEL_RELEASE_PX.pow(2) {
+        if (x - ax).pow(2) + (y - ay).pow(2) > NAV_RELEASE_PX.pow(2) {
             self.release();
             return false;
         }
@@ -572,7 +566,7 @@ pub(super) fn handle_ui_event(
     // event handled below, redraw only if the motion actually changed the
     // focused/hovered element, not on every no-op tick.
     if let Event::MouseMotion { x, y, .. } = event {
-        if !input.wheel.swallows_motion(x, y) {
+        if !input.nav_focus.swallows_motion(x, y) {
             *dirty |= app.handle_mouse_motion(x, y, w, h);
         }
         return EventAction::Next;
@@ -582,7 +576,7 @@ pub(super) fn handle_ui_event(
     // redraws when the offset actually moved (a wheel tick at either clamp
     // edge is a no-op).
     if let Event::MouseWheel { y: wheel_y, .. } = event {
-        input.wheel.claim();
+        input.nav_focus.claim();
         // Anything that navigates by row — a list screen, an open dropdown, a held card's
         // submenu — takes one detent as one Up/Down press, so the wheel reaches every list
         // the D-pad does (see `App::navigates_rows`). Only the two pixel-scrolled surfaces
@@ -613,24 +607,21 @@ pub(super) fn handle_ui_event(
         }
         return EventAction::Next;
     }
-    // OK pressed while the wheel still owns focus (see `WheelFocus`): the user is
-    // acting on the row they just scrolled to, not on whatever the pointer drifted over while
-    // they scrolled — so it confirms the focused row, exactly as the remote's OK would, and
-    // the pointer position is ignored. Ends the window: the click is the end of the gesture.
+    // OK pressed while a non-pointer input still owns focus (see `NavFocus`): the user is
+    // acting on the row they just navigated to, not on whatever the pointer drifted over on the
+    // way — so it confirms the focused row, exactly as the remote's OK would.
     if let Event::MouseButtonDown {
         mouse_btn: sdl2::mouse::MouseButton::Left,
         ..
     } = event
     {
-        if input.wheel.holds() {
-            input.wheel.release();
-            input.wheel_click = true;
+        // Either way the claim ends here: a click that didn't spend it is deliberate input at
+        // its own position, and must take focus there before a press path resolves hover.
+        if std::mem::take(&mut input.nav_focus).held {
+            input.nav_click = true;
             *dirty = true;
             return dispatch_menu_event(app, MenuEvent::Confirm, display_mode);
         }
-        // Otherwise a click is deliberate input at its own position: it takes focus at the
-        // press point, so drop the claim before either press path resolves hover focus.
-        input.wheel.release();
     }
     // The release of that same click carries no second action.
     if matches!(
@@ -639,7 +630,7 @@ pub(super) fn handle_ui_event(
             mouse_btn: sdl2::mouse::MouseButton::Left,
             ..
         }
-    ) && std::mem::take(&mut input.wheel_click)
+    ) && std::mem::take(&mut input.nav_click)
     {
         return EventAction::Next;
     }
@@ -789,5 +780,9 @@ pub(super) fn handle_ui_event(
     let Some(menu_ev) = menu_ev else {
         return EventAction::Next;
     };
+    // A key/pad event moves focus without moving the cursor, exactly as the wheel does: hold
+    // the pointer off until it is deliberately moved, so rows sliding under a resting cursor
+    // (or a Back that lands one under it) cannot steal the focus back.
+    input.nav_focus.claim();
     dispatch_menu_event(app, menu_ev, display_mode)
 }
