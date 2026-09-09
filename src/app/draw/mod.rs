@@ -71,7 +71,6 @@ pub(crate) const fn draws_kit_rows(screen: Screen) -> bool {
     is_list(screen) || matches!(screen, Screen::SettingsPage)
 }
 
-/// What every draw fn takes.
 #[derive(Clone, Copy)]
 pub(crate) struct Frame<'a> {
     pub canvas: &'a Canvas,
@@ -81,7 +80,8 @@ pub(crate) struct Frame<'a> {
     pub h: f32,
     /// Pixels per design unit.
     pub k: f32,
-    /// The page a frosted card blurs, when this frame has one. `None` is the opaque card, and
+    /// The already-blurred page a frosted card sits on, when this frame has one. `None` is the
+    /// opaque card, and
     /// it is what a frame over live video must stay: the decoded picture sits on the TV's
     /// hardware plane, composited outside our GL context, so a grab of our own framebuffer
     /// reads punch-through alpha and the card would frost a smear of the graphics plane.
@@ -121,7 +121,6 @@ pub(crate) fn scale(h: u32) -> f32 {
     (h as f32 / 800.0 * panel_k()).clamp(0.75, 3.0)
 }
 
-/// The panel the design is tuned on.
 const REFERENCE_INCHES: f32 = 65.0;
 
 /// How much larger this client draws than the kit's design units say: a TV is read from a
@@ -209,6 +208,11 @@ pub(crate) fn scrim(canvas: &Canvas, w: f32, h: f32, alpha: f32) {
         Rect::from_xywh(0.0, 0.0, w, h),
         &theme::fill(theme::shade(0.45 * alpha)),
     );
+}
+
+/// Plain bilinear sampling, no mipmaps: what every image this app draws is scaled with.
+pub(crate) fn linear() -> skia_safe::SamplingOptions {
+    skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None)
 }
 
 pub(crate) fn sk(r: ui::render::Rect) -> Rect {
@@ -504,8 +508,7 @@ impl App {
         &mut self.render.list.as_mut().expect("just set").1
     }
 
-    /// The card a ported list screen shows: its title, subtitle and rows in the kit's
-    /// vocabulary. `None` on any other screen.
+    /// `None` on any other screen.
     pub(crate) fn list_card(&self, screen: Screen) -> Option<ListCard> {
         use crate::app::view;
         Some(match screen {
@@ -602,7 +605,7 @@ impl App {
         })
     }
 
-    /// A ported list card's geometry. The HDR card sits at the bottom, under the pattern.
+    /// The HDR card sits at the bottom, under the pattern.
     fn list_layout(&self, screen: Screen, card: &ListCard, fw: f32, fh: f32, k: f32) -> list::Layout {
         let headers = card.rows.iter().filter(|r| r.header.is_some()).count();
         let l = list::layout(
@@ -621,7 +624,6 @@ impl App {
         }
     }
 
-    /// The trailing button of the kit's rows under `(x, y)`, as `(row, button)`.
     pub(crate) fn kit_list_button_at(&mut self, x: i32, y: i32) -> Option<(usize, usize)> {
         let screen = self.nav.screen;
         if !draws_kit_rows(screen) {
@@ -668,7 +670,6 @@ impl App {
         let _ = list.menu(kit, len);
     }
 
-    /// The row of the ported list under `(x, y)` — the kit's own last-drawn geometry.
     pub(crate) fn kit_list_row_at(&mut self, x: i32, y: i32) -> Option<usize> {
         let screen = self.nav.screen;
         if !draws_kit_rows(screen) {

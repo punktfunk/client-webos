@@ -12,12 +12,17 @@ use skia_safe::{Canvas, RRect, Rect};
 use super::card_rim;
 use super::{surface, Frame};
 
-/// The page as it stood before any modal drew, for [`glass_card`].
+/// The page as it stood before any modal drew, already blurred by [`blur_page`], for
+/// [`glass_card`].
 ///
 /// A snapshot rather than `save_layer`'s `backdrop` filter, which is the obvious answer and did
 /// nothing here: the layer was composited but came back unfiltered, so the card read as
 /// transparent-but-sharp. An explicit image is also the only form the lens could ever use,
 /// since a refraction has to SAMPLE the backdrop at a displaced coordinate.
+///
+/// Blurred once by whoever takes the snapshot rather than per draw: the page behind a settled
+/// modal does not change, and re-running a 14-unit blur over the whole card every frame was
+/// most of what the card cost.
 #[derive(Clone, Copy)]
 pub(crate) struct Backdrop<'a> {
     pub page: &'a skia_safe::Image,
@@ -29,30 +34,54 @@ const CARD_BLUR: f32 = 14.0;
 /// transparent shows more backdrop and costs the contrast a couch reader needs, and the
 /// binding constraint is the text on the card, not the material. Tuned denser than that.
 const CARD_FROST: f32 = 0.9;
-/// The card blur, cached per `k` to avoid allocating and busting Skia's filter cache every frame.
-fn card_blur(k: f32) -> Option<skia_safe::ImageFilter> {
-    thread_local! {
-        static BLUR: std::cell::RefCell<Option<(f32, skia_safe::ImageFilter)>> =
-            const { std::cell::RefCell::new(None) };
-    }
-    BLUR.with(|c| {
-        let mut c = c.borrow_mut();
-        if !matches!(&*c, Some((cached, _)) if *cached == k) {
-            let sigma = CARD_BLUR * k;
-            *c = skia_safe::image_filters::blur((sigma, sigma), skia_safe::TileMode::Clamp, None, None).map(|f| (k, f));
-        }
-        c.as_ref().map(|(_, f)| f.clone())
-    })
+/// How much smaller everything is blurred than it is drawn. A `CARD_BLUR` gaussian destroys
+/// detail far finer than a quarter-resolution downscale does, so the two are indistinguishable
+/// while the blur covers a sixteenth of the pixels — and it is the difference between a modal
+/// appearing at once and visibly arriving, since a full 1080p blur cost hundreds of
+/// milliseconds on this chip. Both callers draw the result stretched back over the source rect.
+const DOWNSCALE: i32 = 4;
+
+/// `img` blurred into a quarter-size copy of itself on `target`, which is what decides whether
+/// the work lands on the GPU or the CPU: a GPU offscreen for the page, a raster one for a cover
+/// small enough that the deferred GPU filter would cost more than the blur.
+fn downscaled_blur(
+    target: impl FnOnce(i32, i32) -> Option<skia_safe::Surface>,
+    img: &skia_safe::Image,
+    sigma: f32,
+) -> Option<skia_safe::Image> {
+    let (w, h) = ((img.width() / DOWNSCALE).max(1), (img.height() / DOWNSCALE).max(1));
+    let mut surface = target(w, h)?;
+    let mut p = theme::layer();
+    // Sigma comes down with the image, so the blur covers the same fraction of it.
+    let sigma = sigma / DOWNSCALE as f32;
+    p.set_image_filter(skia_safe::image_filters::blur(
+        (sigma, sigma),
+        skia_safe::TileMode::Clamp,
+        None,
+        None,
+    )?);
+    surface
+        .canvas()
+        .draw_image_rect_with_sampling_options(img, None, Rect::from_iwh(w, h), super::linear(), &p);
+    Some(surface.image_snapshot())
 }
 
-/// Blur the page under the card if a blur filter exists; return `false` to signal the caller to draw opaque.
-fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) -> bool {
+/// The page, downscaled and blurred once, ready to be a [`Backdrop`].
+///
+/// `surface` is the live one, only to spawn a compatible offscreen to downscale into: a surface
+/// made from it shares the GPU context, so this never leaves the device.
+pub(crate) fn blur_page(surface: &mut skia_safe::Surface, page: &skia_safe::Image, k: f32) -> Option<skia_safe::Image> {
+    let info = surface.image_info();
+    downscaled_blur(
+        |w, h| surface.new_surface(&info.with_dimensions((w, h))),
+        page,
+        CARD_BLUR * k,
+    )
+}
+
+fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
     let canvas = f.canvas;
-    let Some(blur) = card_blur(f.k) else {
-        return false;
-    };
-    let mut p = theme::layer();
-    p.set_image_filter(blur);
+    let p = theme::layer();
     canvas.save();
     canvas.clip_rrect(rr, None, Some(true));
     // The page covers the whole surface, and the whole surface in layout units is the frame:
@@ -71,9 +100,16 @@ fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) -> bool {
     } else {
         (-m.translate_x() / sx, -m.translate_y() / sy)
     };
-    canvas.draw_image_rect(bd.page, None, Rect::from_xywh(origin.0, origin.1, f.w, f.h), &p);
+    // Linear: the page is a quarter-size blur, so it comes back up 4x and default sampling
+    // would stair-step it.
+    canvas.draw_image_rect_with_sampling_options(
+        bd.page,
+        None,
+        Rect::from_xywh(origin.0, origin.1, f.w, f.h),
+        super::linear(),
+        &p,
+    );
     canvas.restore();
-    true
 }
 
 /// The card's top-to-bottom hairline: the flat panel's stroke, kept over the glass because the
@@ -104,13 +140,12 @@ fn card_hairline(canvas: &Canvas, rect: Rect, rr: RRect, k: f32) {
 pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
     let (canvas, k) = (f.canvas, f.k);
     let rr = RRect::new_rect_xy(rect, corner * k, corner * k);
-    let frosted = f.backdrop.is_some_and(|bd| draw_card_backdrop(f, bd, rr));
-    if !frosted {
+    let Some(bd) = f.backdrop else {
         canvas.draw_rrect(rr, &theme::fill(surface()));
         theme::panel(canvas, rect, corner, None, PanelStroke::Gradient, k);
         return;
-    }
-    // Face must be translucent so the blurred backdrop shows through.
+    };
+    draw_card_backdrop(f, bd, rr);
     let mut face = surface();
     face.a = CARD_FROST;
     canvas.draw_rrect(rr, &theme::fill(face));
@@ -123,16 +158,56 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
 ///
 /// The card menu grows out of one card, so the only thing behind it is that card's cover:
 /// blurring the image straight into the rect it was drawn at needs no surface grab and stays
-/// registered through the card's zoom. `false` when there is no blur filter.
-pub(crate) fn frost_over_art(canvas: &Canvas, img: &skia_safe::Image, art: Rect, window: Rect, k: f32) -> bool {
-    let Some(blur) = card_blur(k) else {
+/// registered through the card's zoom. `false` when the blur could not be baked, and the caller
+/// draws the strip opaque.
+///
+/// The blurred cover is cached under `id`: the menu holds still once it is up, and re-blurring
+/// the same cover every frame is what made it lag on the way in.
+pub(crate) fn frost_over_art(
+    canvas: &Canvas,
+    id: &str,
+    img: &skia_safe::Image,
+    art: Rect,
+    window: Rect,
+    k: f32,
+) -> bool {
+    let Some(blurred) = blurred_cover(id, img, art, k) else {
         return false;
     };
-    let mut p = theme::layer();
-    p.set_image_filter(blur);
-    canvas.draw_image_rect(img, None, art, &p);
+    canvas.draw_image_rect_with_sampling_options(&blurred, None, art, super::linear(), &theme::layer());
     let mut face = surface();
     face.a = CARD_FROST;
     canvas.draw_rect(window, &theme::fill(face));
     true
+}
+
+/// The one cover the open card menu sits on, blurred. One entry, because one card menu is open
+/// at a time.
+///
+/// The blur is baked at the SOURCE image's scale so it looks the same once drawn into `art`, and
+/// the sigma is quantized because `art` is the focus-zoomed, pop-animated card rect: keyed on the
+/// exact float, every sub-pixel of that animation would re-bake, which is the cost this cache
+/// exists to avoid. A blur drawn stretched cannot show the rounding.
+fn blurred_cover(id: &str, img: &skia_safe::Image, art: Rect, k: f32) -> Option<skia_safe::Image> {
+    thread_local! {
+        static COVER: std::cell::RefCell<Option<(String, i32, skia_safe::Image)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    if art.width() <= 0.0 {
+        return None;
+    }
+    // Sigma in the source image's pixels: the canvas blur is CARD_BLUR * k across a card of
+    // `art.width()`, and the image is squeezed into that, so it scales by the same ratio.
+    let sigma = (CARD_BLUR * k * img.width() as f32 / art.width()).round() as i32;
+    COVER.with(|c| {
+        let mut c = c.borrow_mut();
+        if !matches!(&*c, Some((cached, s, _)) if cached == id && *s == sigma) {
+            // Raster rather than a GPU offscreen: the source is already a raster image and a
+            // quarter-size cover is microseconds on the CPU, where a GPU filter would instead
+            // land, deferred, on the flush of the frame the menu opened.
+            *c = downscaled_blur(|w, h| skia_safe::surfaces::raster_n32_premul((w, h)), img, sigma as f32)
+                .map(|blurred| (id.to_owned(), sigma, blurred));
+        }
+        c.as_ref().map(|(_, _, img)| img.clone())
+    })
 }

@@ -29,9 +29,7 @@ const TOAST_TOP: f32 = 18.0;
 const TOAST_PAD_X: f32 = 18.0;
 const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_SIZE: f64 = 15.0;
-/// How many log lines the tail shows.
 pub(super) const LOG_LINES: usize = 9;
-/// How long a toast holds before its fade.
 const NOTIFICATION_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One frame on the GL context: the surface, cleared to `clear`, scaled from `display`
@@ -50,7 +48,6 @@ pub(super) fn frame(
         let surface = gl.surface(dw, dh)?;
         let c = surface.canvas();
         c.clear(clear);
-        c.reset_matrix();
         c.scale((dw as f32 / display.0.max(1) as f32, dh as f32 / display.1.max(1) as f32));
         fonts.begin_frame();
         draw(&Frame::new(c, fonts, display.0, display.1));
@@ -71,7 +68,6 @@ pub(super) fn wipe(gl: &mut Option<ConsoleGl>, canvas: &sdl2::render::WindowCanv
     Ok(())
 }
 
-/// The stats card, top right: the first line bright, the rest muted, the hint centred under.
 pub(super) fn stats(f: &Frame<'_>, lines: &[String], hint: &str, alpha: f32) {
     let k = f.k;
     let size = STATS_LINE * f64::from(k);
@@ -126,7 +122,6 @@ fn log_tone(line: &str) -> Color4f {
     }
 }
 
-/// The log tail, a full-width strip along the bottom edge, wrapped lines indented.
 pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
     let k = f.k;
     let size = LOG_LINE * f64::from(k);
@@ -162,7 +157,6 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
     c.restore();
 }
 
-/// A toast pill along the top edge.
 pub(super) fn toast(f: &Frame<'_>, text: &str, alpha: f32) {
     let k = f.k;
     let size = TOAST_SIZE * f64::from(k);
