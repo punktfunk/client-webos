@@ -348,7 +348,7 @@ impl Service {
             // grants and rumble tests are Android's `InputDevice` API.
             ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
             ConsoleCmd::PadAction { action, .. } => tracing::info!("console: no pad action {action} on webOS"),
-            // Bind (or clear) one title's profile — the shell's "Settings profile…" row on a
+            // Bind (or clear) one title's profile — the shell's "Profile" row on a
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
             // rather than stored.
