@@ -9,6 +9,7 @@ pub const ICON_SIGNAL: &str = "activity";
 pub const ICON_POWER: &str = "power";
 pub const ICON_DELETE: &str = "trash-2";
 pub const ICON_EDIT: &str = "pencil";
+pub const ICON_MORE: &str = "ellipsis";
 pub const ICON_SEND: &str = "send";
 pub const ICON_REORDER: &str = "grip-vertical";
 pub const ICON_CLOSE: &str = "x";

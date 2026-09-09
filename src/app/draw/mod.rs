@@ -21,6 +21,7 @@ use pf_console_ui::anim::approach;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
 use skia_safe::{Canvas, RRect, Rect};
 
+use crate::app::screens::rowbuttons::RowButton;
 use crate::app::App;
 use crate::core::screen::Screen;
 use crate::platform::webos::device;
@@ -61,6 +62,12 @@ pub(crate) const fn is_list(screen: Screen) -> bool {
     )
 }
 
+/// The screens whose rows are the kit's row widget — every list card, plus the settings page,
+/// which draws the same rows inside its own card. What the pointer hit tests are answerable on.
+pub(crate) const fn draws_kit_rows(screen: Screen) -> bool {
+    is_list(screen) || matches!(screen, Screen::SettingsPage)
+}
+
 /// What every draw fn takes.
 pub(crate) struct Frame<'a> {
     pub canvas: &'a Canvas,
@@ -97,6 +104,12 @@ pub(crate) fn scale(h: u32) -> f32 {
 /// The panel the design is tuned on.
 const REFERENCE_INCHES: f32 = 65.0;
 
+/// How much larger this client draws than the kit's design units say: a TV is read from a
+/// couch, and the kit is tuned for a handheld's arm's length. Rides [`panel_k`] rather than
+/// the type sizes, so boxes, gaps and the kit's own rows grow with the text. A launch
+/// `ui_scale` replaces it outright.
+const BASE_SCALE: f32 = 1.1;
+
 /// How far a smaller panel is compensated. A full correction (1.0) holds type the same
 /// physical size, which assumes everyone sits the same distance from whatever they bought; the
 /// square root splits it, because a smaller set is usually a closer set. The layouts agree: a
@@ -118,7 +131,7 @@ pub(crate) fn panel_k() -> f32 {
             tracing::info!("UI scale forced to {over} at launch");
             return over.clamp(0.5, 2.0);
         }
-        let k = device::panel_inches().map_or(1.0, panel_k_for);
+        let k = device::panel_inches().map_or(1.0, panel_k_for) * BASE_SCALE;
         tracing::info!("UI scale {k} from the panel size");
         k
     })
@@ -460,11 +473,29 @@ impl App {
     pub(crate) fn list_card(&self, screen: Screen) -> Option<ListCard> {
         use crate::app::view;
         Some(match screen {
-            Screen::HostMenu => ListCard {
-                title: self.host_menu_title(),
-                subtitle: Some(self.host_menu_subtitle()),
-                rows: self.host_menu_rows().iter().map(list::row_spec).collect(),
-            },
+            Screen::HostMenu => {
+                let cursor = self.nav.cursor(crate::app::nav::ScreenKey::HostMenu);
+                let lit = self.screens.row_button;
+                // The actions are derived once and carry both the row and its buttons: asking
+                // per row for the marks would re-derive the whole menu on every one of them.
+                let saved = self.host_menu_saved_entry();
+                let power = self.host_menu_power_row();
+                let rows = self
+                    .host_menu_actions_with(power)
+                    .iter()
+                    .zip(self.host_menu_rows().iter())
+                    .enumerate()
+                    .map(|(i, (&action, row))| {
+                        let marks = crate::app::state::hostmenu::marks_of(action, saved);
+                        list::with_row_buttons(list::row_spec(row), marks, i == cursor, lit)
+                    })
+                    .collect();
+                ListCard {
+                    title: self.host_menu_title(),
+                    subtitle: Some(self.host_menu_subtitle()),
+                    rows,
+                }
+            }
             Screen::HostPower => {
                 let (auto_send, exit_action, access) = self.host_power_view();
                 ListCard {
@@ -554,10 +585,10 @@ impl App {
         }
     }
 
-    /// The trailing button of the ported list under `(x, y)`, as `(row, button)`.
+    /// The trailing button of the kit's rows under `(x, y)`, as `(row, button)`.
     pub(crate) fn kit_list_button_at(&mut self, x: i32, y: i32) -> Option<(usize, usize)> {
         let screen = self.nav.screen;
-        if !is_list(screen) {
+        if !draws_kit_rows(screen) {
             return None;
         }
         let p = pf_console_ui::pointer::Pointer {
@@ -566,6 +597,14 @@ impl App {
             kind: pf_console_ui::pointer::PointerKind::Move,
         };
         self.kit_list(screen).button_at(p)
+    }
+
+    /// The trailing button of `row` under `(x, y)` — the pointer paths' question, since a hit
+    /// on some *other* row's button is a hit on no button at all.
+    pub(crate) fn kit_row_button_at(&mut self, x: i32, y: i32, row: usize) -> Option<RowButton> {
+        self.kit_list_button_at(x, y)
+            .filter(|(r, _)| *r == row)
+            .map(|(_, b)| RowButton::Trailing(b))
     }
 
     /// The kit widget's side of a menu event on a ported list screen: the recoil at an end,
@@ -596,7 +635,7 @@ impl App {
     /// The row of the ported list under `(x, y)` — the kit's own last-drawn geometry.
     pub(crate) fn kit_list_row_at(&mut self, x: i32, y: i32) -> Option<usize> {
         let screen = self.nav.screen;
-        if !is_list(screen) && screen != Screen::SettingsPage {
+        if !draws_kit_rows(screen) {
             return None;
         }
         let len = self.row_count();
@@ -672,8 +711,10 @@ mod tests {
 
     #[test]
     fn scale_follows_the_consoles_rule() {
-        assert!((scale(1080) - 1.35).abs() < 1e-6);
-        assert!((scale(2160) - 2.7).abs() < 1e-6);
+        // The kit's own rule, times this client's couch scale; the low clamp is untouched.
+        assert!((scale(1080) - 1.35 * BASE_SCALE).abs() < 1e-6);
+        // 4K rides the same rule up to the kit's ceiling. webOS hands this app 1080p anyway.
+        assert!((scale(2160) - (2.7 * BASE_SCALE).min(3.0)).abs() < 1e-6);
         assert!((scale(400) - 0.75).abs() < 1e-6);
     }
 
@@ -685,8 +726,8 @@ mod tests {
         assert!((panel_k_for(83) - 1.0).abs() < 1e-6);
         assert!((panel_k_for(48) - (65.0f32 / 48.0).sqrt()).abs() < 1e-6);
         assert!((panel_k_for(32) - 1.25).abs() < 1e-6);
-        // A 1080p-pixel metric is untouched at the reference panel.
-        assert!((px_1080(1080.0, 54.0) - 54.0).abs() < 1e-4);
+        // A 1080p-pixel metric takes the couch scale alone at the reference panel.
+        assert!((px_1080(1080.0, 54.0) - 54.0 * BASE_SCALE).abs() < 1e-4);
     }
 
     /// A focus move owes frames until every channel reaches its target, then none.

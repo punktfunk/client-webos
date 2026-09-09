@@ -12,7 +12,6 @@
 use std::time::Instant;
 
 use crate::app::nav::ScreenKey;
-use crate::app::screens::rowbuttons::RowButton;
 use crate::app::{view, App, ConnectTarget, HomeFocus, PairingFocus, Screen};
 use crate::ui;
 use crate::ui::render::Rect;
@@ -141,10 +140,7 @@ impl App {
                 let Some(row) = self.kit_list_row_at(x, y) else {
                     return HoverChange::NONE;
                 };
-                let button = self
-                    .kit_list_button_at(x, y)
-                    .filter(|(r, _)| *r == row)
-                    .map(|(_, b)| RowButton::Trailing(b));
+                let button = self.kit_row_button_at(x, y, row);
                 let key = ScreenKey::Collections;
                 let row_changed = self.nav.cursor(key) != row;
                 let button_changed = self.screens.row_button != button;
@@ -167,31 +163,36 @@ impl App {
                 let Some(i) = self.kit_list_row_at(x, y) else {
                     return HoverChange::NONE;
                 };
+                // The calibrate row's bin, lit like any other row button under the pointer.
+                let button = self.kit_row_button_at(x, y, i);
                 let changed = self.nav.cursor(ScreenKey::SettingsPage) != i || self.screens.settings_page.column;
+                let button_changed = self.screens.row_button != button;
                 self.screens.settings_page.column = false;
                 self.nav.set_cursor(ScreenKey::SettingsPage, i);
-                HoverChange::row(changed)
+                self.screens.row_button = button;
+                HoverChange::split(changed, button_changed)
             }
-            // A list drawn on the kit: hover focuses the row under the pointer, through the
-            // list's own last-drawn rects (`app::draw::list`).
+            // A list drawn on the kit: hover focuses the row under the pointer, and whichever
+            // of its buttons the pointer is actually over, through the list's own last-drawn
+            // rects (`app::draw::list`). A screen whose rows carry none reads `None` here.
             screen @ (Screen::HostMenu | Screen::HostPower | Screen::PickProfile) => {
-                let Some(i) = self.kit_list_row_at(x, y) else {
+                let Some(row) = self.kit_list_row_at(x, y) else {
                     return HoverChange::NONE;
                 };
+                let button = self.kit_row_button_at(x, y, row);
                 let key = ScreenKey::of(screen);
-                let changed = self.nav.cursor(key) != i;
-                self.nav.set_cursor(key, i);
-                HoverChange::row(changed)
+                let row_changed = self.nav.cursor(key) != row;
+                let button_changed = self.screens.row_button != button;
+                self.nav.set_cursor(key, row);
+                self.screens.row_button = button;
+                HoverChange::split(row_changed, button_changed)
             }
             // Identical row-list geometry; only which focus field they carry differs.
             Screen::HdrCalibration => {
                 let Some(row) = self.kit_list_row_at(x, y) else {
                     return HoverChange::NONE;
                 };
-                let button = self
-                    .kit_list_button_at(x, y)
-                    .filter(|(r, _)| *r == row)
-                    .map(|(_, b)| RowButton::Trailing(b));
+                let button = self.kit_row_button_at(x, y, row);
                 // Same per-screen field table the keyboard path indexes, so hover and
                 // D-pad focus can never name different fields.
                 let Some(focused) = self.list_modal_focused_mut() else {
@@ -338,10 +339,7 @@ impl App {
                 }
                 if let Some(row) = self.kit_list_row_at(x, y) {
                     self.nav.set_cursor(ScreenKey::Collections, row);
-                    self.screens.row_button = self
-                        .kit_list_button_at(x, y)
-                        .filter(|(r, _)| *r == row)
-                        .map(|(_, b)| RowButton::Trailing(b));
+                    self.screens.row_button = self.kit_row_button_at(x, y, row);
                 } else {
                     // No row under the pointer, so no trailing button either: the press is on
                     // the focused row itself.
@@ -375,22 +373,22 @@ impl App {
                 let row = self.kit_list_row_at(x, y)?;
                 self.screens.settings_page.column = false;
                 self.nav.set_cursor(ScreenKey::SettingsPage, row);
+                self.screens.row_button = self.kit_row_button_at(x, y, row);
             }
-            // A click on a kit list picks the row under it; off the rows it confirms the
-            // focused one, as an OK press does.
+            // A click on a kit list picks the row under it, and any button of that row it
+            // landed on, which `press` then reads. Off the rows it confirms the focused one,
+            // as an OK press does.
             screen @ (Screen::HostMenu | Screen::HostPower | Screen::PickProfile) => {
                 if let Some(row) = self.kit_list_row_at(x, y) {
                     self.nav.set_cursor(ScreenKey::of(screen), row);
+                    self.screens.row_button = self.kit_row_button_at(x, y, row);
                 }
             }
             // The one row is a track and a button, so a press is one or the other. Only the
             // button falls through to `press` below, which is what advances the step.
             Screen::HdrCalibration => {
                 let row = self.kit_list_row_at(x, y)?;
-                let button = self
-                    .kit_list_button_at(x, y)
-                    .filter(|(r, _)| *r == row)
-                    .map(|(_, b)| RowButton::Trailing(b));
+                let button = self.kit_row_button_at(x, y, row);
                 // Focus follows the click, exactly as it does on a collection row's buttons.
                 self.screens.row_button = button;
                 if button.is_none() {

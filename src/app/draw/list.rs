@@ -12,6 +12,7 @@ use pf_console_ui::widgets::{MenuList, RowSpec, ROW_H};
 use skia_safe::{Contains, Point, Rect};
 
 use super::{glass_card, line_h, wrap, Frame};
+use crate::app::screens::rowbuttons::RowButton;
 use crate::ui::widgets::{FocusRow, RowKind};
 
 /// Card width as a share of the screen; the rows centre inside it at the kit's own width.
@@ -190,6 +191,21 @@ pub(crate) fn row_spec(row: &FocusRow) -> RowSpec {
     spec.icon = Some(row.icon);
     spec.note = row.subtext.as_ref().map(|s| s.text.clone());
     spec
+}
+
+/// `spec` with the row's trailing buttons, lit when the cursor is on this row and on one of
+/// them. An action row keeps its centred label: a button is an extra the row wears at one end,
+/// not a value, and giving it one to reserve the gutter shunted every such label to the left.
+pub(crate) fn with_row_buttons(
+    spec: RowSpec,
+    marks: &'static [&'static str],
+    on_row: bool,
+    lit: Option<RowButton>,
+) -> RowSpec {
+    if marks.is_empty() {
+        return spec;
+    }
+    spec.with_buttons(marks, on_row.then(|| lit?.trailing()).flatten())
 }
 
 #[cfg(test)]

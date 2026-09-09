@@ -283,7 +283,7 @@ impl App {
                             &theme::fill(theme::accent(0.9)),
                         );
                     }
-                    if let Some(m) = by_name("ellipsis") {
+                    if let Some(m) = by_name(view::icons::ICON_MORE) {
                         let tone = if lit {
                             theme::on_accent()
                         } else {
