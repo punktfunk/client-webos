@@ -13,8 +13,9 @@ use crate::app::state::{reach::Reachability, sendlogs::SendLogsMsg, speedtest::S
 use crate::app::PairingOutcome;
 use crate::services::art::ArtLoader;
 use crate::services::discovery::Discovery;
-use crate::services::library::{GamesLoaded, LibraryError, RunningLoaded};
+use crate::services::library::{GamesLoaded, LibraryError};
 use crate::services::power::PowerRights;
+use crate::services::status::RunningLoaded;
 use crate::services::store::ExitAction;
 
 #[derive(Default)]
@@ -90,7 +91,6 @@ impl crate::app::App {
         let mut dirty = self.drain_discovery();
         dirty |= self.drain_art();
         dirty |= self.drain_games();
-        self.tick_running();
         dirty |= self.drain_running();
         dirty |= self.drain_pairing();
         dirty |= self.drain_rooted();

@@ -811,12 +811,10 @@ impl Service {
         std::thread::Builder::new()
             .name("punktfunk-webos-console-speedtest".into())
             .spawn(move || {
-                let progress = {
-                    let console = console.clone();
-                    let key = key.clone();
-                    move |_| console.advance_speed(&key, SpeedPhase::Measuring)
-                };
-                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, progress) {
+                // `Measuring` carries nothing, so the phase is raised once here rather than
+                // re-sent from every partial poll — the shell's takeover narrates the wait.
+                console.advance_speed(&key, SpeedPhase::Measuring);
+                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |_| {}) {
                     Ok(r) => {
                         let kbps = r.outcome.throughput_kbps;
                         tracing::info!(
@@ -829,7 +827,7 @@ impl Service {
                             SpeedPhase::Done {
                                 throughput_kbps: kbps,
                                 loss_pct: r.outcome.loss_pct,
-                                recommended_kbps: recommended_kbps(kbps),
+                                recommended_kbps: crate::core::model::recommended_bitrate_kbps(kbps),
                             },
                         );
                     }
@@ -841,12 +839,6 @@ impl Service {
             })
             .ok();
     }
-}
-
-/// Headroom every punktfunk client keeps under a measurement, for FEC and for real loss.
-/// Integer arithmetic in this order (not `* 0.7`), so every client recommends the same kilobit.
-fn recommended_kbps(throughput_kbps: u32) -> u32 {
-    throughput_kbps / 10 * 7
 }
 
 /// Whether a saved record and a live advert are the same host.

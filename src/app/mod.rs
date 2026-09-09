@@ -677,16 +677,12 @@ impl App {
         {
             animating = true;
         }
-        // The running dot's pulse. Gated on Home AND on something actually being up, because
-        // reporting `animating` is what holds this SoC at the render tick: an idle Home with a
-        // running game costs a redraw per frame, an idle Home without one costs nothing. The
-        // clock is stamped here rather than in the painter so the phase advances even while the
-        // dot is scrolled off screen — a card scrolled back in joins the pulse, not restarts it.
-        if self.nav.screen == Screen::Home && !self.library.running.is_empty() {
-            self.render.running_pulse_since.get_or_insert(now);
+        // The running dot's breath, stepped rather than per-frame — see `RunningPulse`. Live
+        // only where the dot is drawn and only while something is up, so an idle Home with no
+        // running game still parks the loop.
+        let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
+        if self.render.running_pulse.tick(now, dot_live) {
             animating = true;
-        } else {
-            self.render.running_pulse_since = None;
         }
         // The mark's entrance, from the sidebar's first frame.
         if self

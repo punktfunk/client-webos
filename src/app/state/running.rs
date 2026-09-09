@@ -46,7 +46,7 @@ impl App {
         let fingerprint = known.and_then(crate::core::model::KnownHost::fingerprint);
         let identity = (self.identity.0.clone(), self.identity.1.clone());
         self.library.running_last = Some(Instant::now());
-        self.jobs.running = Some(crate::services::library::load_running_async(
+        self.jobs.running = Some(crate::services::status::load_running_async(
             host,
             port,
             mgmt_port,

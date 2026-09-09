@@ -17,11 +17,6 @@ use crate::core::screen::Screen;
 use crate::app::nav::ScreenKey;
 use punktfunk_core::client::ProbeOutcome;
 
-/// Fraction of the measured goodput to recommend as a bitrate, leaving headroom for
-/// FEC overhead and real-world loss. Matches every other punktfunk client.
-const RECOMMEND_NUMERATOR: u32 = 7;
-const RECOMMEND_DENOMINATOR: u32 = 10;
-
 /// Below this the measurement carried too little signal to recommend anything.
 const MIN_USEFUL_KBPS: u32 = 2_000;
 
@@ -197,7 +192,7 @@ pub(crate) fn recommended_kbps(outcome: &ProbeOutcome) -> Option<u32> {
     if outcome.throughput_kbps < MIN_USEFUL_KBPS {
         return None;
     }
-    let raw = outcome.throughput_kbps / RECOMMEND_DENOMINATOR * RECOMMEND_NUMERATOR;
+    let raw = model::recommended_bitrate_kbps(outcome.throughput_kbps);
     // Whole Mbps, clamped to slider bounds (BITRATE_STEP_KBPS steps).
     let whole_mbps = (raw / 1000).max(1) * 1000;
     Some(whole_mbps.clamp(model::BITRATE_MIN_KBPS, model::BITRATE_MAX_KBPS))

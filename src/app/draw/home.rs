@@ -44,9 +44,11 @@ const PRESENCE_DOT: f32 = 9.0;
 /// a quiet sidebar row, this one has to read over cover art from across a room.
 const RUNNING_DOT: f32 = 14.0;
 const RUNNING_DOT_INSET: f32 = 14.0;
-/// One full breath of the running dot. Slow on purpose — a dot that blinks reads as an alarm,
-/// and this is only saying "your host has this up".
-const RUNNING_PULSE_SECS: f32 = 1.8;
+/// Rings drawn outward from the dot for its halo, each at a fraction of the last one's alpha.
+/// Flat circles rather than a `MaskFilter::blur`: a blur allocates a filter and forces its own
+/// mask raster per call, and this runs per visible card per frame — at 14 px the two read the
+/// same.
+const RUNNING_HALO_RINGS: usize = 3;
 const STRIP_PAD: f32 = 16.0;
 const STRIP_INSET: f32 = 8.0;
 pub(crate) const MENU_ROW_H: f32 = 54.0;
@@ -402,7 +404,7 @@ impl App {
             let r = sk(pop_in_rect(card_rect(idx), pop, shrink));
             draw_card_shadow(c, r, 0.45 * alpha);
             self.poster(f, r, game, alpha);
-            self.running_dot(f, r, game, alpha, now);
+            self.running_dot(f, r, game, alpha);
         }
         // One heading per section, scrolled with the cards it names.
         let size = px(f, TITLE);
@@ -512,26 +514,24 @@ impl App {
     /// early down four different branches — and the dot belongs over the cover either way. The
     /// membership test is a hash lookup per visible card, so it stays O(visible) like the rest
     /// of the grid.
-    fn running_dot(&self, f: &Frame<'_>, r: Rect, game: &GameEntry, alpha: f32, now: Instant) {
-        if alpha <= 0.0 || !self.library.running.contains(&game.id) {
+    fn running_dot(&self, f: &Frame<'_>, r: Rect, game: &GameEntry, alpha: f32) {
+        // Emptiness first: no game is running on most frames, and this skips the id hash the
+        // membership test would otherwise pay for every visible card.
+        if self.library.running.is_empty() || !self.library.running.contains(&game.id) {
             return;
         }
-        let phase = self
-            .render
-            .running_pulse_since
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
-        // Cosine, not a sawtooth: the dot has to swell and settle, and a linear ramp snapping
-        // back at the top of each cycle is exactly the blink this is not.
-        let breath = 0.5 + 0.5 * (phase / RUNNING_PULSE_SECS * std::f32::consts::TAU).cos();
+        let breath = self.render.running_pulse.breath;
         let side = super::px_1080(f.h, RUNNING_DOT);
         let inset = super::px_1080(f.h, RUNNING_DOT_INSET);
         let (cx, cy) = (r.right() - inset, r.top() + inset);
         let c = f.canvas;
         // A halo that breathes around a dot that stays put: growing the dot itself would make
         // it read as two different states rather than one thing pulsing.
-        let mut halo = theme::fill(fade(theme::ONLINE_GREEN, 0.35 * breath * alpha));
-        halo.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, side * 0.6, None));
-        c.draw_circle((cx, cy), side, &halo);
+        for ring in (1..=RUNNING_HALO_RINGS).rev() {
+            let step = ring as f32 / RUNNING_HALO_RINGS as f32;
+            let tone = fade(theme::ONLINE_GREEN, 0.22 * (1.0 - step) * breath * alpha);
+            c.draw_circle((cx, cy), side / 2.0 + side * step, &theme::fill(tone));
+        }
         // Ringed in the card's own shadow tone so the dot keeps its edge on a light cover.
         c.draw_circle((cx, cy), side / 2.0 + 1.5, &theme::fill(fade(panel(), 0.85 * alpha)));
         let lit = 0.7 + 0.3 * breath;
@@ -555,7 +555,7 @@ impl App {
         c.draw_rrect(rr(r), &glow);
         draw_card_shadow(c, r, 0.5 * pop);
         self.poster(f, r, game, pop);
-        self.running_dot(f, r, game, pop, now);
+        self.running_dot(f, r, game, pop);
         self.draw_card_strip(f, game, r, pop);
         // The lit edge last, over the art and the strip, so the halo has a boundary to end on.
         c.draw_rrect(rr(r), &theme::stroke(theme::accent(0.82 * focus * pop), 1.5));
