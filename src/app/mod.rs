@@ -842,6 +842,11 @@ impl App {
         if screen_changed {
             let left = self.nav.last_screen;
             self.nav.last_screen = self.nav.screen;
+            // A list screen's rows rise on every arrival, whether it is being opened or
+            // returned to: dropping the widget here is what makes the entrance replay, and
+            // doing it on the one transition hook means a screen reached across a text form
+            // (the address dialog, which seats no list of its own) enters like any other.
+            self.render.list = None;
             // Modal-to-modal cross-fades: `ui::fade` makes the leaving card the entering
             // one's inverse. Anything involving Home is a plain open or close.
             if !matches!(left, Screen::Home) {

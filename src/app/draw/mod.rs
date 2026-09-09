@@ -488,17 +488,18 @@ impl App {
         dialog::draw(f, title, &confirm, focus, motion.as_ref(), alpha, dy);
     }
 
-    /// The kit list for `screen`, made fresh when the screen changes so a new card enters
-    /// with its own rise and no scroll carried over from the last one.
+    /// The kit list for `screen`, seated fresh when the seat is empty or holds another
+    /// screen's — so a card enters with its own rise and no scroll carried over. `advance_frame`
+    /// empties the seat on every screen change; the screen it is tagged with is what keeps the
+    /// two cards of a cross-fade from sharing one widget, since the leaving one is drawn too.
     pub(crate) fn kit_list(&mut self, screen: Screen) -> &mut pf_console_ui::widgets::MenuList {
         let cursor = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
-        let fresh = !matches!(&self.render.list, Some((s, _)) if *s == screen);
-        if fresh {
+        if !matches!(&self.render.list, Some((s, _)) if *s == screen) {
             let mut list = pf_console_ui::widgets::MenuList::new();
             list.jump_to(cursor);
             self.render.list = Some((screen, list));
         }
-        &mut self.render.list.as_mut().expect("just set").1
+        &mut self.render.list.as_mut().expect("just seated").1
     }
 
     /// `None` on any other screen.

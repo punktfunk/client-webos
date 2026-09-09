@@ -263,7 +263,7 @@ impl App {
                 // The exit behaviour may just have changed, and it is what the host menu's
                 // power row is named after.
                 self.latch_host_menu_power();
-                self.nav.screen = Screen::HostMenu;
+                self.nav.resume(Screen::HostMenu);
             }
             _ => {}
         }
