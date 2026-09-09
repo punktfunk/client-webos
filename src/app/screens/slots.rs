@@ -34,8 +34,6 @@ pub(crate) struct ScreenSlots {
     /// while the menu is open still offers Wake, and a magic packet to a running host is
     /// nothing.
     pub(crate) host_menu_power: Option<crate::services::store::ExitAction>,
-    /// The sidebar row `Screen::EditHost` is editing, `None` otherwise.
-    pub(crate) edit_host_index: Option<usize>,
     /// The HDR calibration in progress — its step, its scratch volume and the pattern feed on the
     /// video plane. `None` whenever that screen isn't open, which is also what stops the feed.
     pub(crate) hdr: Option<HdrCalibrationState>,

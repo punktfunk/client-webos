@@ -14,11 +14,7 @@ impl App {
     pub(crate) fn text_form(&self) -> Option<FormCopy<'_>> {
         let (title, subtitle, typed, hint) = match self.nav.screen {
             Screen::EditHost => {
-                let name = self
-                    .screens
-                    .edit_host_index
-                    .and_then(|i| self.hosts.entries.get(i))
-                    .map_or_else(String::new, |e| e.name().to_string());
+                let name = self.host_menu_title();
                 (
                     view::addhost::EDIT_TITLE,
                     view::addhost::edit_subtitle(&name),

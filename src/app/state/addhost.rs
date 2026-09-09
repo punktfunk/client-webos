@@ -52,13 +52,7 @@ impl App {
         );
         self.persist();
         self.rebuild_entries();
-        self.set_home_focus(HomeFocus::Sidebar(
-            self.hosts
-                .entries
-                .iter()
-                .position(|e| e.host() == host && e.port() == port)
-                .unwrap_or(0),
-        ));
+        self.set_home_focus(HomeFocus::Sidebar(self.hosts.entry_index(&host, port).unwrap_or(0)));
         self.nav.screen = Screen::Home;
     }
     /// Shared by `AddHost` and `EditHost`.
