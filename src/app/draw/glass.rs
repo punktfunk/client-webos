@@ -59,7 +59,19 @@ fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) -> bool {
     // taking the size from the frame rather than from the image keeps the two in step on both
     // axes, which a single device-pixels-per-unit ratio cannot when the drawable's aspect is
     // not the display mode's. The clip is what bounds the work to the card.
-    canvas.draw_image_rect(bd.page, None, Rect::from_wh(f.w, f.h), &p);
+    //
+    // Placed against the surface, not against the card: every painter translates by the modal
+    // rise before it gets here, so drawing at the frame's origin would slide the backdrop down
+    // with the card and show the page off-register for the whole open animation. The CTM's own
+    // translation, back in layout units, is exactly what has to come off again.
+    let m = canvas.local_to_device_as_3x3();
+    let (sx, sy) = (m.scale_x(), m.scale_y());
+    let origin = if sx == 0.0 || sy == 0.0 {
+        (0.0, 0.0)
+    } else {
+        (-m.translate_x() / sx, -m.translate_y() / sy)
+    };
+    canvas.draw_image_rect(bd.page, None, Rect::from_xywh(origin.0, origin.1, f.w, f.h), &p);
     canvas.restore();
     true
 }
