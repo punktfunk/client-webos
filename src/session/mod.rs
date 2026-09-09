@@ -11,10 +11,9 @@
 //! rasterizer.
 //!
 //! The module is split by phase: `connect` runs the handshake, `pipeline` builds the decode path
-//! it settled on, `pump` keeps it fed,
-//! and `probe` holds the two handshake-only connections (pairing, speed test). `stage`,
-//! `timeline`, `stats` and `priority` are the shared pieces underneath; the bounded teardown
-//! join is `services::join`, shared with the platform layer.
+//! it settled on, `pump` keeps it fed, and `probe` holds the two handshake-only connections
+//! (pairing, speed test). `stage`, `timeline` and `stats` are the shared pieces underneath;
+//! the bounded teardown join is `services::join`, shared with the platform layer.
 //!
 //! Nothing here touches SDL: the pad-feedback drain, which does, lives with the loop that owns
 //! the SDL objects (`runtime::session_ext`).
@@ -22,7 +21,6 @@ pub mod audio;
 mod connect;
 pub mod pad_audio;
 mod pipeline;
-mod priority;
 pub mod probe;
 mod pump;
 mod stage;

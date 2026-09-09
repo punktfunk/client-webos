@@ -550,19 +550,12 @@ fn device_name(fd: RawFd) -> Option<String> {
 }
 
 fn reader_loop(sink: &impl Fn(HidReport), shared: &Shared) {
-    // Scan at the default niceness: `open`/`ioctl` cost here is the driver's, not scheduling
-    // delay, so boosting priority wouldn't speed it up — it would just pull CPU from the video
-    // pump during exactly the busiest window (stream connect) for no benefit.
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut devices = scan(&mut seen, shared.grab_mouse);
     if devices.is_empty() {
         tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
     }
     store_presence(&devices, shared);
-    // Boosted like the video pump from here on: at nice 0 this thread lost the CPU to the
-    // vendor's decode threads for up to 28ms at a stretch while a 1kHz mouse kept reporting —
-    // exactly the jitter this module exists to remove.
-    super::device::boost_current_thread();
     let mut last_scan = Instant::now();
     let mut dir_mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
     // Rebuilt only on device-set change — a moving 1kHz mouse makes `poll` return continuously,
