@@ -200,6 +200,10 @@ pub fn load_games_async(
 /// host-relative `art_path` (one of `GameEntry::art`'s fields), reusing an
 /// already-built `agent` (see `fetch_games`) to avoid a fresh mTLS handshake per
 /// cover. Decoding happens in `art.rs`, off this module's REST concern.
+/// Content types this build can decode. CDNs ignoring this header (Steam) send WebP, caught
+/// from the header before body downloads. `q=0.1` on wildcard keeps hosts that ignore headers working.
+const ART_ACCEPT: &str = "image/jpeg,image/png,image/*;q=0.1";
+
 pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str) -> Result<Vec<u8>, LibraryError> {
     // Some hosts hand back a full external URL (e.g. a SteamGridDB CDN link) instead
     // of a host-relative path — that can't go through the pinned agent (wrong CA,
@@ -208,24 +212,39 @@ pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str
         return fetch_external_art(art_path);
     }
     let url = format!("{}{art_path}", base_url(addr, mgmt_port));
-    match agent.get(url.as_str()).call() {
-        Ok(mut resp) => resp
-            .body_mut()
-            .read_to_vec()
-            .map_err(|e| LibraryError::BadReply(format!("read art body: {e}"))),
+    match agent.get(url.as_str()).header("Accept", ART_ACCEPT).call() {
+        Ok(mut resp) => read_art_body(&mut resp, art_path),
         Err(e) => Err(classify(e)),
     }
+}
+
+/// The response body, unless `Content-Type` says this build cannot decode it.
+///
+/// Header arrives before body, so early rejection saves downloads from CDNs that ignore
+/// [`ART_ACCEPT`] (e.g. Steam's 8.7 MB covers). Type-less bodies are read; the bytes will tell.
+fn read_art_body(resp: &mut ureq::http::Response<ureq::Body>, what: &str) -> Result<Vec<u8>, LibraryError> {
+    let kind = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase());
+    if let Some(kind) = kind {
+        if kind.starts_with("image/") && !matches!(kind.as_str(), "image/jpeg" | "image/png") {
+            tracing::debug!("art: {what} offered {kind} — not fetching a format this build cannot decode");
+            return Err(LibraryError::BadReply(format!("undecodable art type {kind}")));
+        }
+    }
+    resp.body_mut()
+        .read_to_vec()
+        .map_err(|e| LibraryError::BadReply(format!("read art body: {e}")))
 }
 
 /// Fetches art from a full external URL with the system's default CA trust (no
 /// client cert) — the host's pinned `agent` would reject this CA.
 fn fetch_external_art(url: &str) -> Result<Vec<u8>, LibraryError> {
     let agent = ureq::Agent::new_with_defaults();
-    match agent.get(url).call() {
-        Ok(mut resp) => resp
-            .body_mut()
-            .read_to_vec()
-            .map_err(|e| LibraryError::BadReply(format!("read external art body: {e}"))),
+    match agent.get(url).header("Accept", ART_ACCEPT).call() {
+        Ok(mut resp) => read_art_body(&mut resp, url),
         Err(e) => Err(classify(e)),
     }
 }

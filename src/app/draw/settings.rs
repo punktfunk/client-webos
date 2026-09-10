@@ -8,7 +8,7 @@ use pf_console_ui::theme::{self, W};
 use pf_console_ui::widgets::{MenuList, RowSpec};
 use skia_safe::{Contains, Point, Rect};
 
-use super::{focus_face, glass_card, with_pop, FocusEase, Frame};
+use super::{alpha_layer, focus_face, glass_card, with_pop, FocusEase, Frame};
 use crate::app::state::settingspage::Page;
 
 /// The card as a share of the screen, both axes.
@@ -108,7 +108,7 @@ pub(crate) fn draw(
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     f.fonts.draw(
         c,

@@ -6,7 +6,7 @@ use pf_console_ui::icons::{by_name, draw_icon};
 use pf_console_ui::theme::{self, Fonts, W};
 use skia_safe::{Contains, Point, Rect};
 
-use super::{glass_card, line_h, wrap, Frame};
+use super::{alpha_layer, glass_card, line_h, wrap, Frame};
 
 const WIDTH_FRAC: f32 = 0.78;
 const HEIGHT_FRAC: f32 = 0.84;
@@ -108,7 +108,7 @@ pub(crate) fn draw(
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     let x = f64::from(l.card.left + PAD * k);
     f.fonts.draw(

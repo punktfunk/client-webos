@@ -270,8 +270,57 @@ pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
 /// this loader does and so cannot use the `.raw` beside it. One cache either way: whichever UI
 /// browsed last warms the other, and the same per-host budget and orphan sweep bound both.
 pub(crate) fn cached_cover(host: &str, port: u16, game_id: &str) -> Option<Vec<u8>> {
-    let path = cache_path(&cache_dir(host, port), game_id, ArtKind::Card, false);
-    std::fs::read(path).ok().filter(|b| !b.is_empty())
+    let dir = cache_dir(host, port);
+    let bytes = std::fs::read(cache_path(&dir, game_id, ArtKind::Card, false))
+        .ok()
+        .filter(|b| !b.is_empty())?;
+    // An entry written by a build that cached full-size covers costs ~99 ms to decode, every
+    // visit, forever. Shrink it the first time it is read and this visit is the last one.
+    let Some(shrunk) = shrink_cover(&bytes) else {
+        return Some(bytes);
+    };
+    write_cover(&dir, game_id, &shrunk);
+    Some(shrunk)
+}
+
+/// The size a cached cover is kept at. No client draws one larger than a grid card, which is
+/// a few hundred pixels wide on a 1080p panel even zoomed; everything above this is decode time
+/// nobody sees, paid on every visit.
+const COVER_MAX_W: u32 = 480;
+const COVER_MAX_H: u32 = 720;
+/// Re-encode quality. A cover is photographic and is seen from a couch.
+const COVER_QUALITY: u8 = 85;
+
+/// A cover re-encoded small, as JPEG. `None` when the bytes will not decode or are already
+/// within the cap in both axes AND already JPEG — nothing to gain then.
+///
+/// Only task that actually removes work: a full-size PNG costs ~99 ms to decode here,
+/// re-decoded on every library visit. Sixty of them = six seconds, three-core CPU.
+/// Re-encoded once at draw size, the same cover decodes in a fraction — and as JPEG,
+/// the shell's scaled-decode path takes it (PNG never allowed).
+fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
+    // Already a small JPEG: nothing to gain, and re-encoding would only lose a generation.
+    let small = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .filter(|r| r.format() == Some(image::ImageFormat::Jpeg))
+        .and_then(|r| r.into_dimensions().ok())
+        .is_some_and(|(w, h)| w <= COVER_MAX_W && h <= COVER_MAX_H);
+    if small {
+        return None;
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = if img.width() > COVER_MAX_W || img.height() > COVER_MAX_H {
+        img.resize(COVER_MAX_W, COVER_MAX_H, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut out), COVER_QUALITY);
+    // `into_rgb8`, not `to_rgb8`: `img` is owned and dead after this, so the buffer moves
+    // instead of being copied.
+    img.into_rgb8().write_with_encoder(encoder).ok()?;
+    Some(out)
 }
 
 /// Store encoded cover bytes, then bring the host's directory back inside its budget.
@@ -281,14 +330,24 @@ pub(crate) fn store_cover(host: &str, port: u16, game_id: &str, bytes: &[u8]) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let path = cache_path(&dir, game_id, ArtKind::Card, false);
+    // Shrunk on the way in, so what every later visit decodes is already small — this is the
+    // single funnel both UIs' covers pass through, which is why it belongs here rather than at
+    // one caller.
+    let shrunk = shrink_cover(bytes);
+    write_cover(&dir, game_id, shrunk.as_deref().unwrap_or(bytes));
+    prune_cache(&dir);
+}
+
+/// The cached bytes for `game_id`, without the prune — the caller decides when the directory is
+/// worth walking.
+fn write_cover(dir: &std::path::Path, game_id: &str, bytes: &[u8]) {
+    let path = cache_path(dir, game_id, ArtKind::Card, false);
     let tmp = path.with_extension("tmp");
     // Write-then-rename, like the raw path above: a kill mid-write must not leave a truncated
     // file that later reads as a cover.
     if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    prune_cache(&dir);
 }
 
 fn cache_path(dir: &std::path::Path, game_id: &str, kind: ArtKind, raw: bool) -> PathBuf {
@@ -520,7 +579,16 @@ impl ArtLoader {
             return;
         }
         requested.insert(game_id.to_string());
-        let paths = paths();
+        let mut paths = paths();
+        // Dropped before anything is fetched: a format this build cannot decode costs a full
+        // download and a cache write to end in `load_from_memory` failing.
+        paths.retain(|p| {
+            let keep = decodable(p);
+            if !keep {
+                tracing::debug!("art: {game_id} skipping {p} — not a format this build decodes");
+            }
+            keep
+        });
         if paths.is_empty() {
             return;
         }
@@ -696,6 +764,18 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
             }
         };
 
+        // Sniffed before the decoder is handed 8 MB it will refuse: the extension filter at
+        // queue time cannot see through a content-negotiating CDN, so the bytes are the last
+        // word on what actually arrived.
+        if !decodable_bytes(&bytes) {
+            tracing::warn!(
+                "art: {} served a format this build cannot decode ({} bytes) — dropping it",
+                req.game_id,
+                bytes.len()
+            );
+            let _ = std::fs::remove_file(&cached);
+            continue;
+        }
         let decoded = match image::load_from_memory(&bytes) {
             Ok(d) => d,
             Err(e) => {
@@ -741,6 +821,65 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
         }
         if tx.send(loaded).is_err() {
             return;
+        }
+    }
+}
+
+/// Formats the `image` crate decodes (from `Cargo.toml`: `png`, `jpeg`).
+/// Anything else fails no matter how well it downloads.
+const DECODABLE: [&str; 4] = ["png", "jpg", "jpeg", "jfif"];
+
+/// Whether to fetch `path`. An undecidable extension skips a wasted download;
+/// missing extension is fine (hosts serve extensionless art; bytes decide).
+fn decodable(path: &str) -> bool {
+    let tail = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path);
+    match tail.rsplit_once('.') {
+        // A trailing dot is not a claim about format.
+        Some((_, ext)) if !ext.is_empty() => DECODABLE.iter().any(|k| ext.eq_ignore_ascii_case(k)),
+        _ => true,
+    }
+}
+
+/// Whether `bytes` are a format this build decodes, from the bytes themselves. The URL test
+/// above cannot see through a content-negotiating CDN, so this is the last word.
+fn decodable_bytes(bytes: &[u8]) -> bool {
+    image::guess_format(bytes).is_ok_and(|f| matches!(f, image::ImageFormat::Png | image::ImageFormat::Jpeg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decodable, decodable_bytes};
+
+    #[test]
+    fn only_formats_this_build_decodes_are_fetched() {
+        for ok in [
+            "/appasset?asset=box-art",
+            "https://cdn.example/covers/1234.jpg",
+            "cover.PNG",
+            "a.jpeg?w=600&h=900",
+            "art/cover.",
+        ] {
+            assert!(decodable(ok), "{ok}");
+        }
+        assert!(decodable_bytes(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]));
+        assert!(decodable_bytes(&[0xff, 0xd8, 0xff, 0xe0, 0, 0]));
+        // "RIFF....WEBP", the 8 MB the CX downloaded and threw away.
+        assert!(!decodable_bytes(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(!decodable_bytes(b""));
+        for no in [
+            "https://cdn.example/covers/1234.webp",
+            "cover.AVIF",
+            "hero.gif#frag",
+            "icon.svg",
+            "tile.bmp?v=2",
+        ] {
+            assert!(!decodable(no), "{no}");
         }
     }
 }

@@ -9,7 +9,7 @@ use pf_console_ui::icons::{by_name, draw_icon};
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
 use skia_safe::{Contains, Point, RRect, Rect};
 
-use super::{glass_card, line_h, wrap, Frame};
+use super::{alpha_layer, glass_card, line_h, wrap, Frame};
 use crate::core::screen::PairingFocus;
 use crate::ui;
 
@@ -169,7 +169,7 @@ pub(crate) fn draw(
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     header(f, l.card, title, l.title_baseline, &l.body, l.body_top, hover_close);
     theme::panel(
@@ -330,7 +330,7 @@ pub(crate) fn draw_pair(f: &Frame<'_>, l: &PairLayout, s: &PairState<'_>, hover_
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     header(
         f,

@@ -10,7 +10,7 @@ use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
 use skia_safe::{Color4f, RRect, Rect};
 
 use crate::app::draw::dialog::{self, Motion};
-use crate::app::draw::{line_h, wrap, Frame};
+use crate::app::draw::{alpha_layer, line_h, wrap, Frame};
 use crate::app::screens::confirm::{Confirm, Tone};
 use crate::console::ConsoleGl;
 use crate::core::event::MenuEvent;
@@ -81,7 +81,7 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[String], hint: &str, alpha: f32) {
     let h = stride * lines.len() as f32 + line_h(hint_size) as f32 + 2.0 * STATS_PAD * k;
     let card = Rect::from_xywh(f.w - STATS_INSET * k - w, STATS_INSET * k, w, h);
     let c = f.canvas;
-    c.save_layer_alpha_f(Some(card), alpha);
+    alpha_layer(c, card, alpha);
     c.draw_rrect(
         RRect::new_rect_xy(card, STATS_CORNER * k, STATS_CORNER * k),
         &theme::fill(crate::app::draw::surface()),
@@ -141,7 +141,7 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
     let h = stride * rows.len().max(1) as f32 + 2.0 * LOG_PAD * k;
     let strip = Rect::from_xywh(0.0, f.h - h, f.w, h);
     let c = f.canvas;
-    c.save_layer_alpha_f(Some(strip), alpha);
+    alpha_layer(c, strip, alpha);
     c.draw_rect(strip, &theme::fill(crate::app::draw::surface()));
     for (i, (dx, text, tone)) in rows.iter().enumerate() {
         f.fonts.draw(
@@ -164,7 +164,7 @@ pub(super) fn toast(f: &Frame<'_>, text: &str, alpha: f32) {
     let h = line_h(size) as f32 + 2.0 * TOAST_PAD_Y * k;
     let pill = Rect::from_xywh((f.w - w) / 2.0, TOAST_TOP * k, w, h);
     let c = f.canvas;
-    c.save_layer_alpha_f(Some(pill), alpha);
+    alpha_layer(c, pill, alpha);
     c.draw_rrect(
         RRect::new_rect_xy(pill, h / 2.0, h / 2.0),
         &theme::fill(crate::app::draw::surface()),

@@ -1,18 +1,22 @@
+[Punktfunk](https://punktfunk.unom.io/) is a low-latency desktop and game streaming solution.
 
-# Punktfunk — Low-latency desktop and game streaming client for LG webOS.
+![Download Stats](https://img.shields.io/github/downloads/punktfunk/client-webos/total)
+![GitHub Stars](https://img.shields.io/github/stars/punktfunk/client-webos?style=social)
+![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-d2c9fb)
 
-![Home screen](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/controller-ui-game.jpg)
+## Features
 
 * **Video.** Up to 4K120 with HDR. HEVC or H.264, decoded by the TV's media pipeline.
 * **Bitrate.** Automatic mode adapts to the network, or set a fixed rate up to 200 Mbps.
 * **Audio.** Stereo, 5.1 or 7.1 (webOS 5+), decoded in software or offloaded to media pipeline.
-* **Per-game overrides.** Any game can override the global resolution, frame rate, bitrate, codec, HDR, audio or controller settings.
+* **Per-game profiles.** Any game can override the global resolution, frame rate, bitrate, codec, HDR, audio or controller settings.
 * **Input.** Magic Remote pointer, gamepads, USB keyboard and mouse. Cursor capture for games or absolute for the desktop, gestures.
 * **DualSense.** Adaptive triggers, lightbar, player LEDs, touchpad, gyro, speakers and haptics over Bluetooth or wired.
 * **Host power.** Wake-on-LAN, and configurable host power management for sleep or full shut down.
 * **Game mode (rooted TVs).** Switches picture and sound to Game mode while streaming, and restores the previous settings on exit.
 * **Pairing.** Hosts are found on your network automatically, or added by IP.
 * **Library.** Browse the host's games and launch straight into it, custom game collections.
+* **Input-Optimized UI.** A full-screen interface for gamepads, and a console interface for remote/mouse/keyboard.
 
 Some features are limited on older webOS versions:
 
@@ -23,7 +27,12 @@ Some features are limited on older webOS versions:
 Needs a [punktfunk](https://git.unom.io/unom/punktfunk) host running on your PC — see the
 [host setup guide](https://git.unom.io/unom/punktfunk#readme) to get started.
 
-This app is created by [dyptan-io](https://github.com/dyptan-io).
-**Punktfunk** is created by Enrico Bühler ([unom](https://unom.io)).
-
+This app is created by [dyptan-io](https://github.com/dyptan-io) and Enrico Bühler ([unom](https://unom.io)).
 MIT / Apache-2.0.
+
+## Screenshots
+
+![Controller - Game](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/controller-ui-game.jpg)
+![Controller - Home](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/controller-ui-home.jpg)
+![Console - Home](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/console-kit-home.jpg)
+![Console - Settings](https://raw.githubusercontent.com/punktfunk/client-webos/main/assets/screenshots/console-kit-settings.jpg)

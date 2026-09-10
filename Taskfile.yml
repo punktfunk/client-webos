@@ -1,28 +1,18 @@
-# `build`/`check`/`package`/`lint` run directly on the host — meaningful only on
-# a Linux aarch64 box with Rust installed (CI, already such a runner). The
-# `docker:*` variants wrap the same logic in Docker for local dev, since the
-# webOS cross-toolchain only ships a Linux aarch64 build.
-# webOS-specific plumbing lives in `taskfiles/toolchain.yml`, kept separate so
-# this file stays short.
+# build/check/package/lint run on host (Linux aarch64+Rust only; CI). docker:* wraps for local dev.
+# webOS-specific plumbing in taskfiles/toolchain.yml keeps this file short.
 version: '3'
 
-# Suppress go-task's echo of each command before it runs — keeps task output
-# to just the command's own output (less noise, fewer tokens when read back).
+# Suppress command echo to reduce noise and token usage.
 silent: true
 
-# TV_HOST (used by deploy below) can live in a local, gitignored .env
-# instead of being typed on every invocation — see .env.example.
+# TV_HOST and friends come from a gitignored .env — see .env.example.
 dotenv: ['.env']
 
 env:
-  # Modern CMake refuses vendored libopus's old cmake_minimum_required
-  # (audiopus_sys, pulled in transitively by punktfunk-core's `quic` feature).
+  # CMake workaround for vendored libopus (audiopus_sys via punktfunk-core quic feature).
   CMAKE_POLICY_VERSION_MINIMUM: '3.5'
-  # Prebuilt Skia for the console shell. rust-skia publishes no armv7 archive for any OS, so
-  # this one is ours — built against this very sysroot; sha256 in the release notes.
-  # 🛑 Without it skia-bindings does not fail. It silently builds Skia from source for about an
-  # hour. Every build must log `DOWNLOAD AND INSTALL SUCCEEDED`, and that line is NOT on stdout
-  # under `cargo build -v` — read target/<triple>/<profile>/build/skia-bindings-*/output.
+  # Prebuilt Skia for armv7 (rust-skia ships x86_64/aarch64 only). Without this, skia-bindings
+  # silently builds from source (~1 hour); check target/<triple>/<profile>/build/skia-bindings-*/output for "DOWNLOAD AND INSTALL SUCCEEDED".
   SKIA_BINARIES_URL: 'https://git.unom.io/unom/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
 
 includes:
@@ -59,16 +49,12 @@ vars:
 tasks:
   build:
     desc: >-
-      Cross-compile the release binary directly on the host, no Docker — only
-      meaningful on a Linux aarch64 box with Rust already installed (used by CI;
-      `docker:build` is the local dev entry point). Thin LTO (fast); override
-      with RELEASE_LTO=fat for an optimized build.
+      Cross-compile release binary on host (Linux aarch64 with Rust only; CI uses this,
+      `docker:build` for local dev). Thin LTO; override with RELEASE_LTO=fat for optimized.
     deps: [toolchain:all]
     env:
-      # Thread the packaged version into the binary (`core::VERSION` reads it through
-      # `option_env!`) so the UI's build marker matches the .ipk — Cargo.toml stays a
-      # fixed 0.0.1. Under `docker:build` the host's value arrives as `-e PKG_VERSION`,
-      # so the container reuses it rather than re-deriving it from the mounted git.
+      # Bakes package version into binary (core::VERSION) so UI build marker matches .ipk.
+      # Cargo.toml stays 0.0.1; docker:build receives via -e.
       PKG_VERSION: '{{.PKG_VERSION}}'
     cmds:
       - rustup target add {{.TARGET}}
@@ -83,21 +69,16 @@ tasks:
 
   test:
     desc: >-
-      Run the unit tests on the HOST target. The armv7 cross build cannot execute on a runner,
-      and `lint` only type-checks the tests — this is the only task that runs them. Needs native
-      SDL2, fontconfig and FreeType (`libsdl2-dev libfontconfig-dev libfreetype-dev`);
-      `docker:test` brings its own.
+      Run unit tests on host target. armv7 cross build cannot execute on runner, and lint only
+      type-checks. Needs native SDL2, fontconfig, FreeType; docker:test brings its own.
     env:
-      # The host's Skia comes from rust-skia's own release: our mirror only carries the armv7
-      # archive that upstream does not build. Same version, same key, different host.
+      # rust-skia upstream (our mirror carries armv7 only).
       SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
     cmds:
       - cargo test --bins
 
   lint:
-    desc: >-
-      rustfmt check plus cross-target `cargo clippy` (the lint set in Cargo.toml's
-      `[lints.clippy]`), no Docker (used by CI)
+    desc: rustfmt check plus cross-target cargo clippy (Cargo.toml [lints.clippy])
     deps: [toolchain:all]
     cmds:
       - cargo fmt --check
@@ -107,9 +88,8 @@ tasks:
 
   package:
     desc: >-
-      Build and package dist/*.ipk, no Docker (used by CI). Thin LTO (fast); override with
-      RELEASE_LTO=fat for optimized. PROBES=1 also ships `pfprobe` for on-device
-      diagnostics over SSH.
+      Build and package dist/*.ipk (CI only). Thin LTO; RELEASE_LTO=fat for optimized.
+      PROBES=1 ships pfprobe for on-device SSH diagnostics.
     deps: [build, toolchain:ares-package]
     cmds:
       - task: toolchain:stage-and-package
@@ -118,12 +98,12 @@ tasks:
           PROBES: '{{.PROBES}}'
 
   fmt:
-    desc: Format the whole crate with rustfmt (native — formatting doesn't need the cross toolchain)
+    desc: Format crate with rustfmt (no cross toolchain needed)
     cmds:
       - cargo fmt
 
   docker:build:
-    desc: Cross-compile the release binary inside Docker with thin LTO (fast) — the local dev entry point. Override with RELEASE_LTO=fat for optimized build.
+    desc: Cross-compile release binary in Docker (local dev entry point). Thin LTO; RELEASE_LTO=fat for optimized.
     cmds:
       - task: toolchain:docker-run
         vars:
@@ -131,13 +111,13 @@ tasks:
           RELEASE_LTO: '{{.RELEASE_LTO}}'
 
   docker:check:
-    desc: Quick cross-target `cargo check`, inside Docker — the local dev entry point
+    desc: Quick cross-target cargo check in Docker (local dev entry point)
     cmds:
       - task: toolchain:docker-run
         vars: {TARGET_TASK: check}
 
   docker:test:
-    desc: Run the unit tests inside Docker — the local dev entry point for `test`
+    desc: Run unit tests in Docker (local dev entry point)
     cmds:
       - task: toolchain:docker-run
         vars:
@@ -145,13 +125,13 @@ tasks:
           EXTRA_APT: libsdl2-dev libfontconfig-dev libfreetype-dev
 
   docker:lint:
-    desc: Cross-target `cargo clippy` (the lint set in Cargo.toml's `[lints.clippy]`), inside Docker
+    desc: Cross-target cargo clippy in Docker (Cargo.toml [lints.clippy])
     cmds:
       - task: toolchain:docker-run
         vars: {TARGET_TASK: lint}
 
   docker:package:
-    desc: Build and package dist/*.ipk, inside Docker with thin LTO (fast) — the local dev entry point. Override with RELEASE_LTO=fat for optimized.
+    desc: Build and package dist/*.ipk in Docker (local dev entry point). Thin LTO; RELEASE_LTO=fat for optimized.
     cmds:
       - task: toolchain:docker-run
         vars:
@@ -178,12 +158,11 @@ tasks:
 
   deploy:
     desc: >-
-      Build, package, install, and launch on a real TV via ares-cli-rs only.
-      Usage: task deploy TV_HOST=root@<tv-ip> (or set TV_HOST in .env).
-      TELEMETRY=<host:port> streams logs; TELEMETRY=auto uses this machine's LAN IP
-      and a random port. TELEMETRY_LEVEL (debug/info/warn/error, default debug)
-      sets the minimum streamed level. UI_SCALE=<factor> replaces the panel-size UI
-      scale, so a set this machine cannot measure can be tuned on glass.
+      Build, package, install, and launch on real TV via ares-cli-rs.
+      Usage: task deploy TV_HOST=root@<tv-ip> (or set in .env).
+      TELEMETRY=<host:port> streams logs; TELEMETRY=auto uses LAN IP and random port.
+      TELEMETRY_LEVEL (debug/info/warn/error, default debug) sets minimum level.
+      UI_SCALE=<factor> overrides panel size for tuning on glass.
     deps: [docker:package, register-device]
     vars:
       IPK: dist/{{.APP_ID}}_{{.PKG_VERSION}}_arm.ipk
@@ -225,8 +204,8 @@ tasks:
 
   docker:deploy:
     desc: >-
-      Same as `deploy`, but to a container instead of a TV — a virtual 1080p display served
-      over VNC at http://localhost:6080/vnc.html, logs streamed to this terminal.
+      Like deploy but to container: virtual 1080p over VNC at http://localhost:6080/vnc.html,
+      logs to terminal.
     cmds:
       - task: toolchain:docker-run
         vars:
@@ -238,8 +217,7 @@ tasks:
           EXTRA_DOCKER: -p 127.0.0.1:6080:6080 -v punktfunk-webos-client-home:/root
 
   docker:host:
-    desc: >-
-      Run a punktfunk host in a container to connect the app to.
+    desc: Run a punktfunk host in a container
     cmds:
       - |
         set -eu
@@ -275,7 +253,7 @@ tasks:
           '{"telemetry":"127.0.0.1:9000","telemetry_level":"{{.TELEMETRY_LEVEL}}","webos_sdk":"{{.WEBOS_SDK}}"}'
 
   clean:
-    desc: Remove everything — dist/, .toolchains/, target/, and the Docker volumes
+    desc: Remove dist/, .toolchains/, target/, and Docker volumes
     cmds:
       - rm -rf ./dist ./.toolchains ./target
       - docker volume ls -q --filter name=punktfunk-webos- | xargs docker volume rm -f

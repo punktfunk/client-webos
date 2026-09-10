@@ -1,6 +1,6 @@
 version: '3'
 
-# Match the root Taskfile: suppress go-task's per-command echo.
+# Suppress command echo (like root Taskfile).
 silent: true
 
 vars:
@@ -81,11 +81,10 @@ tasks:
       - cargo install --locked --git https://github.com/webosbrew/ares-cli-rs ares-package
 
   ares-device:
-    # Kept separate from ares-package: these link libssh/OpenSSL/GTK and take
-    # minutes to build, and only `deploy` needs them — CI packages without them.
+    # Separate; links SSH/TLS/GTK, slow build, only deploy uses.
     desc: >-
-      Install the ares-cli-rs device tools (setup-device/install/launch) that
-      deploy uses instead of raw ssh/scp, if they aren't already on PATH
+      Install ares-cli-rs device tools (setup-device/install/launch) for deploy,
+      if not already on PATH
     status:
       - command -v ares-setup-device
       - command -v ares-install
@@ -108,20 +107,13 @@ tasks:
         mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib"
         cp target/{{.TARGET}}/release/punktfunk-webos "$STAGE_DIR/bin/"
         cp -L {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0 "$STAGE_DIR/lib/libSDL2-2.0.so.0"
-        # No libstdc++ here: it is linked statically (scripts/cc-shim.sh). A bundled one wins
-        # over the TV's through DT_RPATH and is then used by the TV's own libraries too, which
-        # breaks the moment a firmware wants a newer GLIBCXX than this SDK ever had.
-        # Skia calls FreeType 2.13's COLRv1 and variable-font entry points (FT_Get_Paint,
-        # FT_Palette_Select, FT_Set_Default_Properties); webOS ships a FreeType that has them
-        # only from 9.0, and below that the app dies before `main` the same way. Ships on every
-        # firmware so one binary covers the whole range.
+        # libstdc++ linked statically; bundled versions break TV's DT_RPATH.
+        # Bundle FreeType 2.13 COLRv1 support; webOS 9.0+ has entry points Skia needs.
         cp -L {{.SYSROOT}}/usr/lib/libfreetype.so.6 "$STAGE_DIR/lib/libfreetype.so.6"
         {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-strip \
           "$STAGE_DIR/bin/punktfunk-webos" "$STAGE_DIR/lib/libSDL2-2.0.so.0" \
           "$STAGE_DIR/lib/libfreetype.so.6"
-        # PROBES=1 ships the headless diagnostic CLI (`pfprobe`) alongside the app, for running
-        # over SSH against a host. Off by default: it is a quarter megabyte the store package has
-        # no use for, and nothing in the app launches it.
+        # PROBES=1 ships pfprobe (diagnostics CLI); omit by default (250KB, SSH-only).
         if [ -n "{{.PROBES}}" ]; then
           cp "target/{{.TARGET}}/release/pfprobe" "$STAGE_DIR/bin/"
           {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-strip "$STAGE_DIR/bin/pfprobe"
@@ -138,8 +130,7 @@ tasks:
         mkdir -p dist
         ares-package "$STAGE_DIR" -o dist --force-arch arm
 
-        # Homebrew manifest is generated in CI by webosbrew-toolbox-gen-manifest
-        # (.github/workflows/webosbrew.yml), not here.
+        # Homebrew manifest generated in CI (webosbrew-toolbox-gen-manifest).
         if [ "$PKG_VERSION" != "$APP_VERSION" ]; then
           mv "dist/${APP_ID}_${APP_VERSION}_arm.ipk" "dist/${APP_ID}_${PKG_VERSION}_arm.ipk"
         fi
