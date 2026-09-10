@@ -14,7 +14,7 @@ use skia_safe::{
     Rect,
 };
 
-use super::{focus_face, line_h, linear, panel, sk, with_pop, Frame};
+use super::{alpha_layer, focus_face, line_h, linear, panel, sk, with_pop, Frame};
 use crate::app::draw::glass;
 use crate::app::grid::{Entrance, GridLayout};
 use crate::app::hosts::HostEntry;
@@ -58,38 +58,6 @@ const SPINNER_R: f64 = 24.0;
 /// `theme::drop_shadow` runs a `MaskFilter` blur per draw, and on this chip that is not the
 /// analytic rounded-rect path it is on a desktop GPU — one per visible card cost about 6ms of
 /// the grid's ~14ms of GPU time per frame, which is most of what made scrolling drop frames.
-///
-/// A nine-patch rather than one raster per card size, because there is never just one size: the
-/// focused card is zoomed and entering cards are mid-pop, so a cache keyed on size would re-bake
-/// several times a frame — worse than what it replaced. Only the corners carry the shape, so a
-/// single bake stretches to every card, and the alpha rides the paint so cards still fade in.
-fn card_shadow() -> Option<Image> {
-    thread_local! {
-        static SHADOW: std::cell::RefCell<Option<Option<Image>>> = const { std::cell::RefCell::new(None) };
-    }
-    SHADOW.with(|c| c.borrow_mut().get_or_insert_with(bake_card_shadow).clone())
-}
-
-/// The shadow's own bed: a rounded rect blurred with [`SHADOW_MARGIN`] of room to spread into on
-/// every side. The body is wide enough that the middle of each edge reaches full opacity before
-/// the opposite corner's blur reaches it — a narrower one stretches out lighter than the shadow
-/// it is standing in for, since the nine-patch repeats that midpoint across the whole card.
-fn bake_card_shadow() -> Option<Image> {
-    let bed = 2 * SHADOW_MARGIN + SHADOW_BODY;
-    let mut surface = skia_safe::surfaces::raster_n32_premul((bed, bed))?;
-    let canvas = surface.canvas();
-    canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-    let mut p = Paint::new(Color4f::new(0.0, 0.0, 0.0, 1.0), None);
-    p.set_anti_alias(true);
-    p.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, SHADOW_SIGMA, None));
-    let (m, side) = (SHADOW_MARGIN as f32, SHADOW_BODY as f32);
-    canvas.draw_rrect(
-        RRect::new_rect_xy(Rect::from_xywh(m, m, side, side), CARD_RADIUS, CARD_RADIUS),
-        &p,
-    );
-    Some(surface.image_snapshot())
-}
-
 /// The blur's reach, its room to spread, and its drop — the kit's own values at `k = 1`
 /// (`theme::drop_shadow`), transcribed because it exports none, so the picture is the one it
 /// drew. A kit bump that retunes them leaves these stale.
@@ -102,17 +70,62 @@ const SHADOW_BODY: i32 = 80;
 /// The corner the nine-patch must not stretch: the radius plus what the blur carries past it.
 const SHADOW_EDGE: i32 = CARD_RADIUS as i32;
 
-/// Draw the cached shadow under `r`. A no-op if the bed could not be rasterized — a card with no
-/// shadow beats no card.
-fn draw_card_shadow(c: &skia_safe::Canvas, r: Rect, alpha: f32) {
-    let Some(shadow) = card_shadow() else {
+/// A blurred rounded rect with [`SHADOW_MARGIN`] of room to spread into on every side, painted
+/// with whatever `paint` builds, baked once and kept.
+///
+/// A nine-patch rather than one raster per card size, because there is never just one size: the
+/// focused card is zoomed and entering cards are mid-pop, so a cache keyed on size would re-bake
+/// several times a frame — worse than what it replaced. Only the corners carry the shape, so a
+/// single bake stretches to every card, and the alpha rides the paint so cards still fade in.
+/// The body is wide enough that the middle of each edge saturates before the opposite corner's
+/// blur reaches it — a narrower one stretches out lighter than what it stands in for.
+fn bake_bed(paint: impl FnOnce() -> Paint) -> Option<Image> {
+    let bed = 2 * SHADOW_MARGIN + SHADOW_BODY;
+    let mut surface = skia_safe::surfaces::raster_n32_premul((bed, bed))?;
+    let canvas = surface.canvas();
+    canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    let mut p = paint();
+    p.set_anti_alias(true);
+    let (m, side) = (SHADOW_MARGIN as f32, SHADOW_BODY as f32);
+    canvas.draw_rrect(
+        RRect::new_rect_xy(Rect::from_xywh(m, m, side, side), CARD_RADIUS, CARD_RADIUS),
+        &p,
+    );
+    Some(surface.image_snapshot())
+}
+
+/// Draw a baked bed over `r`, dropped by `dy`. Graceful on bake failure.
+fn draw_bed(c: &skia_safe::Canvas, bed: Option<&Image>, r: Rect, dy: f32, paint: &Paint) {
+    let Some(bed) = bed else {
         return;
     };
     let edge = SHADOW_MARGIN + SHADOW_EDGE;
-    let centre = IRect::new(edge, edge, shadow.width() - edge, shadow.height() - edge);
+    let centre = IRect::new(edge, edge, bed.width() - edge, bed.height() - edge);
     let m = SHADOW_MARGIN as f32;
-    let bed = r.with_outset((m, m)).with_offset((0.0, SHADOW_DROP));
-    c.draw_image_nine(&shadow, centre, bed, FilterMode::Linear, Some(&alpha_paint(alpha)));
+    c.draw_image_nine(
+        bed,
+        centre,
+        r.with_outset((m, m)).with_offset((0.0, dy)),
+        FilterMode::Linear,
+        Some(paint),
+    );
+}
+
+fn draw_card_shadow(c: &skia_safe::Canvas, r: Rect, alpha: f32) {
+    thread_local! {
+        static SHADOW: std::cell::OnceCell<Option<Image>> = const { std::cell::OnceCell::new() };
+    }
+    let bed = SHADOW.with(|cell| {
+        cell.get_or_init(|| {
+            bake_bed(|| {
+                let mut p = Paint::new(Color4f::new(0.0, 0.0, 0.0, 1.0), None);
+                p.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, SHADOW_SIGMA, None));
+                p
+            })
+        })
+        .clone()
+    });
+    draw_bed(c, bed.as_ref(), r, SHADOW_DROP, &alpha_paint(alpha));
 }
 
 fn px(f: &Frame<'_>, size: f32) -> f64 {
@@ -193,6 +206,56 @@ pub(crate) fn menu_rows_h(rows: usize) -> f32 {
     rows as f32 * MENU_ROW_H + 2.0 * MENU_ROWS_PAD
 }
 
+/// Draw cover art rounded to the card as a rrect shader, not a clipped draw. The clip costs a
+/// GPU coverage mask pass per card per frame; the shader folds the rounding into coverage itself.
+fn draw_cover(c: &skia_safe::Canvas, img: &Image, r: Rect, alpha: f32) {
+    let mut m = skia_safe::Matrix::new_identity();
+    m.set_scale(
+        (
+            r.width() / img.width().max(1) as f32,
+            r.height() / img.height().max(1) as f32,
+        ),
+        None,
+    );
+    m.post_translate((r.left, r.top));
+    // `to_shader` safe here: all images in `render.covers` are GPU-ready.
+    let Some(shader) = img.to_shader((skia_safe::TileMode::Clamp, skia_safe::TileMode::Clamp), linear(), &m) else {
+        return;
+    };
+    let mut p = alpha_paint(alpha);
+    p.set_anti_alias(true);
+    p.set_shader(shader);
+    c.draw_rrect(rr(r), &p);
+}
+
+/// Draw focus halo, baked and white so accent tint at draw time avoids re-bake on palette change.
+/// A blur pass on GPU per frame during nav would drop smoothness.
+fn draw_focus_glow(c: &skia_safe::Canvas, r: Rect, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    thread_local! {
+        static GLOW: std::cell::OnceCell<Option<Image>> = const { std::cell::OnceCell::new() };
+    }
+    let bed = GLOW.with(|cell| {
+        cell.get_or_init(|| {
+            bake_bed(|| {
+                let mut p = theme::stroke(Color4f::new(1.0, 1.0, 1.0, 1.0), 6.0);
+                p.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, GLOW_BLUR / 2.0, None));
+                p
+            })
+        })
+        .clone()
+    });
+    let mut paint = alpha_paint(alpha);
+    // The bed is white; `SrcIn` paints the accent through its alpha.
+    paint.set_color_filter(skia_safe::color_filters::blend(
+        theme::accent(1.0).to_color(),
+        BlendMode::SrcIn,
+    ));
+    draw_bed(c, bed.as_ref(), r, 0.0, &paint);
+}
+
 impl App {
     /// Everything under the modals: the grid or what stands in for it, the status band, the
     /// sidebar. Skipped over live video, where all of it would cover the picture.
@@ -242,7 +305,7 @@ impl App {
         let box_h = 2.0 * stride + 2.0 * STATUS_BG_PAD as f32;
         let block = Rect::from_xywh(grid_x, f.h - box_h, available_w, box_h);
         let c = f.canvas;
-        c.save_layer_alpha_f(Some(block), alpha);
+        alpha_layer(c, block, alpha);
         // Square-cornered: a full-width cut across the bottom edge, not a card.
         c.draw_rect(block, &theme::fill(super::surface()));
         let max_w = available_w - 2.0 * view::home::GRID_PAD as f32;
@@ -450,10 +513,7 @@ impl App {
     fn poster(&self, f: &Frame<'_>, r: Rect, game: &GameEntry, alpha: f32) {
         let c = f.canvas;
         if let Some(img) = self.render.covers.get(&game.id) {
-            c.save();
-            c.clip_rrect(rr(r), ClipOp::Intersect, true);
-            c.draw_image_rect_with_sampling_options(img, None, r, linear(), &alpha_paint(alpha));
-            c.restore();
+            draw_cover(c, img, r, alpha);
             return;
         }
         c.draw_rrect(rr(r), &theme::fill(fade(face_for(&game.title), alpha)));
@@ -544,9 +604,7 @@ impl App {
         let (pop, shrink) = Entrance::progress_of(self.render.grid.arrivals.pop(&game.id), now);
         let r = sk(pop_in_rect(zoom_rect(base, focus, CARD_GROWTH), pop, shrink));
         // Glow first — a halo behind the card, blooming over the whole travel.
-        let mut glow = theme::stroke(theme::accent(0.85 * focus * pop), 6.0);
-        glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, GLOW_BLUR / 2.0, None));
-        c.draw_rrect(rr(r), &glow);
+        draw_focus_glow(c, r, 0.85 * focus * pop);
         draw_card_shadow(c, r, 0.5 * pop);
         self.poster(f, r, game, pop);
         self.running_dot(f, r, game, pop);

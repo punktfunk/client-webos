@@ -116,6 +116,20 @@ pub(super) fn run(
     let mut nav = MenuNav::new();
     let mut sample = MenuSample::default();
     let mut pads: Vec<PadInfo> = Vec::new();
+    // The open pad's name, or `None` when what SDL has open is the Magic Remote. Refreshed on
+    // hotplug only to avoid per-frame string allocations.
+    let mut pad_name: Option<String> = controller
+        .as_ref()
+        .map(sdl2::controller::GameController::name)
+        .filter(|n| !crate::platform::webos::gamepad::is_tv_remote(n));
+    // Both answers SDL's device list can give, sampled on the same hotplug events. Polling them
+    // per frame walked every device and allocated a name for each.
+    let mut pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
+    let mut pad_kind = crate::platform::webos::gamepad::detect_type(game_controller);
+    // What the shell was told last frame, so `pads` is rebuilt only when it changes.
+    // `None` means "not built yet": an inner `None` is a real answer (no pad), so a plain
+    // `Option` could not tell the two apart and left a removed pad's legend standing.
+    let mut last_pref: Option<Option<punktfunk_core::config::GamepadPref>> = None;
     let mut menu_out: Vec<MenuEvent> = Vec::new();
     let mut last_input = Instant::now();
     let mut home_held = false;
@@ -187,6 +201,15 @@ pub(super) fn run(
                             Err(e) => tracing::warn!("controller open failed: {e}"),
                         }
                     }
+                    resample_pads(
+                        game_controller,
+                        controller,
+                        &mut pad_name,
+                        &mut pad_connected,
+                        &mut pad_kind,
+                    );
+                    // The legend describes the handle, so it is rebuilt with it.
+                    last_pref = None;
                 }
                 Event::ControllerDeviceRemoved { which, .. } => {
                     // Only the pad we hold: webOS enumerates the Magic Remote as a controller
@@ -198,6 +221,14 @@ pub(super) fn run(
                         nav.reset();
                         sample = MenuSample::default();
                     }
+                    resample_pads(
+                        game_controller,
+                        controller,
+                        &mut pad_name,
+                        &mut pad_connected,
+                        &mut pad_kind,
+                    );
+                    last_pref = None;
                 }
                 Event::KeyDown {
                     keycode: Some(k),
@@ -287,9 +318,7 @@ pub(super) fn run(
         // The controller SDL has open, unless it is the TV's own remote — webOS enumerates the
         // Magic Remote as a game controller, and treating it as a pad would claim a pad that is
         // not in the room. Its buttons still reach the shell, as keys.
-        let pad = controller
-            .as_ref()
-            .filter(|c| !crate::platform::webos::gamepad::is_tv_remote(&c.name()));
+        let pad = controller.as_ref().filter(|_| pad_name.is_some());
         // The pad through the shared synthesizer, so repeats, dead zone and hysteresis match
         // every other client rather than being re-invented here.
         if let Some(pad) = pad {
@@ -399,17 +428,19 @@ pub(super) fn run(
             idled = IDLE_FRAME_STEP;
         }
         let (w, h) = canvas.window().drawable_size();
-        pads.clear();
         // The switch, watched the way the cursor menus watch theirs: the shell's own
         // "Controller-optimized UI" row writes it, and under "With a controller" an unplugged
         // pad withdraws it without writing anything. Plain `Reenter` — `leave_for_classic`
         // would turn the switch off, and a pad going flat is not the user saying "off".
-        let state = store.snapshot();
-        // 🛑 The SAME expression `stream`'s menu loop enters on, not the open handle: a handle
-        // that went stale while a pad is still attached made the loop enter here, leave, and
-        // enter again forever, drawing no frame — a freeze on the way out of a stream.
-        let pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
-        if !state.settings.gamepad_ui_active(pad_connected) {
+        // 🛑 `pad_connected`, not the open handle: a handle that went stale while a pad is still
+        // attached made the loop enter here, leave, and enter again forever, drawing no frame —
+        // a freeze on the way out of a stream. It is refreshed on the hotplug events below.
+        //
+        // Two fields, read in place: the whole-document clone `snapshot` does was allocating
+        // every known host and every string in it, once a frame, to answer them.
+        let (ui_active, stored_kind) =
+            store.with(|s| (s.settings.gamepad_ui_active(pad_connected), s.settings.gamepad_type()));
+        if !ui_active {
             tracing::info!("console: the controller UI no longer applies — back to the cursor menus");
             break 'ui UiOutcome::Reenter;
         }
@@ -417,22 +448,24 @@ pub(super) fn run(
         // LEGEND, and claiming a pad prints button marks for buttons that are not in the room.
         // It is also what the home screen reads to put Options and Settings on the d-pad
         // instead of on Y and X (`pads.is_empty()`).
-        // Automatic means "whatever is plugged in", so the legend asks SDL rather than
-        // printing the host's Xbox default over a DualSense. An explicit pick still wins:
-        // someone who chose a pad kind wants its glyphs whatever is attached.
         let pad_pref = pad.map(|_| {
-            let stored = state.settings.gamepad_type();
-            let kind = if stored == store::GamepadType::Auto {
-                crate::platform::webos::gamepad::detect_type(game_controller).unwrap_or(stored)
+            let kind = if stored_kind == store::GamepadType::Auto {
+                pad_kind.unwrap_or(stored_kind)
             } else {
-                stored
+                stored_kind
             };
             crate::core::settings::gamepad_pref(kind)
         });
-        if let (Some(pad), Some(pref)) = (pad, pad_pref) {
-            pads.push(pad_info(pad, pref));
+        // Rebuilt only when the legend it prints changes: every field but `pref` is fixed for
+        // the life of the handle, and building it allocated four strings a frame.
+        if last_pref != Some(pad_pref) {
+            last_pref = Some(pad_pref);
+            pads.clear();
+            if let (Some(name), Some(pref)) = (pad_name.clone(), pad_pref) {
+                pads.push(pad_info(name, pref));
+            }
         }
-        let label = pads.first().map(|p| p.name.clone());
+        let label = pad_name.as_deref();
         {
             let surface = console_gl.surface(w, h)?;
             console.frame(
@@ -446,7 +479,7 @@ pub(super) fn run(
                 // box and the screens run off the bottom instead of reflowing. Growing this
                 // one is a kit change, not a client change.
                 &Viewport::plain(w, h),
-                label.as_deref(),
+                label,
                 pad_pref,
                 &pads,
             );
@@ -622,9 +655,9 @@ fn pad_sample(pad: &GameController) -> MenuSample {
 /// The controller chip's entry. Battery and rumble are reported absent rather than guessed:
 /// this client reads neither here, and the actions that would use them
 /// (`ConsoleCmd::PadAction`) are Android's `InputDevice` API.
-fn pad_info(pad: &GameController, pref: punktfunk_core::config::GamepadPref) -> PadInfo {
+fn pad_info(name: String, pref: punktfunk_core::config::GamepadPref) -> PadInfo {
     PadInfo {
-        name: pad.name(),
+        name,
         key: "0".into(),
         pref,
         steam_virtual: false,
@@ -633,6 +666,28 @@ fn pad_info(pad: &GameController, pref: punktfunk_core::config::GamepadPref) -> 
         forwarded: false,
         rumble: false,
     }
+}
+
+/// Re-read everything SDL's device list can tell us, on the hotplug events that change it.
+///
+/// Every answer here walks the device list and allocates a name per device, so it is worth
+/// asking only when a pad actually arrives or leaves — and the events are exact, where a timer
+/// would only approximate them. `pad_name` is `None` when what is open is the TV's own remote:
+/// webOS enumerates the Magic Remote as a controller, and claiming it would print pad glyphs
+/// for buttons that are not in the room.
+fn resample_pads(
+    subsystem: &sdl2::GameControllerSubsystem,
+    controller: &Option<GameController>,
+    pad_name: &mut Option<String>,
+    connected: &mut bool,
+    kind: &mut Option<store::GamepadType>,
+) {
+    *pad_name = controller
+        .as_ref()
+        .map(sdl2::controller::GameController::name)
+        .filter(|n| !crate::platform::webos::gamepad::is_tv_remote(n));
+    *connected = crate::platform::webos::gamepad::any_pad_connected(subsystem);
+    *kind = crate::platform::webos::gamepad::detect_type(subsystem);
 }
 
 /// Window pixels to surface pixels. One is what SDL reports pointer events in, the other is

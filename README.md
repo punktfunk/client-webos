@@ -7,7 +7,7 @@
 
 [![Build](https://github.com/punktfunk/client-webos/actions/workflows/build.yml/badge.svg)](https://github.com/punktfunk/client-webos/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/punktfunk/client-webos?color=6c5bf3&label=release)](https://github.com/punktfunk/client-webos/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/punktfunk/client-webos/latest/total?color=a79ff8&label=downloads)](https://github.com/punktfunk/client-webos/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/punktfunk/client-webos/total?color=a79ff8&label=downloads)](https://github.com/punktfunk/client-webos/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-d2c9fb)](#license)
 
 **Native LG webOS TV client for [punktfunk](https://git.unom.io/unom/punktfunk) — low-latency desktop & game streaming.**

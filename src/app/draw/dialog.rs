@@ -11,7 +11,7 @@ use skia_safe::{Canvas, Color4f, Contains, Point, RRect, Rect};
 
 use pf_console_ui::theme::Fonts;
 
-use super::{glass_card, line_h, scale, ui_rect, wrap, Frame};
+use super::{alpha_layer, glass_card, line_h, scale, ui_rect, wrap, Frame};
 use crate::app::screens::confirm::{Confirm, Tone};
 use crate::app::view;
 use crate::app::App;
@@ -167,7 +167,7 @@ fn draw_on(
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     f.fonts.draw_clipped(
         c,

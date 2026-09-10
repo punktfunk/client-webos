@@ -46,6 +46,13 @@ impl ConsoleStore {
         self.state.lock().expect(POISONED).clone()
     }
 
+    /// Read part of the document in place. The whole-document [`Self::snapshot`] clone costs
+    /// every known host and every string in it, which is a lot to pay for two booleans - and
+    /// the console's render loop asks once a frame.
+    pub fn with<T>(&self, read: impl FnOnce(&Persisted) -> T) -> T {
+        read(&self.state.lock().expect(POISONED))
+    }
+
     /// Change the document and persist all of it. The host-list commands (save, edit, forget)
     /// go through here for the same reason [`SettingsStore::save`] does: one writer, whole
     /// document, so a host edit and a settings change cannot race into disagreeing files.

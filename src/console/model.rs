@@ -489,9 +489,13 @@ impl Service {
 
     fn drain_art(&mut self) {
         let Some(rx) = &self.art else { return };
-        // Bounded per tick: a warm host answers faster than the panel refreshes, and draining
-        // the whole channel here would hold the frame for as long as art keeps arriving.
-        for _ in 0..8 {
+        // Time budget prevents render-thread decode of encoded posters (~50ms each). Count-based
+        // limit cannot stop mid-decode.
+        let started = Instant::now();
+        loop {
+            if started.elapsed() >= ART_DRAIN_BUDGET {
+                return;
+            }
             let Ok((id, item)) = rx.try_recv() else { return };
             match item {
                 ArtItem::Decoded(poster) => self.handles.library.push_decoded(id, poster),
@@ -654,8 +658,12 @@ impl Service {
         };
         tracing::info!("console: forgot {} ({}:{})", gone.name, gone.addr, gone.port);
         // Its covers are keyed by host and would otherwise outlive the record. This is the
-        // last moment the address is known.
-        crate::services::art::reconcile_host_caches(&self.store.snapshot().known_hosts);
+        // last moment the address is known. Off the render thread: cache walk costs during frame.
+        let known = self.store.with(|s| s.known_hosts.clone());
+        std::thread::Builder::new()
+            .name("punktfunk-webos-art-reconcile".into())
+            .spawn(move || crate::services::art::reconcile_host_caches(&known))
+            .ok();
         // It may still be advertising, in which case it comes straight back as a discovered
         // row — unsaved and unpaired, which is the honest state.
         self.last_sweep = None;
@@ -951,40 +959,96 @@ fn spawn_art(
             let Ok(agent) = library::agent(&identity, pin) else {
                 return;
             };
+            // Scale published only on shelf's first frame; fetch thread arrives early. Park to
+            // avoid render-thread decode (~50ms per poster on this `SoC`).
+            let mut sink = ArtSink {
+                tx: &tx,
+                library: &library,
+                parked: Vec::new(),
+            };
             for game in games {
-                let hand_over = |bytes: Vec<u8>| {
-                    let item = library
-                        .art_scale()
-                        .and_then(|k| pf_console_ui::decode_poster_off_thread(&bytes, k))
-                        .map_or(ArtItem::Encoded(bytes), ArtItem::Decoded);
-                    tx.send((game.id.clone(), item))
-                };
-                if let Some(bytes) = crate::services::art::cached_cover(&addr, port, &game.id) {
-                    // A closed channel means the shelf moved on; stop fetching for it.
-                    if hand_over(bytes).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-                // Portrait first (the card's aspect), then the wider art as a fallback — the
-                // same order `services::art` asks in for the old UI's covers.
-                let candidates = [&game.art.portrait, &game.art.header, &game.art.hero];
-                for path in candidates.into_iter().flatten() {
-                    match library::fetch_art(&agent, &addr, mgmt, path) {
-                        Ok(bytes) => {
-                            crate::services::art::store_cover(&addr, port, &game.id, &bytes);
-                            if hand_over(bytes).is_err() {
-                                return;
+                let bytes = crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
+                    // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
+                    [&game.art.portrait, &game.art.header, &game.art.hero]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|path| match library::fetch_art(&agent, &addr, mgmt, path) {
+                            Ok(bytes) => {
+                                crate::services::art::store_cover(&addr, port, &game.id, &bytes);
+                                Some(bytes)
                             }
-                            break;
-                        }
-                        Err(e) => tracing::debug!("console: art {path} for {}: {e}", game.id),
+                            Err(e) => {
+                                tracing::debug!("console: art {path} for {}: {e}", game.id);
+                                None
+                            }
+                        })
+                });
+                // A closed channel means the shelf moved on; stop fetching for it.
+                if let Some(bytes) = bytes {
+                    if sink.push(game.id.clone(), bytes).is_err() {
+                        return;
                     }
                 }
             }
+            sink.finish();
         })
         .ok();
     rx
+}
+
+/// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
+const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
+
+/// Timeout for fetched covers waiting for shelf's decode scale. Bounds the wait if shelf never opens.
+const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
+
+/// Fetched covers: decoded at shelf's scale if published, parked otherwise. Parking avoids
+/// render-thread decode (~50ms per poster on this `SoC`).
+struct ArtSink<'a> {
+    tx: &'a std::sync::mpsc::Sender<(String, ArtItem)>,
+    library: &'a pf_console_ui::LibraryShared,
+    parked: Vec<(String, Vec<u8>)>,
+}
+
+impl ArtSink<'_> {
+    /// Park until scale arrives, maintaining order. Flush any pending first.
+    fn push(&mut self, id: String, bytes: Vec<u8>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
+        let Some(k) = self.library.art_scale() else {
+            self.parked.push((id, bytes));
+            return Ok(());
+        };
+        self.flush(Some(k))?;
+        self.tx.send((id, decode_at(&bytes, Some(k))))
+    }
+
+    /// Timeout for scale; fallback to encoded if shelf never opens.
+    fn finish(&mut self) {
+        let waited = Instant::now();
+        while self.library.art_scale().is_none() && !self.parked.is_empty() {
+            if waited.elapsed() >= ART_SCALE_WAIT {
+                tracing::debug!(
+                    "console: art scale never published — {} covers go encoded",
+                    self.parked.len()
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let _ = self.flush(self.library.art_scale());
+    }
+
+    fn flush(&mut self, k: Option<f64>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
+        for (id, bytes) in std::mem::take(&mut self.parked) {
+            self.tx.send((id, decode_at(&bytes, k)))?;
+        }
+        Ok(())
+    }
+}
+
+/// Decode at scale, or hand over encoded for shell to size.
+fn decode_at(bytes: &[u8], k: Option<f64>) -> ArtItem {
+    k.and_then(|k| pf_console_ui::decode_poster_off_thread(bytes, k))
+        .map_or_else(|| ArtItem::Encoded(bytes.to_vec()), ArtItem::Decoded)
 }
 
 /// The wire catalog in the shell's terms.

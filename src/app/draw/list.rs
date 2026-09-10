@@ -11,7 +11,7 @@ use pf_console_ui::theme::{self, Fonts, W};
 use pf_console_ui::widgets::{MenuList, RowSpec, ROW_H};
 use skia_safe::{Contains, Point, Rect};
 
-use super::{glass_card, line_h, wrap, Frame};
+use super::{alpha_layer, glass_card, line_h, wrap, Frame};
 use crate::app::screens::rowbuttons::RowButton;
 use crate::ui::widgets::{FocusRow, RowKind};
 
@@ -128,7 +128,7 @@ pub(crate) fn draw(
     let k = f.k;
     c.save();
     c.translate((0.0, dy));
-    c.save_layer_alpha_f(Some(l.card), alpha);
+    alpha_layer(c, l.card, alpha);
     glass_card(f, l.card, CORNER);
     f.fonts.draw_clipped(
         c,

@@ -178,6 +178,10 @@ pub(crate) fn line_h(size: f64) -> f64 {
 /// Greedy word wrap on the kit's single-line measure, in device pixels. A word wider than
 /// `max_w` stands alone and overflows rather than being split mid-word.
 pub(crate) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Vec<String> {
+    // One `Font` for the whole wrap. `Fonts::measure` builds one (and clones a typeface) per
+    // call, and this measures once per word — on a coverless card, every frame.
+    let font = fonts.font(w, size);
+    let measure = |s: &str| f64::from(font.measure_str(s, None).0);
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -186,7 +190,7 @@ pub(crate) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Ve
         } else {
             format!("{line} {word}")
         };
-        if line.is_empty() || f64::from(fonts.measure(&candidate, w, size)) <= max_w {
+        if line.is_empty() || measure(&candidate) <= max_w {
             line = candidate;
         } else {
             lines.push(std::mem::replace(&mut line, word.to_string()));
@@ -732,9 +736,52 @@ pub(crate) struct ListCard {
     pub rows: Vec<pf_console_ui::widgets::RowSpec>,
 }
 
+/// Layer with optional alpha, skipped at full alpha. Caller must pair with one `restore`.
+///
+/// The clip prevents overflow (unwrapped words, shadows). No AA: hard rect clip requires match.
+pub(crate) fn alpha_layer(c: &Canvas, r: Rect, alpha: f32) {
+    if alpha >= 1.0 {
+        c.save();
+        c.clip_rect(r, skia_safe::ClipOp::Intersect, false);
+        return;
+    }
+    c.save_layer_alpha_f(Some(r), alpha);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify `alpha_layer` at full alpha is pixel-identical to the layer, by drawing overflow
+    /// that would escape without the clip.
+    #[test]
+    fn skipping_the_layer_at_full_alpha_changes_nothing() {
+        let r = Rect::from_xywh(20.0, 20.0, 60.0, 60.0);
+        let paint = theme::fill(skia_safe::Color4f::new(1.0, 0.0, 0.0, 1.0));
+        let render = |layer: bool| {
+            let mut surface = skia_safe::surfaces::raster_n32_premul((100, 100)).unwrap();
+            let c = surface.canvas();
+            c.clear(skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0));
+            if layer {
+                c.save_layer_alpha_f(Some(r), 1.0);
+            } else {
+                alpha_layer(c, r, 1.0);
+            }
+            // Deliberately over the card's edge, the way an unwrappable word is.
+            c.draw_rect(Rect::from_xywh(0.0, 40.0, 100.0, 10.0), &paint);
+            c.draw_rect(r, &theme::fill(skia_safe::Color4f::new(0.0, 0.0, 1.0, 0.5)));
+            c.restore();
+            let mut pixels = vec![0u8; 100 * 100 * 4];
+            assert!(surface.read_pixels(
+                &skia_safe::ImageInfo::new_n32_premul((100, 100), None),
+                &mut pixels,
+                100 * 4,
+                (0, 0),
+            ));
+            pixels
+        };
+        assert_eq!(render(true), render(false));
+    }
 
     #[test]
     fn scale_follows_the_consoles_rule() {
