@@ -29,4 +29,4 @@ mod timeline;
 
 pub use connect::{connect, ConnectParams, Connected};
 pub use pump::{join_audio_feed, spawn_audio_feed};
-pub use stats::{codec_name, StreamStats};
+pub use stats::StreamStats;

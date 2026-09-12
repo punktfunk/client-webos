@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
+use punktfunk_core::hud::{HudLine, Role};
 use skia_safe::{Color4f, RRect, Rect};
 
 use crate::app::draw::dialog::{self, Motion};
@@ -68,14 +69,27 @@ pub(super) fn wipe(gl: &mut Option<ConsoleGl>, canvas: &sdl2::render::WindowCanv
     Ok(())
 }
 
-pub(super) fn stats(f: &Frame<'_>, lines: &[String], hint: &str, alpha: f32) {
+/// The log tail's WARN tone, shared with the stats card's warning lines.
+const WARN_AMBER: Color4f = Color4f::new(1.0, 0.76, 0.03, 1.0);
+
+/// Headline bright, breakdowns softer, asides dimmer, warnings amber.
+fn role_tone(role: Role) -> Color4f {
+    match role {
+        Role::Primary => theme::fg(1.0),
+        Role::Detail => theme::fg(0.78),
+        Role::Muted => theme::fg(0.6),
+        Role::Warn => WARN_AMBER,
+    }
+}
+
+pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32) {
     let k = f.k;
     let size = STATS_LINE * f64::from(k);
     let stride = line_h(size) as f32;
     let hint_size = STATS_HINT * f64::from(k);
     let widest = lines
         .iter()
-        .map(|l| f.fonts.measure(l, W::Medium, size))
+        .map(|l| f.fonts.measure(&l.text, W::Medium, size))
         .fold(f.fonts.measure(hint, W::Regular, hint_size), f32::max);
     let w = widest + 2.0 * STATS_PAD * k;
     let h = stride * lines.len() as f32 + line_h(hint_size) as f32 + 2.0 * STATS_PAD * k;
@@ -89,15 +103,14 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[String], hint: &str, alpha: f32) {
     theme::panel(c, card, STATS_CORNER, None, PanelStroke::Plain(0.12), k);
     let x = f64::from(card.left + STATS_PAD * k);
     for (i, line) in lines.iter().enumerate() {
-        let tone = theme::fg(if i == 0 { 1.0 } else { 0.7 });
         f.fonts.draw(
             c,
-            line,
+            &line.text,
             x,
             f64::from(card.top + STATS_PAD * k + stride * (i as f32 + 0.8)),
             W::Medium,
             size,
-            tone,
+            role_tone(line.role),
         );
     }
     let hint_w = f.fonts.measure(hint, W::Regular, hint_size);
@@ -116,7 +129,7 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[String], hint: &str, alpha: f32) {
 fn log_tone(line: &str) -> Color4f {
     match line.split_whitespace().next() {
         Some("ERROR") => theme::ERROR,
-        Some("WARN") => Color4f::new(1.0, 0.76, 0.03, 1.0),
+        Some("WARN") => WARN_AMBER,
         Some("INFO") => theme::fg(1.0),
         _ => theme::fg(0.6),
     }

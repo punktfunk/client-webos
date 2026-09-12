@@ -59,8 +59,6 @@ struct VideoPump {
     /// Whether the host's per-content HDR metadata is worth draining. False on every session
     /// where nothing would apply it: an SDR or non-HEVC stream.
     is_hdr: bool,
-    /// Bytes taken off the transport this session — see [`Self::on_frame`].
-    bytes: u64,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
     /// Frame-index gaps pre-cover the reassembler's delayed drop accounting.
@@ -78,7 +76,6 @@ impl VideoPump {
             stage,
             stats,
             is_hdr,
-            bytes: 0,
             last_dropped_seen,
             drop_credit: 0,
             drop_credit_expiry: None,
@@ -111,22 +108,18 @@ impl VideoPump {
                 }
             }
             self.forward_hdr_meta();
+            // The connector matches each 0xCF timing to its frame for the overlay. Drained here
+            // so the bounded plane never fills.
+            while self.client.next_host_timing(Duration::ZERO).is_ok() {}
         }
     }
 
-    /// Pictures the decoder took this session — the counter the overlay reads, owned by this
-    /// thread and mirrored into [`StreamStats`] per delivery.
+    /// Pictures the decoder took this session: the heartbeat log's figure.
     fn frames(&self) -> u64 {
         self.stage.frames()
     }
 
     fn on_frame(&mut self, frame: &punktfunk_core::session::Frame) {
-        // Counted on this thread, then mirrored with a relaxed store — the point is to drop the
-        // atomic read-modify-write, not the freshness: the overlay reads both as deltas over its
-        // own 500ms window, so publishing them on the 2s heartbeat instead would leave three
-        // samples in four reading zero fps and the fourth spiking.
-        self.bytes = self.bytes.saturating_add(frame.data.len() as u64);
-        self.stats.bytes.store(self.bytes, Ordering::Relaxed);
         self.heartbeat();
 
         // Everything wire-shaped, and nothing else: whether this delivery is decodable at all,
@@ -171,8 +164,6 @@ impl VideoPump {
                 }
             }
         }
-        // After the submit, so the published count includes the AU this delivery completed.
-        self.stats.frames.store(self.frames(), Ordering::Relaxed);
     }
 
     /// Refreshes the overlay's backlog figure, and on a slower cadence logs the pump's state.

@@ -134,6 +134,7 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             } else {
                 push(Row::Kit(K::AutoWake), Some("Session"));
                 push(Row::Kit(K::Stats), Some("Statistics"));
+                push(Row::Kit(K::AdvancedStats), None);
                 push(Row::Kit(K::Palette), Some("Interface"));
                 push(Row::Kit(K::GamepadUi), None);
                 push(Row::Kit(K::GamepadUiMode), None);
@@ -804,6 +805,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::PadHaptics
         | RowId::PadSpeaker
         | RowId::Stats
+        | RowId::AdvancedStats
         | RowId::AutoWake
         | RowId::Palette
         | RowId::GamepadUi
