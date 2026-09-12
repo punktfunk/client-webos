@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use punktfunk_core::audio::OpusLayout;
 
 use crate::core::media::{AudioFormat, AudioPlane, AudioSink, MediaClock, NotReady, Samples, VideoSink, VideoSinkCaps};
 
@@ -44,6 +45,32 @@ const _: () = assert!(
 /// One empty Opus frame — `mariotaku/ss4s`'s `opus_empty_frame_211`. Its TOC declares STEREO,
 /// matching the load; the generic `0xF8 0xFF 0xFE` declares mono. (A CX took both.)
 const OPUS_SILENCE: [u8; 3] = [0xec, 0xff, 0xfe];
+
+/// One empty frame in [`OPUS_51_LAYOUT`] — ss4s's `opus_empty_frame_642`: four 5 ms streams,
+/// two coupled, the first three self-delimited.
+const OPUS_51_SILENCE: [u8; 15] = [
+    0xec, 0x02, 0xff, 0xfe, 0xec, 0x02, 0xff, 0xfe, 0xe8, 0x02, 0xff, 0xfe, 0xe8, 0xff, 0xfe,
+];
+
+/// The one 5.1 Opus layout NDL decodes on its plane: `GameStream`'s, the one ss4s's
+/// `IsOpusPassthroughSupported` checks for — (FL,FR) and (RL,RR) coupled, FC and LFE mono. The
+/// wire couples (FC,LFE) instead, so `session::audio` re-encodes a 5.1 session into this one.
+pub const OPUS_51_LAYOUT: OpusLayout = OpusLayout {
+    channels: 6,
+    streams: 4,
+    coupled: 2,
+    mapping: &[0, 1, 4, 5, 2, 3],
+    bitrate: 512_000,
+};
+
+/// One [`PRIME_PACKET_MS`] silent packet for a plane loaded with `channels`.
+fn silence(channels: u8) -> &'static [u8] {
+    if channels == OPUS_51_LAYOUT.channels {
+        &OPUS_51_SILENCE
+    } else {
+        &OPUS_SILENCE
+    }
+}
 
 /// Packet duration of the prime's stamps (ms), matching the real audio plane's 48 kHz / 5 ms
 /// (`SAMPLE_RATE` in `platform::webos::audio`).
@@ -111,17 +138,17 @@ const REAL_FEED_GRACE_MS: i64 = 300;
 /// to name it rather than to act on a guess — the whole of #188 was a misread of this signal.
 const PLANE_CONFIRM_GRACE: Duration = Duration::from_millis(750);
 
-/// The audio plane every V2 load asks for: Opus, stereo, 48 kHz.
+/// The audio plane every V2 load asks for: Opus at 48 kHz, stereo or [`OPUS_51_LAYOUT`].
 ///
 /// **Every accepted V2 load asks for a plane** — NDL only paces the picture against a fed audio
-/// plane (docs/NOTES.md § "NDL's audio plane"). The offload route puts the wire's own Opus on it;
-/// every other session runs [`NdlVideo::run_clock_plane`]'s metronome instead, and the silent
-/// frame's TOC declares stereo either way, so the config is the same one.
-fn plane_config() -> ffi::AudioUnion {
+/// plane (docs/NOTES.md § "NDL's audio plane"). The offload route puts the session's Opus on it;
+/// every other session runs [`NdlVideo::run_clock_plane`]'s metronome instead, whose silence
+/// [`silence`] shapes to the same channel count.
+fn plane_config(channels: u8) -> ffi::AudioUnion {
     ffi::AudioOpusInfo {
         kind: 3, // NDL_AUDIO_TYPE_OPUS
         unknown1: 0,
-        channels: 2,
+        channels: std::ffi::c_int::from(channels),
         unknown2: 0,
         // kHz, not Hz — NDL's own unit, and what ss4s passes (`info->sampleRate / 1000.0`).
         sample_rate: 48.0,
@@ -185,6 +212,8 @@ pub struct NdlVideo {
     /// confirmation on an ingest-gated set), but it must not be the only audio path: nothing
     /// downstream can re-pick the route once the session is running.
     plane_proven: bool,
+    /// Channels the plane was loaded with: 2, or 6 in [`OPUS_51_LAYOUT`]. Fixed for the handle.
+    plane_channels: u8,
     /// HDR mastering metadata that arrived before the video plane had taken a frame.
     /// `NDL_DirectVideoSetHDRInfo` returns success against a pipeline that isn't ingesting yet
     /// but does nothing — the panel never enters HDR mode, and since the host only sends the
@@ -207,11 +236,19 @@ pub struct NdlVideo {
 impl NdlVideo {
     /// Load NDL video stream. Calls `NDL_DirectMediaInit` on first use.
     ///
-    /// `audio` is the plane's prime budget, or `None` for a video-only load. The budget is how
-    /// long the load waits for `LOADCOMPLETED` before starting the stream unconfirmed — see
-    /// [`super::AUDIO_PRIME_BUDGET`] and [`super::AUDIO_PROVE_BUDGET`]. The audio request itself
-    /// is a probe: it fails silently on unsupported models, which retries video-only.
-    pub fn load(app_id: &str, width: i32, height: i32, codec: NdlCodec, audio: Option<Duration>) -> Result<Self> {
+    /// `audio` is the plane's prime budget, or `None` for a video-only load; `plane_channels` is
+    /// its width, 2 or 6. The budget is how long the load waits for `LOADCOMPLETED` before
+    /// starting the stream unconfirmed — see [`super::AUDIO_PRIME_BUDGET`] and
+    /// [`super::AUDIO_PROVE_BUDGET`]. The audio request itself is a probe: it fails silently on
+    /// unsupported models, which retries video-only.
+    pub fn load(
+        app_id: &str,
+        width: i32,
+        height: i32,
+        codec: NdlCodec,
+        audio: Option<Duration>,
+        plane_channels: u8,
+    ) -> Result<Self> {
         ensure_not_poisoned()?;
         let fns = ffi::v2()?;
         ensure_init(app_id, true)?;
@@ -240,7 +277,7 @@ impl NdlVideo {
             // resources, docs/NOTES.md), and the snapshot precedes the attempt so a settle cannot
             // wait out an `UNLOADCOMPLETED` already spent.
             let unloads_before = super::unload_count();
-            match Self::try_load(fns, video, Some(budget)) {
+            match Self::try_load(fns, video, Some(budget), plane_channels) {
                 Ok(loaded) => return Ok(loaded),
                 // Loud, because a video-only load streams unpaced for the rest of the session
                 // (issue #188) and every later symptom reads as something else.
@@ -253,7 +290,7 @@ impl NdlVideo {
             // land BEFORE arming below rather than racing them.
             settle_before_retry(unloads_before);
         }
-        Self::try_load(fns, video, None)
+        Self::try_load(fns, video, None, plane_channels)
     }
 
     /// One `NDL_DirectMediaLoad` attempt, given its budget to report `LOADCOMPLETED` — priming
@@ -261,11 +298,16 @@ impl NdlVideo {
     ///
     /// An audio-enabled attempt that does not confirm is still returned: unconfirmed is a normal
     /// state for one, not a failure (see [`Self::load`]).
-    fn try_load(fns: &'static ffi::V2, video: ffi::VideoInfo, audio: Option<Duration>) -> Result<Self> {
+    fn try_load(
+        fns: &'static ffi::V2,
+        video: ffi::VideoInfo,
+        audio: Option<Duration>,
+        plane_channels: u8,
+    ) -> Result<Self> {
         let mut info = ffi::DataInfo {
             video,
             audio: if audio.is_some() {
-                plane_config()
+                plane_config(plane_channels)
             } else {
                 ffi::AudioUnion::SILENT
             },
@@ -280,7 +322,7 @@ impl NdlVideo {
         // not one budget twice: the audio one buys a fast confirmation and gives up cheaply, the
         // video one is the picture's own bound.
         let (primed_pts_ms, confirmed) = match audio {
-            Some(budget) => Self::prime_audio(fns, load_instant, budget),
+            Some(budget) => Self::prime_audio(fns, load_instant, budget, silence(plane_channels)),
             None => (0, wait_load_completed()),
         };
         // FATAL is not "unconfirmed", it is gone — and unconfirmed is the only state an
@@ -300,12 +342,13 @@ impl NdlVideo {
             feed_unblocked: AtomicBool::new(confirmed),
             plane_check_ms: AtomicI64::new(i64::MAX),
             plane_proven: audio.is_some() && confirmed,
+            plane_channels,
             pending_hdr: Mutex::new(None),
             applied_hdr: Mutex::new(None),
         })
     }
 
-    /// Feed silent Opus packets until the audio-enabled load reports `LOADCOMPLETED`, bounded by
+    /// Feed `silence` packets until the audio-enabled load reports `LOADCOMPLETED`, bounded by
     /// `budget`. Returns the highest stamp fed and whether the load confirmed.
     ///
     /// Not confirming is not a refusal. Sets differ in what they report the callback against, and
@@ -336,8 +379,7 @@ impl NdlVideo {
     /// the player-clock domain: the ceiling sits exactly [`PRIME_LEAD`] packets above the clock,
     /// the same lead every later feeder targets, so the clock overtakes it within one lead however
     /// long the load took.
-    fn prime_audio(fns: &'static ffi::V2, load_instant: Instant, budget: Duration) -> (i64, bool) {
-        let silence = &OPUS_SILENCE[..];
+    fn prime_audio(fns: &'static ffi::V2, load_instant: Instant, budget: Duration, silence: &[u8]) -> (i64, bool) {
         let mut pts_ms = 0;
         while !LOAD_COMPLETED.fired() {
             // A reported fatal state is the one answer that will not change by waiting, so the
@@ -451,7 +493,7 @@ impl NdlVideo {
     /// audio plane's only feed path, so no real packet can land mid-burst and read a stale ceiling
     /// — it either precedes this and is picked up by the floor, or follows the final publish.
     fn burst_silence(&self, from_ms: i64, target_ms: i64) -> Result<i64> {
-        let silence = &OPUS_SILENCE[..];
+        let silence = silence(self.plane_channels);
         let _ffi = lock_ffi();
         let mut pts_ms = from_ms.max(self.last_audio_pts_ms.load(Ordering::Relaxed));
         while pts_ms < target_ms {
@@ -775,7 +817,9 @@ impl AudioSink for NdlVideo {
     /// What the load asked for, and what every silence burst here already speaks — see
     /// [`plane_config`].
     fn format(&self) -> AudioFormat {
-        AudioFormat::Opus { channels: 2 }
+        AudioFormat::Opus {
+            channels: self.plane_channels,
+        }
     }
 
     /// `host_pts_ns` is ignored — the plane stamps off the player clock, which is the whole point

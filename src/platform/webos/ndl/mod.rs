@@ -38,7 +38,7 @@ use anyhow::{bail, Result};
 
 use super::device::{self, NdlGeneration};
 
-pub use v2::NdlVideo;
+pub use v2::{NdlVideo, OPUS_51_LAYOUT};
 
 /// `NDL_VIDEO_TYPE` values this client can request (matches the codec the host's
 /// `Welcome` resolved — see `punktfunk_core::quic::CODEC_*`).
