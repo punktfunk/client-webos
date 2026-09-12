@@ -112,6 +112,8 @@ pub(super) fn run_ui_flow(
     let mut quit_dialog_was_active = false;
     // The blurred page a frosted modal card sits on, held across frames — see the frame block.
     let mut page: Option<skia_safe::Image> = None;
+    let mut drawable_size = canvas.window().drawable_size();
+    let mut backdrop_was_moving = false;
     'ui: loop {
         // Start of this tick, for the loop's own pacing against `TICK_BUDGET`.
         let frame_start = Instant::now();
@@ -347,12 +349,8 @@ pub(super) fn run_ui_flow(
                 .map(|r| sdl2::rect::Rect::new(r.x(), r.y(), r.width(), r.height()))
         });
         text_input.set_active(wants_text, rect.flatten());
-        // Five reasons to render: dirty, animations running, tiles pending,
-        // spinner animating, or log overlay due for refresh (~2Hz).
-        // 16ms sleep when none holds keeps SoC idle.
-        // The quit dialog runs its own open/close fade and focus-pop, so keep ticking
-        // while it (or its close-fade) is on screen, and force one redraw on the frame it
-        // finally clears so it doesn't linger over the menu.
+        // Redraw once after the quit dialog's close fade clears.
+        let quit_dialog_animating = quit_dialog.tick();
         let quit_dialog_active = quit_dialog.frame().is_some();
         if quit_dialog_was_active && !quit_dialog_active {
             dirty = true;
@@ -361,46 +359,45 @@ pub(super) fn run_ui_flow(
         if let Some(msg) = app.take_toast() {
             notif.show(msg);
         }
-        // Polled every tick like the streaming loop's toast, not gated behind
-        // `content_dirty` — its own fade needs frames regardless of anything else.
+        // Toast fades need frames even when content is idle.
         let notif_frame = notif.frame().map(|(t, a)| (t.to_string(), a));
         if app.poll_press() {
             dirty = true;
         }
-        let animating = app.tick_animations()
+        let (app_animating, backdrop_changed) = app.tick_animations();
+        let animating = app_animating
+            || backdrop_was_moving
             || !app.render.grid.reveal.is_revealed()
-            || quit_dialog_active
+            || quit_dialog_animating
             || notif_frame.is_some();
+        let (dw, dh) = canvas.window().drawable_size();
+        dirty |= drawable_size != (dw, dh);
+        drawable_size = (dw, dh);
         let log_overlay_due = log_overlay_state() != LogOverlayState::Off
             && log_overlay_last.is_none_or(|t| t.elapsed() >= Duration::from_millis(500));
         if !dirty && !animating && !log_overlay_due {
-            // Blocked on the event queue rather than asleep for the rest of the budget:
-            // nothing on this branch is animating, so the next thing that can change a pixel
-            // is an SDL event, and waiting for it both wakes the SoC less often and drops the
-            // up-to-16ms delay a plain sleep put between a keypress and the poll that sees it.
-            // The timeout keeps the loop's own polling (discovery, art, reachability) on the
-            // same cadence it had.
+            // Wake on input; the timeout preserves background polling cadence.
             let elapsed = frame_start.elapsed();
             if elapsed < TICK_BUDGET {
                 crate::platform::webos::input::wait_for_event(TICK_BUDGET - elapsed);
             }
             continue;
         }
+        let backdrop_dirty = dirty || backdrop_changed || backdrop_was_moving || !app.render.grid.reveal.is_revealed();
+        backdrop_was_moving = backdrop_changed;
         dirty = false;
+        // Publish the palette before clearing or caching any pixels from this frame.
+        app.apply_ink();
         app.advance_frame(display_mode.w as u32);
         app.prepare_frame(Size::new(display_mode.w as u32, display_mode.h as u32));
-        // The log tail's text is read on the 500 ms cadence; between reads the last lines
-        // are drawn as they were, so an animating menu does not lock the log per frame.
+        // Cache log lines between refreshes to avoid locking the log per frame.
         if log_overlay_due {
             log_overlay_last = Some(Instant::now());
             log_lines = log_overlay_lines();
         } else if log_overlay_state() == LogOverlayState::Off {
             log_lines = None;
         }
-        // The frame, on the GL context. Layout is in `display_mode` units; the drawable is
-        // documented to differ from the window on webOS (handoff trap 10), so it is scaled
-        // rather than assumed equal.
-        let (dw, dh) = canvas.window().drawable_size();
+        // webOS drawable dimensions can differ from the layout's display_mode units.
         let dt = last_frame.elapsed().as_secs_f64().min(0.1);
         last_frame = Instant::now();
         {
@@ -411,23 +408,18 @@ pub(super) fn run_ui_flow(
                 dw as f32 / display_mode.w.max(1) as f32,
                 dh as f32 / display_mode.h.max(1) as f32,
             ));
-            app.apply_ink();
             kit_fonts.begin_frame();
             // Scoped so the frame's borrow of the canvas ends before the snapshot below.
             {
                 let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
                 app.draw_home(&frame, dt);
             }
-            // The page a frosted card blurs: snapshotted and blurred ONCE, on the first frame
-            // that something frosts, and held until nothing does. Both cost GPU time on the frame
-            // a card opens, and neither result changes while the card is up, because the page it
-            // froze is exactly the page behind it. The quit dialog counts as a frosting card: it
-            // is the same glass, and it only ever opens over Home.
+            // Overlay frames reuse the blur; content events and background motion invalidate it.
             if !(app.modal_visible() || quit_dialog_active) {
                 page = None;
-            } else if page.is_none() {
+            } else if page.is_none() || backdrop_dirty {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
-                let k = crate::app::draw::scale(display_mode.h as u32);
+                let k = crate::app::draw::scale(display_mode.h as u32) * dh as f32 / display_mode.h.max(1) as f32;
                 page = snap.and_then(|snap| crate::app::draw::glass::blur_page(surface, &snap, k));
             }
             let c = surface.canvas();

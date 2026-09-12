@@ -261,7 +261,14 @@ impl ConfirmDialog {
     }
 
     pub(super) fn tick(&mut self) -> bool {
-        self.fade.tick()
+        let mut animating = self.fade.tick();
+        if let Some(t) = self.focus_anim {
+            if t.elapsed() >= ui::animation::FOCUS_POP {
+                self.focus_anim = None;
+            }
+            animating = true;
+        }
+        animating
     }
 
     /// Pointer and pad input while open. The layout is the same one [`Self::draw`] draws.
@@ -283,12 +290,15 @@ impl ConfirmDialog {
         );
         match *event {
             Event::MouseMotion { x, y, .. } => {
-                self.hover_close = l.on_close(x, y);
+                let hover_close = l.on_close(x, y);
+                let hover_changed = self.hover_close != hover_close;
+                self.hover_close = hover_close;
                 return match l.button_at(x, y) {
                     Some(i) if i != focus => {
                         self.set_focus(i);
                         Some(ConfirmAction::Navigated)
                     }
+                    _ if hover_changed => Some(ConfirmAction::Navigated),
                     _ => None,
                 };
             }
@@ -386,5 +396,46 @@ impl Notification {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+
+    #[test]
+    fn close_hover_requests_redraw_only_when_changed() {
+        let fonts = theme::build_fonts().unwrap();
+        let mut dialog = ConfirmDialog::new("Quit?", "Close app", None, "Quit", Tone::Danger);
+        dialog.focus = Some(0);
+        let l = dialog::layout(&fonts, 1920.0, 1080.0, crate::app::draw::scale(1080), "Close app");
+        let motion = |x, y| sdl2::event::Event::MouseMotion {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mousestate: sdl2::mouse::MouseState::from_sdl_state(0),
+            x,
+            y,
+            xrel: 0,
+            yrel: 0,
+        };
+        let enter = motion(l.close.center_x() as i32, l.close.center_y() as i32);
+        assert!(dialog.handle_event(&enter, &fonts, 1920, 1080).is_some());
+        assert!(dialog.hover_close);
+        assert!(dialog.handle_event(&enter, &fonts, 1920, 1080).is_none());
+        assert!(dialog.handle_event(&motion(0, 0), &fonts, 1920, 1080).is_some());
+        assert!(!dialog.hover_close);
+    }
+
+    #[test]
+    fn settled_dialog_stays_visible_without_requesting_frames() {
+        let mut dialog = ConfirmDialog::new("Quit?", "Close app", None, "Quit", Tone::Danger);
+        dialog.focus = Some(0);
+        dialog.focus_anim = Some(Instant::now() - ui::animation::FOCUS_POP);
+        assert!(dialog.tick());
+        assert!(!dialog.tick());
+        assert!(dialog.frame().is_some());
+        dialog.dismiss();
+        assert!(dialog.tick());
     }
 }

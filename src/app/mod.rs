@@ -587,16 +587,14 @@ impl App {
         self.handle_menu_event(MenuEvent::Back, screen_w, screen_h)
     }
 
-    /// Advances every live animation one tick — the eased scroll, the focus pop,
-    /// the modal fade — and reports whether anything is still moving (the main
-    /// loop keeps rendering while true). Expired animations report one final
-    /// `true` so their end state gets drawn.
-    pub fn tick_animations(&mut self) -> bool {
+    /// Returns `(redraw, backdrop_changed)`, including a final redraw when animations settle.
+    pub fn tick_animations(&mut self) -> (bool, bool) {
         let now = Instant::now();
         let dt = self.last_tick.map_or(ui::animation::SCROLL_STEP_TICK, |t| now - t);
         self.last_tick = Some(now);
-        let mut animating =
+        let mut backdrop_changed =
             ui::animation::ease_scroll(&mut self.render.grid.scroll, self.render.grid.scroll_target, dt);
+        let mut animating = false;
         if let Some(t) = self.render.focus_anim {
             let duration = match self.home_focus {
                 HomeFocus::Grid(_) => ui::animation::CARD_FOCUS_POP,
@@ -605,13 +603,12 @@ impl App {
             if t.elapsed() >= duration {
                 self.render.focus_anim = None;
             }
-            animating = true;
+            backdrop_changed = true;
         }
         if self.render.modal.fade.tick() {
             animating = true;
         }
-        // The hero loading screen keeps panning for as long as the launch is on screen,
-        // which (unlike the fade) is however long the handshake takes.
+        // Keep panning until the launch handshake finishes.
         if self
             .launch_anim
             .is_some_and(|t| t.elapsed() < hero::LAUNCH_FADE || self.render.hero.showing())
@@ -624,9 +621,9 @@ impl App {
             }
             animating = true;
         }
-        // Disarmed by `poll_press` (the render loop retires the dip), not here.
+        // `poll_press` disarms the dip.
         if self.render.press.armed() {
-            animating = true;
+            backdrop_changed = true;
         }
         if let Some((t, _, _)) = self.render.modal.switch_anim {
             if t.elapsed() >= ui::animation::FOCUS_POP {
@@ -634,23 +631,18 @@ impl App {
             }
             animating = true;
         }
-        // The lifetime outranks `home_status_sticky`: sticky defends a line against the
-        // library reload's clear, not against the clock.
-        // Only the expiring frame reports `animating` — the idle branch's `wait_for_event`
-        // still times out at `TICK_BUDGET`, so this runs on schedule without holding the
-        // SoC at 60Hz for the whole 15s.
+        // Idle polling handles deadlines without continuous redraws.
         if let Some((_, line)) = self
             .library_status_due
             .take_if(|(t, _)| t.elapsed() >= LIBRARY_STATUS_DELAY)
         {
-            // A fetch that already landed needs no line — and must not overwrite whatever
-            // `drain_games` put up instead. Only a line that actually goes up is a redraw.
+            // Preserve the status set by `drain_games` if the fetch has finished.
             if self.library_fetch_in_flight() {
                 self.set_home_status(Some(line), false);
-                animating = true;
+                backdrop_changed = true;
             }
         }
-        // Every frame of the fade out is a redraw; the frame after it is the clear.
+        // Sticky status survives library reloads, but still expires.
         if self
             .home_status_shown_at
             .is_some_and(|t| t.elapsed() >= HOME_STATUS_LIFETIME)
@@ -658,40 +650,33 @@ impl App {
             if self.home_status_alpha().is_none() {
                 self.set_home_status(None, false);
             }
-            animating = true;
+            backdrop_changed = true;
         }
-        // The held card's submenu: its rise, and the selection band's slide between rows.
-        // Both run off clocks on `CardMenu`, not off `focus_anim` — without reporting them
-        // here the loop parks in `wait_for_event` mid-rise (the auto-repeat KeyDowns the
-        // hold swallows set no `dirty`), and the panel finishes only when OK is released.
         if self.card_menu.as_mut().is_some_and(state::cardmenu::CardMenu::tick) {
-            animating = true;
+            backdrop_changed = true;
         }
         if self.render.grid.card_pops_running() || self.render.grid.reveal.dissolving() {
+            backdrop_changed = true;
+        }
+        if self.render.list.as_ref().is_some_and(|(_, l)| l.animating()) {
             animating = true;
         }
-        // The kit list and the two focus eases settle on their own clocks, past the pop.
-        if self.render.list.as_ref().is_some_and(|(_, l)| l.animating())
-            || self.render.sidebar_focus.animating()
-            || self.render.tab_focus.animating()
-        {
-            animating = true;
+        if self.render.sidebar_focus.animating() || self.render.tab_focus.animating() {
+            backdrop_changed = true;
         }
-        // Stepped animation: always tick for state consistency, but only animate when
-        // visible (Home + running game). See RunningPulse.
+        // Tick even while hidden to keep pulse state consistent.
         let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
         if self.render.running_pulse.tick(now, dot_live) {
-            animating = true;
+            backdrop_changed = true;
         }
-        // The mark's entrance, from the sidebar's first frame.
         if self
             .render
             .mark_shown_at
             .is_some_and(|t| t.elapsed().as_secs_f32() < pf_console_ui::brand::INTRO_SECS)
         {
-            animating = true;
+            backdrop_changed = true;
         }
-        animating
+        (animating || backdrop_changed, backdrop_changed)
     }
 
     /// Queues the whole document for the background writer. Every mutation of settings, hosts or

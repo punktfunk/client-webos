@@ -645,7 +645,7 @@ impl App {
         let frosted = menu.is_some()
             && (self.render.covers)
                 .get(&game.id)
-                .is_some_and(|img| glass::frost_over_art(c, pin_id, img, r, window, f.k));
+                .is_some_and(|img| glass::frost_over_art(c, img, r, window, f.k));
         if !frosted {
             c.draw_rect(window, &theme::fill(super::surface()));
         }
