@@ -34,7 +34,6 @@ impl App {
             Screen::EditHost => self.handle_edit_host_event(ev),
             Screen::About => self.handle_about_event(ev, screen_w, screen_h),
             Screen::HdrCalibration => self.handle_hdr_calibration_event(ev),
-            Screen::SendLogs => self.handle_send_logs_event(ev),
             Screen::Collections => self.handle_collections_event(ev, screen_w, screen_h),
             Screen::RenameCollection => self.handle_name_collection_event(ev, screen_w, screen_h),
             Screen::RemoveCollection => self.handle_remove_collection_event(ev),
@@ -88,7 +87,6 @@ impl App {
             Screen::Wake
             | Screen::ForgetHost
             | Screen::SpeedTest
-            | Screen::SendLogs
             | Screen::RemoveCollection
             | Screen::ResetHdrCalibration
             | Screen::DeleteProfile => true,

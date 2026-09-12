@@ -36,7 +36,6 @@ pub(crate) const fn ported(screen: Screen) -> bool {
     matches!(
         screen,
         Screen::ForgetHost
-            | Screen::SendLogs
             | Screen::RemoveCollection
             | Screen::ResetHdrCalibration
             | Screen::HostMenu

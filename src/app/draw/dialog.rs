@@ -1,5 +1,5 @@
 //! The two-button confirm dialog on the kit: one glass card, a title, a wrapped subtitle,
-//! a close mark and two buttons. What differs between Forget host, Send logs and Reset is
+//! a close mark and two buttons. What differs between Forget host, Wake and Reset is
 //! the [`Confirm`] descriptor; what is the same is here, once.
 //!
 //! [`layout`] is the geometry, in the frame's pointer units. The hit tests in
@@ -305,7 +305,6 @@ fn tone_color(tone: Tone) -> Color4f {
 pub(crate) fn title_of(screen: Screen) -> Option<&'static str> {
     Some(match screen {
         Screen::ForgetHost => view::forget::TITLE,
-        Screen::SendLogs => view::sendlogs::TITLE,
         Screen::RemoveCollection => view::collections::REMOVE_TITLE,
         Screen::ResetHdrCalibration => view::hdrcalibration::RESET_TITLE,
         Screen::DeleteProfile => view::profile::DELETE_TITLE,
@@ -423,9 +422,12 @@ mod tests {
         let (l, _) = render(0);
         assert!((l.card.center_x() - W_PX as f32 / 2.0).abs() <= 1.0);
         assert!((l.card.center_y() - H_PX as f32 / 2.0).abs() <= 1.0);
-        // The Send-logs copy is long enough to wrap, and a taller card stays centred.
+        // Copy this long wraps, and a taller card stays centred.
         let fonts = theme::build_fonts().unwrap();
-        let tall = layout(&fonts, W_PX as f32, H_PX as f32, scale(H_PX), view::sendlogs::SUBTITLE);
+        let long = "Long copy wraps onto more than one line, and the card grows to hold it. This \
+                    sentence runs on for as long as the longest dialog copy does, so the card it \
+                    measures is taller than the one-line case.";
+        let tall = layout(&fonts, W_PX as f32, H_PX as f32, scale(H_PX), long);
         assert!(tall.body.len() >= 2, "{:?}", tall.body);
         assert!(tall.card.height() > l.card.height());
         assert!((tall.card.center_y() - H_PX as f32 / 2.0).abs() <= 1.0);

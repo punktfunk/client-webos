@@ -108,7 +108,7 @@ pub(super) fn run(
         handles.console.set_notice(notice);
     }
 
-    // What this panel costs, for the log Diagnostics ▸ Send logs carries — see `core::perf`.
+    // What this panel costs, for the log "Send logs to host" carries — see `core::perf`.
     // Labelled by where the shell came up: entering on a shelf is the case that loads art, and
     // the case the CX reports as slow.
     let mut perf = Perf::new();

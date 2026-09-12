@@ -5,7 +5,7 @@
 //! ever produced. This turns that into figures: how long a frame takes on the CPU here, and how
 //! much of it is cover art being decoded.
 //!
-//! Summaries go to the log at INFO, so Diagnostics ▸ Send logs carries them without anyone
+//! Summaries go to the log at INFO, so "Send logs to host" carries them without anyone
 //! needing a shell on the TV. They are emitted on a timer and once on the way out — a handful
 //! of lines per session rather than a stream.
 //!

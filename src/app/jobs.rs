@@ -9,7 +9,7 @@
 
 use std::sync::mpsc::Receiver;
 
-use crate::app::state::{reach::Reachability, sendlogs::SendLogsMsg, speedtest::SpeedTestMsg};
+use crate::app::state::{reach::Reachability, speedtest::SpeedTestMsg};
 use crate::app::PairingOutcome;
 use crate::services::art::ArtLoader;
 use crate::services::discovery::Discovery;
@@ -31,8 +31,8 @@ pub(crate) struct Jobs {
     pub(crate) reach: Option<Receiver<Reachability>>,
     /// Delivers the background probe's progress/result — dropping it cancels.
     pub(crate) speed_test: Option<Receiver<SpeedTestMsg>>,
-    /// Delivers the background log upload's result; `None` when no upload is in flight.
-    pub(crate) send_logs: Option<Receiver<SendLogsMsg>>,
+    /// Delivers the background log upload's status line; `None` when no upload is in flight.
+    pub(crate) send_logs: Option<Receiver<Result<String, String>>>,
     /// Answers [`App::start_root_probe`].
     pub(crate) rooted: Option<Receiver<bool>>,
     /// Answers [`App::start_power_probe`] — whether this pairing may drive the host's power.

@@ -32,7 +32,6 @@ impl App {
             | Screen::EditHost
             | Screen::About
             | Screen::SpeedTest
-            | Screen::SendLogs
             // A scrolling list, counted by `scroll_list_row_count`; its name dialog is a
             // text form with no rows at all.
             | Screen::Collections

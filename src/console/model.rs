@@ -21,6 +21,7 @@ use pf_console_ui::{
     WakeStatus,
 };
 
+use crate::app::state::sendlogs::{upload_to_host, HostTarget};
 use crate::core::model::{GameEntry, KnownHost};
 use crate::services::discovery::{DiscoveredHost, Discovery};
 use crate::services::library::{self, GamesLoaded, LibraryError, DEFAULT_MGMT_PORT};
@@ -311,15 +312,12 @@ impl Service {
                 pin,
                 device_name,
             } => self.start_pair(addr, port, &pin, &device_name),
-            ConsoleCmd::SendLogs { host_name, .. } => {
-                // The shell's row means "upload to that host's management API". This client
-                // uploads to the developer's endpoint instead (`app::state::sendlogs`), which
-                // is a different destination with different consent — so it says what it can
-                // do rather than quietly doing the other thing.
-                self.notice(format!(
-                    "This TV can't send logs to {host_name} yet — use Diagnostics ▸ Send logs to developer"
-                ));
-            }
+            ConsoleCmd::SendLogs {
+                addr,
+                mgmt,
+                fp_hex,
+                host_name,
+            } => self.send_logs(addr, mgmt, &fp_hex, host_name),
             ConsoleCmd::HostAction {
                 addr,
                 mgmt,
@@ -807,6 +805,29 @@ impl Service {
                     }
                 },
             )
+            .ok();
+    }
+
+    /// Upload this TV's log to one host — the same upload as the pointer UI's host menu row.
+    fn send_logs(&self, addr: String, mgmt: u16, fp_hex: &str, host_name: String) {
+        // The shell offers the row on paired hosts only, so a missing pin is a stale row.
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            return;
+        };
+        let target = HostTarget {
+            name: host_name,
+            addr,
+            mgmt_port: mgmt,
+            identity: self.identity.clone(),
+            pin,
+        };
+        let console = self.handles.console.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-sendlogs".into())
+            .spawn(move || {
+                let (Ok(line) | Err(line)) = upload_to_host(&target);
+                console.set_notice(line);
+            })
             .ok();
     }
 
