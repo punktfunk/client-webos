@@ -190,12 +190,14 @@ from the network inherits the stream's arrival jitter — which is the stutter t
 was introduced to cure. The offload route is shorter and stays selectable for exactly that
 comparison; the overlay names which one ran (`Opus SW` / `Opus HW`).
 
-**Offload is also the surround route.** NDL decodes stereo Opus and exactly one 5.1 layout:
-GameStream's, `(FL,FR)+(RL,RR)` coupled with FC and LFE mono (`ndl::OPUS_51_LAYOUT`, ss4s's
-`IsOpusPassthroughSupported`). The wire couples `(FC,LFE)` instead, so a 5.1 session is decoded here
-and re-encoded into NDL's layout, one 5 ms packet per frame — ss4s's `opus_fix`, and the path
-aurora-tv ships. Some sets accept the load and then play nothing, which no runtime probe detects,
-so it stays a choice rather than the default.
+**Offload is also the surround route.** NDL decodes stereo Opus and exactly one 5.1 layout: the
+standard coupling, `(FL,FR)+(RL,RR)` with FC and LFE mono (`AudioLayout::Standard`,
+`ndl::OPUS_51_LAYOUT`, ss4s's `IsOpusPassthroughSupported`). Every session asks the host for it
+(`Hello::audio_layout`); a host that knows it encodes it, and the plane is fed the wire untouched.
+An older host answers legacy — `(FC,LFE)` coupled — and `session::audio` decodes and re-encodes
+into NDL's layout, one 5 ms packet per frame (ss4s's `opus_fix`, the path aurora-tv ships). Some
+sets accept the load and then play nothing, which no runtime probe detects, so it stays a choice
+rather than the default.
 
 **Surround reaches a receiver only through the Opus plane.** Measured on a G5 (webOS 10.3) into a
 Denon AVC-X3800H over HDMI, with NDL reporting multi-channel PCM `Supported`: the SDL route plays

@@ -417,9 +417,10 @@ pub enum AudioRoutePref {
     /// so, the default. `PulseAudio`'s hardware sink is stereo, so surround folds there.
     #[default]
     Software,
-    /// Opus decoded by the TV on its audio plane: the wire's stereo as-is, or 5.1 re-encoded here
-    /// into the one layout NDL decodes (`ndl::OPUS_51_LAYOUT`) — the only route that keeps 5.1
-    /// discrete. Some sets accept the load and then play nothing, which no runtime probe detects.
+    /// Opus decoded by the TV on its audio plane, the wire untouched: every host is asked for the
+    /// one 5.1 coupling NDL decodes (`ndl::OPUS_51_LAYOUT`), and an older host's is re-encoded
+    /// here. The only route that keeps 5.1 discrete. Some sets accept the load and then play
+    /// nothing, which no runtime probe detects.
     NdlOpus,
 }
 

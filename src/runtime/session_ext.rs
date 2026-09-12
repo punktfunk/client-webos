@@ -59,6 +59,11 @@ impl Connected {
         }
     }
 
+    /// The coupling the host encodes (`Welcome::audio_layout`, verbatim), for the audio stage.
+    pub(crate) fn audio_layout_id(&self) -> u8 {
+        self.client.audio_layout
+    }
+
     /// The negotiated channel layout, for the overlay's audio line. Names the layout rather than
     /// the count — "5.1" is what the user picked in Settings, `6` is not.
     pub(crate) fn audio_layout(&self) -> &'static str {

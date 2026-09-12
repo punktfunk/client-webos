@@ -1,10 +1,10 @@
 //! The audio stage: transport packets → whatever the session's [`AudioSink`] takes.
 //!
 //! One implementation covers both routes. What differs between them is the sink's declared
-//! [`AudioFormat`], and the stage produces exactly that: stereo Opus goes through untouched where
-//! the TV decodes it, 5.1 is re-encoded into the one layout NDL decodes ([`OPUS_51_LAYOUT`]), and
-//! libopus decodes here where the SDL device plays it — with concealment, written once into a
-//! reused buffer.
+//! [`AudioFormat`], and the stage produces exactly that: Opus goes through untouched where the TV
+//! decodes it, and libopus decodes here where the SDL device plays it — with concealment, written
+//! once into a reused buffer. The one exception is 5.1 from a host that answered the legacy
+//! coupling: NDL decodes only [`OPUS_51_LAYOUT`], so that stream is re-encoded into it.
 //!
 //! **Nothing is mixed down.** A layout the selected route cannot carry is not requested from the
 //! host in the first place (`core::model::AudioRoutePref::max_channels`), so a width mismatch here
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use punktfunk_core::audio::{layout_for, AudioGapTracker};
+use punktfunk_core::audio::{layout_for, AudioGapTracker, AudioLayout, AudioTier};
 
 use crate::core::media::{AudioFormat, AudioSink, Samples};
 use crate::platform::webos::ndl::OPUS_51_LAYOUT;
@@ -52,9 +52,9 @@ pub struct AudioStage {
 }
 
 impl AudioStage {
-    /// `channels` is host-resolved — the decoder MUST be built from what the handshake settled on,
-    /// never from what was requested.
-    pub fn new(sink: Arc<dyn AudioSink>, channels: u8) -> Result<Self> {
+    /// `channels` and `layout` are host-resolved — the decoder MUST be built from what the
+    /// handshake settled on, never from what was requested.
+    pub fn new(sink: Arc<dyn AudioSink>, channels: u8, layout: u8) -> Result<Self> {
         let format = sink.format();
         if format.channels() != channels {
             // Not a fold: see the module docs. A route is only ever selected for a layout it
@@ -65,15 +65,25 @@ impl AudioStage {
                 format.channels(),
             );
         }
-        let layout = layout_for(channels, false);
+        // A coupling this build does not know would pair channels wrongly, not loudly.
+        let Some(layout) = AudioLayout::from_wire(layout) else {
+            bail!("the host encodes audio layout {layout}, which this client does not know");
+        };
+        let wire = layout_for(channels, layout);
         let decoder = || {
-            opus::MSDecoder::new(SAMPLE_RATE, layout.streams, layout.coupled, layout.mapping)
+            opus::MSDecoder::new(SAMPLE_RATE, wire.streams, wire.coupled, wire.mapping)
                 .map_err(|e| anyhow::anyhow!("opus MSDecoder::new: {e}"))
         };
         let (decoder, reencoder) = match format {
             // The wire's stereo Opus is exactly what NDL's stereo plane decodes.
             AudioFormat::Opus { channels: 2 } => (None, None),
-            // The wire couples (FC,LFE); NDL decodes only a layout that couples (RL,RR).
+            // The host was asked for NDL's one 5.1 layout and encodes it: forwarded untouched.
+            AudioFormat::Opus { channels }
+                if channels == OPUS_51_LAYOUT.channels && layout == AudioLayout::Standard =>
+            {
+                (None, None)
+            }
+            // An older host couples (FC,LFE); NDL decodes only the standard pairing.
             AudioFormat::Opus { channels } if channels == OPUS_51_LAYOUT.channels => {
                 (Some(decoder()?), Some(reencoder_51()?))
             }
@@ -85,7 +95,7 @@ impl AudioStage {
             decoder,
             reencoder,
             packet: vec![0; MAX_PACKET],
-            channels: layout.channels as usize,
+            channels: wire.channels as usize,
             gaps: AudioGapTracker::new(),
             // One packet plus the concealment burst that can precede it, so steady state never
             // reallocates.
@@ -184,7 +194,7 @@ fn reencoder_51() -> Result<opus::MSEncoder> {
     )
     .map_err(|e| anyhow::anyhow!("opus MSEncoder::new: {e}"))?;
     encoder
-        .set_bitrate(opus::Bitrate::Bits(l.bitrate))
+        .set_bitrate(opus::Bitrate::Bits(l.bitrate_for(AudioTier::High)))
         .map_err(|e| anyhow::anyhow!("opus set_bitrate: {e}"))?;
     Ok(encoder)
 }
@@ -221,7 +231,7 @@ mod tests {
     #[test]
     fn reencode_keeps_channel_identity() {
         const REAR_LEFT: usize = 4;
-        let wire = layout_for(6, false);
+        let wire = layout_for(6, AudioLayout::Legacy);
         let mut wire_encoder = opus::MSEncoder::new(
             SAMPLE_RATE,
             wire.streams,
@@ -231,7 +241,7 @@ mod tests {
         )
         .unwrap();
         let plane = Arc::new(Plane(Mutex::new(Vec::new())));
-        let mut stage = AudioStage::new(plane.clone(), 6).unwrap();
+        let mut stage = AudioStage::new(plane.clone(), 6, AudioLayout::Legacy.wire()).unwrap();
 
         let mut phase = 0f32;
         let mut packet = [0u8; MAX_PACKET];
@@ -262,5 +272,17 @@ mod tests {
         }
         let loudest = (0..6).max_by(|&a, &b| energy[a].total_cmp(&energy[b])).unwrap();
         assert_eq!(loudest, REAR_LEFT, "energy per channel: {energy:?}");
+    }
+
+    /// A host that already encodes NDL's layout is forwarded byte for byte; a layout this build
+    /// does not know is refused rather than decoded with a guess.
+    #[test]
+    fn standard_layout_is_forwarded_untouched() {
+        let plane = Arc::new(Plane(Mutex::new(Vec::new())));
+        let mut stage = AudioStage::new(plane.clone(), 6, AudioLayout::Standard.wire()).unwrap();
+        let packet = crate::platform::webos::ndl::OPUS_51_SILENCE;
+        stage.play(0, 0, &packet).unwrap();
+        assert_eq!(plane.0.lock().unwrap().as_slice(), &[packet.to_vec()]);
+        assert!(AudioStage::new(plane, 6, 9).is_err());
     }
 }

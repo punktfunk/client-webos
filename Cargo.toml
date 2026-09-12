@@ -33,8 +33,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-appender = "0.2"
 # 🛑 REV (not tag), same across all drei crates: tag+rev mix builds two copies, types won't unify.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "a7cd5ff8e", features = ["quic"] }
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "a7cd5ff8e", default-features = false }
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "3c77c9d49", features = ["quic"] }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "3c77c9d49", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mDNS LAN discovery; direct dep (not via pf-client-core — see session.rs docs).
@@ -61,7 +61,7 @@ libc = "0.2"
 # Logs must say "DOWNLOAD AND INSTALL SUCCEEDED". Keep default features for the archive key
 # (`gl-jpegd-jpege-pdf-textlayout`, both sources publish). textlayout is pinned: `skunicode_icu`
 # (icudt74_dat, 10.5 MB) is 43% of the binary; kit shapes every string through `Paragraph`.
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "a7cd5ff8e", default-features = false, features = ["gl"] }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "3c77c9d49", default-features = false, features = ["gl"] }
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
 
 [build-dependencies]

@@ -329,7 +329,11 @@ pub(super) fn run_inner() -> Result<()> {
                         connected.audio_buffer_cell(),
                     )
                     .and_then(|(player, sink)| {
-                        let stage = crate::session::audio::AudioStage::new(std::sync::Arc::new(sink), channels)?;
+                        let stage = crate::session::audio::AudioStage::new(
+                            std::sync::Arc::new(sink),
+                            channels,
+                            connected.audio_layout_id(),
+                        )?;
                         Ok((player, connected.spawn_audio_feed(stage)?))
                     }) {
                         Ok(pair) => Some(pair),

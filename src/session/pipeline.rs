@@ -264,11 +264,12 @@ fn spawn_plane_threads(
     };
     // Folded into the spawn's own error type to keep ONE failure path: an early `?` here would
     // return before the clock thread above is joined, detaching a thread still feeding NDL.
-    let audio_thread = match AudioStage::new(sink, client.audio_channels) {
+    let audio_thread = match AudioStage::new(sink, client.audio_channels, client.audio_layout) {
         Ok(stage) => {
             tracing::info!(
-                "audio stage: {} channel(s) into {}",
+                "audio stage: {} channel(s), layout {} into {}",
                 client.audio_channels,
+                client.audio_layout,
                 stage.sink_name()
             );
             spawn_audio_feed(client.clone(), stage, stop.clone())

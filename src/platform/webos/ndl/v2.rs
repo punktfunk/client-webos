@@ -48,20 +48,15 @@ const OPUS_SILENCE: [u8; 3] = [0xec, 0xff, 0xfe];
 
 /// One empty frame in [`OPUS_51_LAYOUT`] — ss4s's `opus_empty_frame_642`: four 5 ms streams,
 /// two coupled, the first three self-delimited.
-const OPUS_51_SILENCE: [u8; 15] = [
+pub const OPUS_51_SILENCE: [u8; 15] = [
     0xec, 0x02, 0xff, 0xfe, 0xec, 0x02, 0xff, 0xfe, 0xe8, 0x02, 0xff, 0xfe, 0xe8, 0xff, 0xfe,
 ];
 
-/// The one 5.1 Opus layout NDL decodes on its plane: `GameStream`'s, the one ss4s's
-/// `IsOpusPassthroughSupported` checks for — (FL,FR) and (RL,RR) coupled, FC and LFE mono. The
-/// wire couples (FC,LFE) instead, so `session::audio` re-encodes a 5.1 session into this one.
-pub const OPUS_51_LAYOUT: OpusLayout = OpusLayout {
-    channels: 6,
-    streams: 4,
-    coupled: 2,
-    mapping: &[0, 1, 4, 5, 2, 3],
-    bitrate: 512_000,
-};
+/// The one 5.1 Opus layout NDL decodes on its plane — the standard coupling, which ss4s's
+/// `IsOpusPassthroughSupported` checks for. Every session asks the host for it
+/// (`Hello::audio_layout`); `session::audio` re-encodes into it against a host that answers
+/// legacy.
+pub const OPUS_51_LAYOUT: OpusLayout = punktfunk_core::audio::LAYOUT_51_STANDARD;
 
 /// One [`PRIME_PACKET_MS`] silent packet for a plane loaded with `channels`.
 fn silence(channels: u8) -> &'static [u8] {

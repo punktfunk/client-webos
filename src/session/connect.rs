@@ -178,7 +178,7 @@ impl Negotiated {
 
 /// Runs the handshake. Everything wire-facing has already been clamped by [`Negotiated::clamp`].
 fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient> {
-    NativeClient::connect(
+    NativeClient::connect_with_audio_format(
         &params.host,
         params.port,
         params.mode,
@@ -194,6 +194,12 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`,
         // never from this.
         negotiated.audio_channels,
+        // Opus at 48 kHz/16-bit: this client has no lossless ask.
+        0,
+        0,
+        // The standard coupling on every session: libopus here decodes either, and NDL's plane
+        // takes only this one. A host that answers legacy is re-encoded (`session::audio`).
+        punktfunk_core::audio::AudioLayout::Standard,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         negotiated.display_hdr,
@@ -221,6 +227,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         params.pin,
         Some(params.identity.clone()),
         params.timeout,
+        // Uncancelable: the connect has its own thread and the caller joins it.
+        None,
     )
     .context("connect")
 }
@@ -233,13 +241,14 @@ fn log_handshake(client: &NativeClient, negotiated: &Negotiated) {
     });
     tracing::info!(
         "connected: codec={} (offered=0x{:02x} preferred=0x{:02x}) \
-         compositor={:?} audio_ch={} color={:?} wire_budget_kbps={} \
+         compositor={:?} audio_ch={} audio_layout={} color={:?} wire_budget_kbps={} \
          decode_latency={} caps=0x{:02x} fp={fp_hex}",
         client.codec,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         client.resolved_compositor,
         client.audio_channels,
+        client.audio_layout,
         client.color,
         client.resolved_bitrate_kbps,
         client.wants_decode_latency(),

@@ -38,6 +38,8 @@ use anyhow::{bail, Result};
 
 use super::device::{self, NdlGeneration};
 
+#[cfg(test)]
+pub use v2::OPUS_51_SILENCE;
 pub use v2::{NdlVideo, OPUS_51_LAYOUT};
 
 /// `NDL_VIDEO_TYPE` values this client can request (matches the codec the host's
