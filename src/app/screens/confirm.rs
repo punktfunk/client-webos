@@ -119,14 +119,6 @@ impl App {
                     view::profile::delete_subtitle(hosts, titles),
                 )
             }
-            Screen::SendLogs => Confirm::new(
-                Some(view::icons::ICON_SEND),
-                "Send",
-                // The same red as Forget: both are consequential.
-                Tone::Danger,
-                "Cancel",
-                view::sendlogs::SUBTITLE.to_string(),
-            ),
             Screen::Wake => Confirm::new(
                 Some(view::icons::ICON_POWER),
                 "Wake host",

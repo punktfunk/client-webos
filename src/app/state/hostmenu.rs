@@ -30,6 +30,8 @@ pub(crate) enum HostAction {
     ConnectWith,
     /// Which profiles are cards under this host in the sidebar.
     Pin,
+    /// Upload this TV's log to the host (`app::state::sendlogs`).
+    SendLogs,
     Forget,
 }
 
@@ -88,6 +90,7 @@ fn host_menu_row(action: HostAction, paired: bool, power: Option<ExitAction>) ->
         HostAction::PowerSettings => FocusRow::action(icons::ICON_SETTINGS, "Power settings"),
         HostAction::ConnectWith => FocusRow::action(icons::ICON_PLAY, "Connect with\u{2026}"),
         HostAction::Pin => FocusRow::action(icons::ICON_PIN, "Pin to sidebar\u{2026}"),
+        HostAction::SendLogs => FocusRow::action(icons::ICON_SEND, "Send logs to host"),
         HostAction::Forget => FocusRow::action(icons::ICON_DELETE, "Forget host").danger(),
     }
 }
@@ -226,6 +229,11 @@ impl App {
             actions.push(HostAction::ConnectWith);
             actions.push(HostAction::Pin);
         }
+        // The upload rides the management lane on this TV's certificate, so it needs a paired
+        // host that is up — and `power` is `Some` only for a host that is up.
+        if paired && power.is_some() {
+            actions.push(HostAction::SendLogs);
+        }
         if saved {
             actions.push(HostAction::Forget);
         }
@@ -347,6 +355,7 @@ impl App {
             HostAction::SpeedTest => self.open_speed_test(idx),
             HostAction::Power => self.confirm_power_row(idx),
             HostAction::PowerSettings => self.open_host_power(),
+            HostAction::SendLogs => self.send_logs_to_host(idx),
             HostAction::ConnectWith | HostAction::Pin => {
                 let Some(entry) = self.hosts.entries.get(idx) else {
                     return;

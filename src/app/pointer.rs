@@ -219,7 +219,7 @@ impl App {
                     HoverChange::NONE
                 }
             }
-            // Two-button confirm modals (Forget/SendLogs/Wake/finished SpeedTest — the same
+            // Two-button confirm modals (Forget/Wake/finished SpeedTest — the same
             // modal type as the in-stream Disconnect dialog): hovering a button focuses it,
             // so the pointer can pick action-vs-Cancel, not just confirm whatever the D-pad
             // last focused. `confirm_subtitle` is `None` for the variants with no buttons up
@@ -409,7 +409,6 @@ impl App {
             Screen::Wake
             | Screen::ForgetHost
             | Screen::SpeedTest
-            | Screen::SendLogs
             | Screen::RemoveCollection
             | Screen::ResetHdrCalibration
             | Screen::DeleteProfile => {}

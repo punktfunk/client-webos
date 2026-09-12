@@ -20,7 +20,6 @@ pub(crate) const fn is_confirm(screen: Screen) -> bool {
     match screen {
         Screen::Wake
         | Screen::ForgetHost
-        | Screen::SendLogs
         | Screen::SpeedTest
         | Screen::RemoveCollection
         | Screen::ResetHdrCalibration
@@ -72,7 +71,6 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
         | Screen::EditHost
         | Screen::About
         | Screen::SpeedTest
-        | Screen::SendLogs
         // Collections scrolls.
         | Screen::Collections
         | Screen::RenameCollection

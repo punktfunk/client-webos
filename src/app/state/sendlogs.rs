@@ -1,98 +1,39 @@
-//! Sends the session log to a paired host or, with confirmation, the developer.
-//! Uploads run in the background and report through the Home status bar.
-//!
-//! Rendering lives in `app::view::sendlogs`.
-use crate::app::nav::ScreenKey;
+//! Sends the session log to a paired host, from either UI's host menu. The upload runs on a
+//! worker: the pointer UI reports it on the Home status bar, the console as a notice.
 use crate::app::App;
-use crate::core::event::MenuEvent;
 use crate::core::screen::Screen;
 use crate::services::library::{self, LibraryError};
 use std::path::Path;
+use std::sync::mpsc::TryRecvError;
 
-/// Upload endpoint (see the Go service: POST multipart `file` field to `/upload`).
-const UPLOAD_URL: &str = "https://www.upload.dyptan.dev/upload";
 /// The tail of the log that travels; the file itself rotates at this size too.
 const MAX_LOG_BYTES: u64 = 960 * 1024;
 
-/// What the background upload thread reports back — a user-facing status line
-/// either way, shown in the Home status bar by `drain_send_logs`.
-pub(crate) enum SendLogsMsg {
-    Ok(String),
-    Err(String),
-}
-
 impl App {
-    /// Resolves a reachable, paired host for log delivery.
-    pub(crate) fn send_logs_host(&self) -> Option<HostTarget> {
-        let known = self.reachable_selected_host()?;
-        let pin = known.fingerprint()?;
-        Some(HostTarget {
-            name: known.name.clone(),
-            addr: known.addr.clone(),
-            mgmt_port: known.mgmt_port.unwrap_or(library::DEFAULT_MGMT_PORT),
-            identity: self.identity.clone(),
-            pin,
-        })
-    }
-
-    /// Whether "Send logs" would send directly to the host.
-    pub(crate) fn send_logs_host_ready(&self) -> bool {
-        self.reachable_selected_host()
-            .is_some_and(crate::core::model::KnownHost::is_paired)
-    }
-
-    /// Sends to the host when available, otherwise opens developer confirmation.
-    pub(crate) fn send_logs_action(&mut self) {
-        let Some(target) = self.send_logs_host() else {
-            self.open_send_logs();
-            return;
-        };
-        let status = format!("Sending logs to {}…", target.name);
-        self.spawn_log_upload(status, move |path| upload_to_host(path, &target));
-        self.nav.resume(Screen::Home);
-    }
-
-    /// Open the confirmation modal, defaulting focus to Cancel.
-    pub(crate) fn open_send_logs(&mut self) {
-        self.nav.enter(Screen::SendLogs, 1);
-    }
-
-    /// Left/Right toggle Cancel/Send; Confirm acts on the focused button. Both
-    /// buttons (and Back) close the modal and return to Home — Send additionally
-    /// starts the upload.
-    pub(crate) fn handle_send_logs_event(&mut self, ev: MenuEvent) {
-        if self.confirm_nav_event(ev) {
-            return;
-        }
-        match ev {
-            MenuEvent::Confirm => {
-                if self.nav.cursor(ScreenKey::SendLogs) == 0 {
-                    self.spawn_log_upload("Sending logs to the developer…".into(), upload_logs);
-                }
-                self.close_send_logs();
-            }
-            MenuEvent::Back => self.close_send_logs(),
-            MenuEvent::Up | MenuEvent::Down | MenuEvent::Secondary | MenuEvent::Left | MenuEvent::Right => {}
-        }
-    }
-
-    fn close_send_logs(&mut self) {
-        // No cursor reset needed: `open_send_logs` enters at Cancel every time.
-        self.nav.resume(Screen::Home);
-    }
-
-    /// Starts a background upload and publishes its status through `drain_send_logs`.
-    fn spawn_log_upload(&mut self, status: String, work: impl FnOnce(&Path) -> SendLogsMsg + Send + 'static) {
-        let Some(path) = crate::logger::latest_log_file(&crate::services::store::app_dir()) else {
-            self.set_home_status(Some("No logs to send yet.".into()), false);
-            return;
-        };
+    /// The host menu's "Send logs to host": closes the menu and uploads to sidebar entry `idx`.
+    pub(crate) fn send_logs_to_host(&mut self, idx: usize) {
+        let target = self
+            .hosts
+            .entries
+            .get(idx)
+            .and_then(|e| self.known_host(e.host(), e.port()))
+            .and_then(|known| {
+                Some(HostTarget {
+                    name: known.name.clone(),
+                    addr: known.addr.clone(),
+                    mgmt_port: known.mgmt_port.unwrap_or(library::DEFAULT_MGMT_PORT),
+                    identity: self.identity.clone(),
+                    pin: known.fingerprint()?,
+                })
+            });
+        self.screens.host_menu_index = None;
+        self.nav.screen = Screen::Home;
+        let Some(target) = target else { return };
+        self.set_home_status(Some(format!("Sending logs to {}…", target.name)), false);
         let (tx, rx) = std::sync::mpsc::channel();
         self.jobs.send_logs = Some(rx);
-        self.set_home_status(Some(status), false);
-        tracing::info!("send logs: uploading {}", path.display());
         std::thread::spawn(move || {
-            let _ = tx.send(work(&path));
+            let _ = tx.send(upload_to_host(&target));
         });
     }
 
@@ -101,22 +42,13 @@ impl App {
     pub(crate) fn drain_send_logs(&mut self) -> bool {
         let Some(rx) = &self.jobs.send_logs else { return false };
         match rx.try_recv() {
-            Ok(msg) => {
-                match msg {
-                    SendLogsMsg::Ok(s) => {
-                        tracing::info!("send logs: {s}");
-                        self.set_home_status(Some(s), false);
-                    }
-                    SendLogsMsg::Err(s) => {
-                        tracing::warn!("send logs failed: {s}");
-                        self.set_home_status(Some(s), false);
-                    }
-                }
+            Ok(Ok(s) | Err(s)) => {
+                self.set_home_status(Some(s), false);
                 self.jobs.send_logs = None;
                 true
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
                 self.jobs.send_logs = None;
                 false
             }
@@ -163,21 +95,24 @@ fn log_tail(path: &Path) -> Result<String, String> {
     })
 }
 
-/// Posts the log tail as plain text using the paired mTLS identity.
-fn upload_to_host(path: &Path, target: &HostTarget) -> SendLogsMsg {
-    let log = match log_tail(path) {
-        Ok(log) => log,
-        Err(e) => return SendLogsMsg::Err(e),
-    };
+/// Posts the newest log tail to `target` as plain text on the paired mTLS identity. Blocks, so
+/// call it from a worker. Either side of the result is the status line to show.
+pub(crate) fn upload_to_host(target: &HostTarget) -> Result<String, String> {
+    post_log(target)
+        .inspect(|s| tracing::info!("send logs: {s}"))
+        .inspect_err(|e| tracing::warn!("send logs failed: {e}"))
+}
+
+fn post_log(target: &HostTarget) -> Result<String, String> {
+    let path = crate::logger::latest_log_file(&crate::services::store::app_dir()).ok_or("No logs to send yet.")?;
+    let log = log_tail(&path)?;
     let body = format!(
         "punktfunk-webos {} (webos {}) — client log bundle\n{log}",
         crate::core::VERSION,
         std::env::consts::ARCH,
     );
-    let agent = match library::agent(&target.identity, Some(target.pin)) {
-        Ok(a) => a,
-        Err(e) => return SendLogsMsg::Err(format!("Couldn't send logs to {}: {e}", target.name)),
-    };
+    let agent = library::agent(&target.identity, Some(target.pin))
+        .map_err(|e| format!("Couldn't send logs to {} — {e}", target.name))?;
     let url = format!(
         "{}/api/v1/client-logs",
         library::base_url(&target.addr, target.mgmt_port)
@@ -187,60 +122,18 @@ fn upload_to_host(path: &Path, target: &HostTarget) -> SendLogsMsg {
         .header("Content-Type", "text/plain; charset=utf-8")
         .send(body.as_bytes())
     {
-        Ok(_) => SendLogsMsg::Ok(format!("Logs sent to {} — thank you!", target.name)),
-        Err(e) => match library::classify(e) {
-            LibraryError::Http(413) => SendLogsMsg::Err("Log file too large to send (1 MB limit).".into()),
-            LibraryError::NotPaired => {
-                SendLogsMsg::Err(format!("{} refused the logs — pair with it again.", target.name))
-            }
-            other => SendLogsMsg::Err(format!(
+        Ok(_) => Ok(format!(
+            "Logs sent to {} — download them from its web console's Logs page",
+            target.name
+        )),
+        Err(e) => Err(match library::classify(e) {
+            LibraryError::Http(413) => "Log file too large to send (1 MB limit).".into(),
+            LibraryError::NotPaired => format!("{} refused the logs — pair with it again.", target.name),
+            other => format!(
                 "{}: {}",
                 target.name,
                 crate::app::view::hostpower::refusal_message(&other)
-            )),
-        },
-    }
-}
-
-/// Reads the log file and POSTs it as a multipart `file` field. Runs on the upload
-/// worker thread — never on the UI thread. Maps the service's status codes (see the
-/// Go handler: 429 rate-limited, 413 too large) to friendly status lines.
-fn upload_logs(path: &Path) -> SendLogsMsg {
-    const BOUNDARY: &str = "----punktfunkwebos7f3a2c1b8e4d6f0a";
-    let data = match std::fs::read(path) {
-        Ok(d) if !d.is_empty() => d,
-        Ok(_) => return SendLogsMsg::Err("No logs to send yet.".into()),
-        Err(e) => return SendLogsMsg::Err(format!("Couldn't read the log file: {e}")),
-    };
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("punktfunk-webos.log");
-
-    let mut body = Vec::with_capacity(data.len() + 256);
-    body.extend_from_slice(
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
-             Content-Type: text/plain\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(&data);
-    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-
-    let content_type = format!("multipart/form-data; boundary={BOUNDARY}");
-    let agent = ureq::Agent::new_with_defaults();
-    match agent
-        .post(UPLOAD_URL)
-        .header("Content-Type", &content_type)
-        .send(&body[..])
-    {
-        Ok(_) => SendLogsMsg::Ok("Logs sent to the developer — thank you!".into()),
-        Err(ureq::Error::StatusCode(429)) => {
-            SendLogsMsg::Err("Rate limited — wait a minute before sending logs again.".into())
-        }
-        Err(ureq::Error::StatusCode(413)) => SendLogsMsg::Err("Log file too large to send (4 MB limit).".into()),
-        Err(ureq::Error::StatusCode(code)) => SendLogsMsg::Err(format!("Upload failed (HTTP {code}).")),
-        Err(e) => SendLogsMsg::Err(format!("Couldn't reach the log server: {e}")),
+            ),
+        }),
     }
 }

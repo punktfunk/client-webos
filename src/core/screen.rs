@@ -14,8 +14,6 @@ pub enum Screen {
     /// Experimental (see `app/state/hdrcalibration.rs`). Unlike every other list screen it draws
     /// over live video: the patterns play on the NDL plane underneath it.
     HdrCalibration,
-    /// "Send logs to developer" confirmation (see `app/sendlogs.rs`).
-    SendLogs,
     /// Which collection a held card belongs to (see `app/collections.rs`). A scrolling row
     /// list, since a host may have every one of `MAX_COLLECTIONS` plus Library.
     Collections,

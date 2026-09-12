@@ -98,7 +98,6 @@ pub(crate) enum Row {
     Version,
     LogLevel,
     ShowLogs,
-    SendLogs,
     Licences,
     Rename,
     Duplicate,
@@ -178,7 +177,6 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             push(Row::Version, None);
             push(Row::LogLevel, Some("Diagnostics"));
             push(Row::ShowLogs, None);
-            push(Row::SendLogs, None);
             push(Row::Licences, Some("Legal"));
         }
     }
@@ -460,14 +458,6 @@ impl App {
                             menu::log_level_label(crate::logger::current_level_override()),
                         ),
                         Row::ShowLogs => RowSpec::toggle("Show logs", core.show_logs()),
-                        Row::SendLogs => RowSpec::action(
-                            if self.send_logs_host_ready() {
-                                "Send logs to the host"
-                            } else {
-                                "Send logs to developer…"
-                            },
-                            true,
-                        ),
                         Row::Licences => RowSpec::action("Open-source licences", true),
                         Row::NewProfile => RowSpec::action("New profile…", true),
                         Row::Rename => RowSpec::action("Rename…", true),
@@ -613,7 +603,6 @@ impl App {
                 crate::runtime::set_log_overlay_enabled(on);
                 self.persist();
             }
-            Row::SendLogs => self.send_logs_action(),
             Row::Licences => self.open_about(),
             Row::NewProfile => self.new_profile(),
             Row::Rename => self.open_rename_profile(),
