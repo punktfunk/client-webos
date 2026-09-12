@@ -131,40 +131,17 @@ impl Connected {
         self.client.disconnect_quit();
     }
 
-    /// The stats overlay's figures. Grouped into one call so the overlay block has one lookup
-    /// rather than six.
-    pub(crate) fn overlay_info(&self) -> OverlayInfo {
-        let client = &self.client;
-        let mode = client.mode();
-        OverlayInfo {
-            width: mode.width,
-            height: mode.height,
-            refresh_hz: mode.refresh_hz,
-            codec: session::codec_name(client.codec).to_string(),
-            hdr: client.color.is_hdr(),
-            frames_dropped: Some(client.frames_dropped()),
-            fec_recovered: Some(client.fec_recovered_shards()),
-            // The CURRENT total wire budget, not the session-start negotiation: on Automatic the
-            // ABR re-targets mid-session. Core v0.32 changed this from encoder rate to wire budget;
-            // `0` means a host too old to report.
-            target_kbps: match client.current_bitrate_kbps() {
-                0 => client.resolved_bitrate_kbps,
-                live => live,
-            },
-        }
+    /// Close the overlay window: the connector's figures, decoded by NDL.
+    pub(crate) fn hud_snapshot(&self) -> punktfunk_core::hud::StatsSnapshot {
+        let mut snap = self.client.hud_snapshot();
+        snap.decoder = "NDL".into();
+        snap
     }
-}
 
-/// See [`Connected::overlay_info`].
-pub(crate) struct OverlayInfo {
-    pub width: u32,
-    pub height: u32,
-    pub refresh_hz: u32,
-    pub codec: String,
-    pub hdr: bool,
-    pub frames_dropped: Option<u64>,
-    pub fec_recovered: Option<u64>,
-    pub target_kbps: u32,
+    /// Sample for the overlay only while it shows.
+    pub(crate) fn set_hud_enabled(&self, on: bool) {
+        self.client.set_hud_enabled(on);
+    }
 }
 
 /// Ceiling on feedback events handled per tick.

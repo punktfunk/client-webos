@@ -6,6 +6,7 @@ use crate::platform::webos::input::{
     webos_scancode_down as key_down, WEBOS_BLUE_KEYCODE, WEBOS_EXIT_SCANCODE, WEBOS_GREEN_SCANCODE,
     WEBOS_HOME_SCANCODE, WEBOS_YELLOW_SCANCODE,
 };
+use punktfunk_core::hud::{self, Extra, HudLine, Role, StatsSnapshot, StatsVerbosity};
 
 /// How long the finished launch frame is held waiting for the first frame to reach the decoder
 /// before uncovering the video plane regardless. `None` only when the loading screen never
@@ -433,13 +434,16 @@ pub(super) fn run_inner() -> Result<()> {
             let mut hid_device_seen = false;
             // Stats overlay: refreshed ~2Hz onto the transparent stream window, over the
             // punch-through video plane via per-pixel alpha — window is never shown/hidden (that
-            // crashed an earlier attempt, see docs/NOTES.md). Green button flips it live, session-only.
+            // crashed an earlier attempt, see docs/NOTES.md). Green button cycles the tier, session-only.
             // The pumps read this too — with nothing on glass to show them, the video thread skips
             // every counter the overlay is the only reader of. Seeded here; from the first tick on it
             // is DERIVED from the fade below rather than set alongside the toggle, so there is one
             // writer and no second copy of the state to keep in step.
-            let mut stats_enabled = settings.stats_overlay();
+            let mut stats_tier = settings.stats_verbosity();
+            let mut stats_enabled = stats_tier != StatsVerbosity::Off;
+            let advanced_stats = settings.advanced_stats;
             connected.stats().set_diagnostics(stats_enabled);
+            connected.set_hud_enabled(stats_enabled);
             // Fades in/out on the same curve as the toast below — see `ModalFade::visibility_alpha`.
             let mut stats_fade = crate::ui::fade::ModalFade::<()>::overlay();
             if stats_enabled {
@@ -464,16 +468,14 @@ pub(super) fn run_inner() -> Result<()> {
             let mut hold_since: Option<Instant> = None;
             let mut hold_toasted = false;
             let mut overlay_was_active = false;
-            // The stats card's lines and the log tail, rebuilt on their 500 ms cadence and drawn
-            // as they stand on every overlay frame between.
-            let mut stats_lines: Vec<String> = Vec::new();
+            // The stats card's lines, rebuilt from the core's window once a second (and on a
+            // tier change), and the log tail on its 500 ms cadence; drawn as they stand between.
+            let mut stats_lines: Vec<HudLine> = Vec::new();
+            let mut stats_snap: Option<StatsSnapshot> = None;
             let mut log_lines: Vec<String> = Vec::new();
             let mut stats_built_at: Option<Instant> = None;
             let mut overlay_last: Option<Instant> = None;
-            let mut overlay_prev_frames: u64 = 0;
-            let mut overlay_prev_bytes: u64 = 0;
-            let mut overlay_prev_cpu_ticks: Option<u64> = None;
-            let mut overlay_prev_at = Instant::now();
+            let mut prev_cpu: Option<(u64, Instant)> = None;
             // 0 = "Disconnect" focused, 1 = "Cancel" (default on open — safer).
             let mut disconnect = ConfirmDialog::new(
                 "Stop streaming?",
@@ -791,12 +793,18 @@ pub(super) fn run_inner() -> Result<()> {
                 // SDL2 lacks these colour scancodes. Ignore them while the dialog owns input.
                 let dialog_open = disconnect.is_open();
                 if rising_edge(!dialog_open && key_down(WEBOS_GREEN_SCANCODE), &mut green_held) {
-                    stats_enabled = !stats_enabled;
+                    stats_tier = stats_tier.next();
+                    let was_enabled = stats_enabled;
+                    stats_enabled = stats_tier != StatsVerbosity::Off;
                     overlay_last = None; // force an immediate redraw
-                    if stats_enabled {
+                    if stats_enabled && !was_enabled {
                         stats_fade.reopen();
-                    } else {
+                    } else if !stats_enabled {
                         stats_fade.close(());
+                    }
+                    // A fading-out card keeps its last lines; a visible one re-renders at once.
+                    if let (true, Some(snap)) = (stats_enabled, &stats_snap) {
+                        stats_lines = hud::format(snap, stats_tier, advanced_stats);
                     }
                 }
                 if rising_edge(!dialog_open && key_down(WEBOS_YELLOW_SCANCODE), &mut yellow_held) {
@@ -885,6 +893,7 @@ pub(super) fn run_inner() -> Result<()> {
                 // The counters follow what is VISIBLE, fade included — stopping them at the toggle
                 // freezes the figures for the last frames of the fade-out.
                 connected.stats().set_diagnostics(stats_alpha.is_some());
+                connected.set_hud_enabled(stats_alpha.is_some());
                 let log_overlay_on = log_overlay_state() != LogOverlayState::Off;
                 let log_alpha = log_fade.visibility_alpha(log_overlay_on);
                 let overlay_active = stats_alpha.is_some() || log_alpha.is_some() || notif_active;
@@ -905,114 +914,13 @@ pub(super) fn run_inner() -> Result<()> {
                     && overlay_last.is_none_or(|t| t.elapsed() >= redraw_interval)
                 {
                     overlay_last = Some(Instant::now());
-                    // Content stays on a 500ms cadence even when a toast fade runs the loop faster.
-                    if stats_enabled && stats_built_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
+                    // The core window closes once a second: every rate it reports is per window.
+                    if stats_enabled && stats_built_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
                         stats_built_at = Some(Instant::now());
-                        let frames = connected.stats().frames.load(Ordering::Relaxed);
-                        let bytes = connected.stats().bytes.load(Ordering::Relaxed);
-                        let dt = overlay_prev_at.elapsed().as_secs_f32().max(0.001);
-                        let fps = (frames.saturating_sub(overlay_prev_frames)) as f32 / dt;
-                        // Measured, vs. negotiated `resolved_bitrate_kbps`.
-                        let actual_kbps = (bytes.saturating_sub(overlay_prev_bytes)) as f32 * 8.0 / 1000.0 / dt;
-                        overlay_prev_frames = frames;
-                        overlay_prev_bytes = bytes;
-                        overlay_prev_at = Instant::now();
-                        let info = connected.overlay_info();
-                        let feed_ms = connected.stats().feed_us.load(Ordering::Relaxed) as f32 / 1000.0;
-                        let holding = connected.stats().holding.load(Ordering::Relaxed);
-                        // CPU% (one core) + RSS, only read while the overlay is up.
-                        let cpu_mem_line = device::process_cpu_mem().map(|(cpu_ticks, mem_bytes)| {
-                            // No baseline on the first sample, so CPU shows from the 2nd on.
-                            let cpu = overlay_prev_cpu_ticks.map(|prev| {
-                                let pct =
-                                    (cpu_ticks.saturating_sub(prev)) as f32 / device::clock_ticks_per_sec() as f32 / dt
-                                        * 100.0;
-                                format!("CPU {pct:.0}% · ")
-                            });
-                            overlay_prev_cpu_ticks = Some(cpu_ticks);
-                            format!(
-                                "{}RAM {:.0} MB",
-                                cpu.unwrap_or_default(),
-                                mem_bytes as f32 / (1024.0 * 1024.0)
-                            )
-                        });
-                        let mut lines = vec![
-                            format!(
-                                "{}x{}@{} {}{}",
-                                info.width,
-                                info.height,
-                                info.refresh_hz,
-                                info.codec,
-                                if info.hdr { " HDR" } else { "" },
-                            ),
-                            format!("Video {fps:.1} fps · {frames} frames"),
-                            {
-                                // NDL's undecoded/unpresented depth: rising means decode is behind,
-                                // flat-near-zero while stuttering means the problem is upstream.
-                                let backlog = connected.stats().render_backlog.load(Ordering::Relaxed);
-                                let backlog = if backlog < 0 {
-                                    "n/a".to_string()
-                                } else {
-                                    backlog.to_string()
-                                };
-                                // "n/a" rather than 0 where there is no such counter — a zero would
-                                // read as "no loss", which is a different claim.
-                                let or_na = |v: Option<u64>| v.map_or_else(|| "n/a".to_string(), |v| v.to_string());
-                                format!(
-                                    "Drop {} · FEC {} · hold {} · buf {backlog}",
-                                    or_na(info.frames_dropped),
-                                    or_na(info.fec_recovered),
-                                    if holding { "yes" } else { "no" },
-                                )
-                            },
-                            format!(
-                                "Feed {feed_ms:.1} ms · {:.0}/{} Mbps",
-                                actual_kbps / 1000.0,
-                                info.target_kbps / 1000,
-                            ),
-                        ];
-                        // Audio's own line. Before this the plane published nothing a surface could
-                        // render, so "the audio is late" had no instrument behind it at all — and on
-                        // this client the A/V offset is the number that says whether the sync loop is
-                        // working. `buf` is what is queued ahead of the speaker; `A/V` is positive when
-                        // audio plays BEHIND the picture. Both read 0 until the loop has evidence
-                        // (100 observations, and a frame on the glass to compare against).
-                        //
-                        // Which decoder is running leads the line: the two paths fail differently
-                        // (HW plays or is silent with nothing to measure; SW underruns visibly in
-                        // `buf`), so reading the numbers without knowing which one produced them
-                        // has already cost real debugging time. HW carries no ring and no sync loop
-                        // of its own — NDL owns both — so the two figures are omitted there rather
-                        // than printed as a pair of zeroes that look like a stalled plane.
-                        let layout = connected.audio_layout();
-                        if connected.audio_route.on_ndl_plane() {
-                            // `lead` is how far the plane's stamps run ahead of NDL's player clock —
-                            // the one figure this route does publish, and the one that matters most:
-                            // NDL paces the PICTURE on that depth, so a lead sagging towards zero
-                            // reads as video stutter, not as an audio fault (see `PLANE_LEAD_MS`).
-                            lines.push(format!(
-                                "{} {layout} · NDL · lead {} ms",
-                                connected.audio_route.overlay_tag(),
-                                connected.stats().audio_plane_lead_ms.load(Ordering::Relaxed),
-                            ));
-                        } else {
-                            lines.push(format!(
-                                "{} {layout} · buf {} ms",
-                                connected.audio_route.overlay_tag(),
-                                connected.audio_buffer_ms()
-                            ));
-                        }
-                        // `late` is the judder, counted: frames NDL was handed too late to pace them.
-                        // `jitter` is what the cadence loop sizes its cushion from.
-                        let late = connected.stats().pacing_late.load(Ordering::Relaxed);
-                        lines.push(format!(
-                            "Pace jitter {:.1} ms · late {late}",
-                            connected.stats().pacing_jitter_us.load(Ordering::Relaxed) as f32 / 1000.0,
-                        ));
-                        if let Some(line) = cpu_mem_line {
-                            lines.push(line);
-                        }
-                        stats_lines = lines;
+                        let mut snap = connected.hud_snapshot();
+                        snap.extras = tv_extras(&connected, &mut prev_cpu);
+                        stats_lines = hud::format(&snap, stats_tier, advanced_stats);
+                        stats_snap = Some(snap);
                     }
                     // `None` during fade-out once the toggle flips Off — the fade keeps drawing
                     // the last lines read.
@@ -1027,7 +935,7 @@ pub(super) fn run_inner() -> Result<()> {
                         overlay::TRANSPARENT,
                         |f| {
                             if let Some(alpha) = stats_alpha {
-                                overlay::stats(f, &stats_lines, "Press green button to hide this overlay", alpha);
+                                overlay::stats(f, &stats_lines, stats_hint(stats_tier), alpha);
                             }
                             if let Some(alpha) = log_alpha {
                                 overlay::log(f, &log_lines, alpha);
@@ -1142,4 +1050,72 @@ pub(super) fn run_inner() -> Result<()> {
     }
     tracing::info!("punktfunk-webos exiting cleanly");
     Ok(())
+}
+
+/// What the green button does next: more detail, or hide from the top tier.
+fn stats_hint(tier: StatsVerbosity) -> &'static str {
+    match tier {
+        StatsVerbosity::Detailed | StatsVerbosity::Off => "Press green to hide this overlay",
+        StatsVerbosity::Compact | StatsVerbosity::Normal => "Press green for more detail",
+    }
+}
+
+/// Lines only this client measures: NDL's feed, backlog and hold, the audio route, the pacing
+/// loop, and this process's CPU and memory. `prev_cpu` spans CPU ticks between two calls.
+fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant)>) -> Vec<Extra> {
+    let stats = connected.stats();
+    let backlog = stats.render_backlog.load(Ordering::Relaxed);
+    let mut ndl = format!(
+        "NDL feed {:.1} ms · backlog {}",
+        stats.feed_us.load(Ordering::Relaxed) as f32 / 1000.0,
+        if backlog < 0 {
+            "n/a".to_string()
+        } else {
+            backlog.to_string()
+        },
+    );
+    if stats.holding.load(Ordering::Relaxed) {
+        ndl.push_str(" · holding");
+    }
+    // NDL paces the picture on the plane's lead, so a lead sagging towards zero reads as stutter.
+    let layout = connected.audio_layout();
+    let audio = if connected.audio_route.on_ndl_plane() {
+        format!(
+            "{} {layout} · NDL · lead {} ms",
+            connected.audio_route.overlay_tag(),
+            stats.audio_plane_lead_ms.load(Ordering::Relaxed),
+        )
+    } else {
+        format!(
+            "{} {layout} · buf {} ms",
+            connected.audio_route.overlay_tag(),
+            connected.audio_buffer_ms()
+        )
+    };
+    let pacing = format!(
+        "pace jitter {:.1} ms · late {}",
+        stats.pacing_jitter_us.load(Ordering::Relaxed) as f32 / 1000.0,
+        stats.pacing_late.load(Ordering::Relaxed),
+    );
+    let mut out = vec![Extra::detail(ndl), Extra::detail(audio), Extra::detail(pacing)];
+    // The set's own headroom, in both vocabularies. CPU shows from the second sample on.
+    if let Some((ticks, mem_bytes)) = device::process_cpu_mem() {
+        let cpu = prev_cpu.map(|(prev, at)| {
+            let secs = at.elapsed().as_secs_f64().max(0.001);
+            let pct = ticks.saturating_sub(prev) as f64 / device::clock_ticks_per_sec() as f64 / secs * 100.0;
+            format!("CPU {pct:.0}% · ")
+        });
+        *prev_cpu = Some((ticks, Instant::now()));
+        out.push(Extra {
+            text: format!(
+                "{}RAM {:.0} MB",
+                cpu.unwrap_or_default(),
+                mem_bytes as f64 / (1024.0 * 1024.0)
+            ),
+            tier: StatsVerbosity::Detailed,
+            advanced_only: false,
+            role: Role::Muted,
+        });
+    }
+    out
 }

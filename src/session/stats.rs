@@ -2,16 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-use punktfunk_core::quic;
-
 /// Live video-pump counters for stats overlay (read at ~2Hz); relaxed atomics written per frame.
 #[derive(Default)]
 pub struct StreamStats {
-    /// Pictures the decoder took. Counted by the video pump on its own thread and mirrored here
-    /// with a relaxed store, so the feed path pays no atomic read-modify-write per frame.
-    pub frames: AtomicU64,
-    /// Bytes received, mirrored the same way as `frames`; deltas give measured bitrate.
-    pub bytes: AtomicU64,
     /// Freeze-until-reanchor hold active.
     pub holding: AtomicBool,
     /// Most recent decoder feed duration (µs).
@@ -48,15 +41,5 @@ impl StreamStats {
     /// The one writer, so the flag never has a second copy to keep in sync with.
     pub fn set_diagnostics(&self, on: bool) {
         self.diagnostics.store(on, Ordering::Relaxed);
-    }
-}
-
-/// Short display name for a resolved wire codec id (the stats overlay's header).
-pub fn codec_name(codec: u8) -> &'static str {
-    match codec {
-        c if c == quic::CODEC_HEVC => "HEVC",
-        c if c == quic::CODEC_H264 => "H264",
-        c if c == quic::CODEC_AV1 => "AV1",
-        _ => "?",
     }
 }

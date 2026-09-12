@@ -84,7 +84,6 @@ pub trait TvSettings {
     fn set_codec_pref(&mut self, codec: CodecPref);
     fn gamepad_type(&self) -> GamepadType;
     fn set_gamepad_type(&mut self, kind: GamepadType);
-    fn stats_overlay(&self) -> bool;
     /// Shared `pad_speaker` is a DESTINATION ("pad", "mix", "off"); this client offers
     /// pad-or-nothing.
     fn pad_speaker_on(&self) -> bool;
@@ -153,10 +152,6 @@ impl TvSettings for Settings {
 
     fn set_gamepad_type(&mut self, kind: GamepadType) {
         self.gamepad = gamepad_pref(kind).as_str().to_string();
-    }
-
-    fn stats_overlay(&self) -> bool {
-        self.show_stats
     }
 
     fn pad_speaker_on(&self) -> bool {
