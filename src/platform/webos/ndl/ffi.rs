@@ -419,8 +419,8 @@ pub(super) fn v1() -> Result<&'static V1> {
 /// and ARC/optical carry 2-channel PCM only, so those report [`Self::OutputNotPassthrough`] at
 /// best — 5.1 fed there is folded down inside the TV.
 ///
-/// A transient setting, and the query is meaningful only once `NDL_DirectMediaInit` has run — so
-/// it sizes the wire request per session and never gates a menu.
+/// A transient setting, and the query is meaningful only once `NDL_DirectMediaInit` has run. It
+/// describes NDL's own PCM path, so it is logged per session and gates nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MultiChannelPcm {
     /// No multi-channel support here.

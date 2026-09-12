@@ -122,36 +122,25 @@ impl Negotiated {
     fn clamp(params: &ConnectParams) -> Self {
         let caps = video_caps();
         // `params.audio_channels` is the user's PREFERENCE; this is where it becomes a width.
-        // Two things narrow it, both settled before the handshake because channels the session
-        // cannot put on a speaker are airlink, host CPU and local decode spent on silence:
-        // what the selected route can carry at all, and what the TV's Sound Out passes right now.
-        // Nothing is folded down later — see `AudioRoutePref::max_channels`.
+        // Only the static limits narrow it: what this client decodes and what the route carries.
+        // Sound Out does not — webOS folds what its output can't pass (`ndl::log_audio_output`).
         let route_max = params.audio_route.max_channels(caps);
-        let output_max = crate::platform::webos::ndl::audio_output_width();
-        let audio_channels = params
-            .audio_channels
-            .min(caps.max_channels)
-            .min(route_max)
-            .min(output_max.unwrap_or(u8::MAX));
+        let audio_channels = params.audio_channels.min(caps.max_channels).min(route_max);
+        if audio_channels > 2 {
+            crate::platform::webos::ndl::log_audio_output();
+        }
         if audio_channels < params.audio_channels {
-            // Names the limit that actually bound, because the three are indistinguishable from
-            // the width alone and "why is this stereo" is the question the log has to answer.
-            let reason = if audio_channels == output_max.unwrap_or(u8::MAX) {
-                "the TV's audio output passes no more"
-            } else if audio_channels == route_max {
+            // Names the limit that bound: "why is this stereo" is the question the log answers.
+            let reason = if audio_channels == route_max {
                 "the audio route carries no more"
             } else {
                 "this client decodes no more"
             };
             tracing::info!(
                 "audio: {} channel(s) requested, asking for {audio_channels} — {reason} \
-                 (client {}, route {route_max}, output {})",
+                 (client {}, route {route_max})",
                 params.audio_channels,
                 caps.max_channels,
-                match output_max {
-                    Some(w) => w.to_string(),
-                    None => "unknown".to_string(),
-                },
             );
         }
         let codecs = caps.codec_prefs();

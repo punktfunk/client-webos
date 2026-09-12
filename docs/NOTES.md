@@ -206,29 +206,25 @@ route, so picking `Offload (NDL)` locks that row to stereo with the reason on it
 
 **Nothing is ever mixed down, and the layout row is a preference.** `Settings::audio_channels` says
 "5.1 where it can play"; `Negotiated::clamp` is the one place it becomes a width on the wire, narrowing it by
-what the selected route carries (`AudioRoutePref::max_channels`) and by what the TV's Sound Out
-passes right now (`ndl::audio_output_width`). So a layout the sink can't put on a speaker is never
-encoded, never sent, never decoded and never folded — and the preference survives a route change or
-an unplugged receiver instead of being rewritten out of the document. A width mismatch at
-`AudioStage::new` is an error, not a downmix.
+what the selected route carries (`AudioRoutePref::max_channels`). So a layout the route can't carry
+is never encoded, sent or decoded, this client never folds, and the preference survives a route
+change instead of being rewritten out of the document. A width mismatch at `AudioStage::new` is an
+error, not a downmix.
 
 **The menu is narrowed by the static limits only.** The Audio row lists what this client can
 decode, capped by what the *selected* route can put on a speaker — the Opus plane carries nothing
 above stereo, so those widths are never offered, and a route left with one entry locks the row with
-the reason on it. The TV's Sound Out is deliberately not in that filter: it changes under a running
-app, so it applies per session and lands in the log, not in a menu that would be stale by the time
-it was drawn. The stored `audio_channels` is still never rewritten (`menu::audio_row_channels` shows
+the reason on it. The stored `audio_channels` is never rewritten (`menu::audio_row_channels` shows
 the preference held down to the route), so a 5.1 pick comes back whole on the route that plays it.
 
-- **Capability and routing are different questions, asked in different places.**
-  `NDL_DirectAudioSupportMultiChannel` answers the second: whether 5.1 reaches a speaker *right
-  now*, which also depends on Sound Out (TV speakers are 2.0/2.2 and ARC/optical carry 2-channel
-  PCM only). ss4s declines to check it at all and lets webOS fold. Here `ndl::audio_output_width`
-  reads it **once per session, at connect** — fresh, after `NDL_DirectMediaInit`, and early enough
-  to size the wire request. Never in the menu: the answer would be stale by the time it was drawn.
-  It initialises NDL a moment before the load would have anyway (process-global and idempotent),
-  so it costs no extra call. It narrows the SOFTWARE route too: 5.1 the TV would only fold down is
-  airlink, host CPU and local decode spent on nothing.
+- **Sound Out narrows nothing.** `NDL_DirectAudioSupportMultiChannel` says whether multi-channel
+  PCM leaves the set *right now*. It reads "will play" only with Sound Out on Pass Through, and it
+  describes NDL's own PCM path, not the SDL device the software route plays through — so gating
+  the handshake on it turns a 5.1 pick on a default-configured TV into a stereo session. Like
+  ss4s, the client asks for the chosen layout and lets webOS fold. `ndl::log_audio_output` logs
+  the answer at connect for sessions wider than stereo: the first line to read when 5.1 sounds
+  like stereo. It initialises NDL a moment before the load would have anyway (process-global and
+  idempotent), so it costs no extra call.
 - ⚠ **`NDL_DirectAudioSupportMultiChannel` has an out-parameter**:
   `int NDL_DirectAudioSupportMultiChannel(int *isSupported)`, returning 0/-1, with the code written
   through the pointer — `0` unsupported, `1` no device, `2` device but not passthrough, `3` will
