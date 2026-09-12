@@ -413,13 +413,14 @@ pub enum CodecPref {
 #[serde(rename_all = "lowercase")]
 pub enum AudioRoutePref {
     /// Software Opus decode → the TV's SDL audio device, with NDL's silent clock plane keeping
-    /// the picture paced. The longest path, every layout, and the only one whose pacing is proven
-    /// on hardware — so, the default.
+    /// the picture paced. The longest path and the only one whose pacing is proven on hardware —
+    /// so, the default. `PulseAudio`'s hardware sink is stereo, so surround folds there.
     #[default]
     Software,
-    /// The wire's Opus, decoded by the TV on its audio plane. No local decode at all. Stereo
-    /// only — NDL's Opus struct has no multistream mapping field — and some sets accept the load
-    /// and then play nothing, which no runtime probe detects.
+    /// Opus decoded by the TV on its audio plane, the wire untouched: every host is asked for the
+    /// one 5.1 coupling NDL decodes (`ndl::OPUS_51_LAYOUT`), and an older host's is re-encoded
+    /// here. The only route that keeps 5.1 discrete. Some sets accept the load and then play
+    /// nothing, which no runtime probe detects.
     NdlOpus,
 }
 
@@ -446,9 +447,10 @@ impl AudioRoutePref {
     /// a route that plays it.
     pub fn max_channels(self, caps: VideoCaps) -> u8 {
         match self {
-            // SDL opens whatever the negotiated layout is; nothing folds.
+            // SDL opens the negotiated layout; `PulseAudio` folds what its stereo sink can't carry.
             Self::Software => caps.max_channels,
-            Self::NdlOpus => caps.max_channels.min(2),
+            // NDL decodes stereo Opus and one 5.1 layout, nothing wider.
+            Self::NdlOpus => caps.max_channels.min(6),
         }
     }
 

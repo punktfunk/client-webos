@@ -275,7 +275,7 @@ impl TvSettings for Settings {
             self.set_audio_route(AudioRoutePref::Software);
         }
         // The decoder-wide ceiling, and nothing else: `audio_channels` is a preference the
-        // route's own limit and the TV's Sound Out narrow per session.
+        // route's own limit narrows per session.
         if self.audio_channels > caps.max_channels {
             tracing::info!(
                 "settings: {} audio channels is more than this client can decode ({}) — clamping",

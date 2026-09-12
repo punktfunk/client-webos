@@ -348,6 +348,8 @@ impl App {
             pads: &pads,
             deck: false,
             fallback_ui: true,
+            // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave.
+            pyrowave_ok: false,
             device_name: "webOS TV",
             t: 0.0,
         };

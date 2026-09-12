@@ -122,36 +122,25 @@ impl Negotiated {
     fn clamp(params: &ConnectParams) -> Self {
         let caps = video_caps();
         // `params.audio_channels` is the user's PREFERENCE; this is where it becomes a width.
-        // Two things narrow it, both settled before the handshake because channels the session
-        // cannot put on a speaker are airlink, host CPU and local decode spent on silence:
-        // what the selected route can carry at all, and what the TV's Sound Out passes right now.
-        // Nothing is folded down later — see `AudioRoutePref::max_channels`.
+        // Only the static limits narrow it: what this client decodes and what the route carries.
+        // Sound Out does not — webOS folds what its output can't pass (`ndl::log_audio_output`).
         let route_max = params.audio_route.max_channels(caps);
-        let output_max = crate::platform::webos::ndl::audio_output_width();
-        let audio_channels = params
-            .audio_channels
-            .min(caps.max_channels)
-            .min(route_max)
-            .min(output_max.unwrap_or(u8::MAX));
+        let audio_channels = params.audio_channels.min(caps.max_channels).min(route_max);
+        if audio_channels > 2 {
+            crate::platform::webos::ndl::log_audio_output();
+        }
         if audio_channels < params.audio_channels {
-            // Names the limit that actually bound, because the three are indistinguishable from
-            // the width alone and "why is this stereo" is the question the log has to answer.
-            let reason = if audio_channels == output_max.unwrap_or(u8::MAX) {
-                "the TV's audio output passes no more"
-            } else if audio_channels == route_max {
+            // Names the limit that bound: "why is this stereo" is the question the log answers.
+            let reason = if audio_channels == route_max {
                 "the audio route carries no more"
             } else {
                 "this client decodes no more"
             };
             tracing::info!(
                 "audio: {} channel(s) requested, asking for {audio_channels} — {reason} \
-                 (client {}, route {route_max}, output {})",
+                 (client {}, route {route_max})",
                 params.audio_channels,
                 caps.max_channels,
-                match output_max {
-                    Some(w) => w.to_string(),
-                    None => "unknown".to_string(),
-                },
             );
         }
         let codecs = caps.codec_prefs();
@@ -189,7 +178,7 @@ impl Negotiated {
 
 /// Runs the handshake. Everything wire-facing has already been clamped by [`Negotiated::clamp`].
 fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient> {
-    NativeClient::connect(
+    NativeClient::connect_with_audio_format(
         &params.host,
         params.port,
         params.mode,
@@ -205,6 +194,12 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`,
         // never from this.
         negotiated.audio_channels,
+        // Opus at 48 kHz/16-bit: this client has no lossless ask.
+        0,
+        0,
+        // The standard coupling on every session: libopus here decodes either, and NDL's plane
+        // takes only this one. A host that answers legacy is re-encoded (`session::audio`).
+        punktfunk_core::audio::AudioLayout::Standard,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         negotiated.display_hdr,
@@ -232,6 +227,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         params.pin,
         Some(params.identity.clone()),
         params.timeout,
+        // Uncancelable: the connect has its own thread and the caller joins it.
+        None,
     )
     .context("connect")
 }
@@ -244,13 +241,14 @@ fn log_handshake(client: &NativeClient, negotiated: &Negotiated) {
     });
     tracing::info!(
         "connected: codec={} (offered=0x{:02x} preferred=0x{:02x}) \
-         compositor={:?} audio_ch={} color={:?} wire_budget_kbps={} \
+         compositor={:?} audio_ch={} audio_layout={} color={:?} wire_budget_kbps={} \
          decode_latency={} caps=0x{:02x} fp={fp_hex}",
         client.codec,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         client.resolved_compositor,
         client.audio_channels,
+        client.audio_layout,
         client.color,
         client.resolved_bitrate_kbps,
         client.wants_decode_latency(),

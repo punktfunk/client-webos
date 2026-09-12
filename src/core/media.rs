@@ -109,7 +109,7 @@ pub trait VideoSink: Send {
 /// nothing converts afterwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
-    /// The wire's own Opus, handed over undecoded — the sink decodes.
+    /// Opus the sink decodes: the wire's stereo as-is, or 5.1 re-encoded into NDL's layout.
     Opus { channels: u8 },
     /// Interleaved f32 in punktfunk's own channel order — what libopus decodes to, so this is the
     /// format that costs no conversion at all.

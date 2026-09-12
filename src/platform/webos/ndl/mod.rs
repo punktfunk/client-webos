@@ -38,7 +38,9 @@ use anyhow::{bail, Result};
 
 use super::device::{self, NdlGeneration};
 
-pub use v2::NdlVideo;
+#[cfg(test)]
+pub use v2::OPUS_51_SILENCE;
+pub use v2::{NdlVideo, OPUS_51_LAYOUT};
 
 /// `NDL_VIDEO_TYPE` values this client can request (matches the codec the host's
 /// `Welcome` resolved — see `punktfunk_core::quic::CODEC_*`).
@@ -393,38 +395,24 @@ fn ensure_init(app_id: &str, api2: bool) -> Result<()> {
     Ok(())
 }
 
-/// Widest layout the TV's audio output will actually pass **right now**, or `None` where it
-/// cannot be asked.
+/// Logs whether the TV's Sound Out passes multi-channel PCM right now — the first line to read
+/// when a surround session sounds like stereo. Called by `session::connect` for sessions wider
+/// than stereo.
 ///
-/// It answers whether Sound Out is configured for multi-channel, which the user can change under
-/// a running app. Read once per session by `session::connect` and used to size the wire request,
-/// so channels the TV would only fold down are never encoded, sent or decoded. Never a menu gate —
-/// the answer would be stale by the time it was drawn.
-///
-/// `None` on NDL v1 (nothing to ask) and whenever the query fails, both of which mean "don't
-/// narrow" — the static capability ceiling has already applied by then.
-pub fn audio_output_width() -> Option<u8> {
+/// Diagnostic only: the session asks for the user's layout regardless and webOS folds what its
+/// output can't pass. The answer describes NDL's own PCM path, not the SDL device the software
+/// route plays through, and reads `Supported` only with Sound Out on Pass Through.
+pub fn log_audio_output() {
     if device::ndl_generation() != NdlGeneration::V2 {
-        return None;
+        return;
     }
     // The query answers nothing before `NDL_DirectMediaInit`, and this runs a moment before the
     // load would have called it anyway — process-global and idempotent, so it is the same init.
     if let Err(e) = ensure_init(&app_id(), true) {
         tracing::warn!("NDL init for the audio-output query: {e:#}");
-        return None;
+        return;
     }
-    let status = ffi::multichannel_pcm_status();
-    let width = match status {
-        ffi::MultiChannelPcm::Supported => Some(6),
-        ffi::MultiChannelPcm::Unknown => None,
-        // Capable or not, stereo is what leaves the set.
-        _ => Some(2),
-    };
-    match width {
-        Some(w) => tracing::info!("NDL audio output: {status:?} — passes up to {w} channel(s)"),
-        None => tracing::warn!("NDL audio output: {status:?} — not narrowing the request"),
-    }
-    width
+    tracing::info!("NDL audio output: {:?}", ffi::multichannel_pcm_status());
 }
 
 /// Spawns the metronome that keeps the audio plane fed.

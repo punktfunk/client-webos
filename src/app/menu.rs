@@ -207,8 +207,8 @@ pub fn log_level_dropdown_current_index(level: LogLevelOverride) -> usize {
 const AUDIO_CHANNELS: [(u8, &str); 3] = [(2, "Stereo"), (6, "5.1 surround"), (8, "7.1 surround")];
 
 /// The channel counts offered: what this client can decode, capped by what the selected route
-/// can put on a speaker (`AudioRoutePref::max_channels`). Not filtered by the TV's current
-/// Sound Out: that one changes under a running app and is applied per session instead.
+/// can put on a speaker (`AudioRoutePref::max_channels`). Not filtered by the TV's Sound Out:
+/// webOS folds what its output can't pass.
 pub fn audio_channel_options(settings: &Settings) -> &'static [(u8, &'static str)] {
     channel_options_up_to(settings.audio_route().max_channels(video_caps()))
 }

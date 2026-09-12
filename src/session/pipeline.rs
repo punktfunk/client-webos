@@ -55,7 +55,7 @@ impl MediaPipeline {
         // plane means silent audio.
         let plane = player.audio_plane();
         let proven = plane.as_ref().is_some_and(|p| p.accepts_stream());
-        let route = resolve_route(params.audio_route, client.audio_channels, proven);
+        let route = resolve_route(params.audio_route, proven);
         tracing::info!(
             "audio path: {} on {} (host resolved {} channel(s))",
             audio_path_label(params.audio_route, route, plane.is_some(), proven),
@@ -108,11 +108,10 @@ impl MediaPipeline {
 /// route with known-good pacing: NDL paces against a fed plane, which inherits network jitter
 /// (silence plane cures this). Plane routes are kept selectable for comparison but unproven.
 /// `has_plane` is the proven plane, not the requested one — see the call site.
-fn resolve_route(pref: AudioRoutePref, channels: u8, has_plane: bool) -> AudioRoutePref {
-    // Stereo or nothing: `Settings::clamp` already holds the document to it, and a session the
-    // host resolved wider must not silently land on a plane whose decoder has no mode for it.
+fn resolve_route(pref: AudioRoutePref, has_plane: bool) -> AudioRoutePref {
+    // The plane was loaded at the session's own width (stereo or 5.1), so only proof decides.
     match pref {
-        AudioRoutePref::NdlOpus if has_plane && channels == 2 => AudioRoutePref::NdlOpus,
+        AudioRoutePref::NdlOpus if has_plane => AudioRoutePref::NdlOpus,
         AudioRoutePref::Software | AudioRoutePref::NdlOpus => AudioRoutePref::Software,
     }
 }
@@ -121,13 +120,10 @@ fn resolve_route(pref: AudioRoutePref, channels: u8, has_plane: bool) -> AudioRo
 /// proof — metronome paces unconfirmed planes fine, but wrong audio route is silent forever. Issue
 /// #188: some sets report the callback only after the first video frame; extra waiting during load
 /// just adds black screen.
-fn plane_budget(pref: AudioRoutePref, channels: u8) -> std::time::Duration {
-    // Same test as `resolve_route`, deliberately: only a session that will actually END UP on the
-    // plane is worth waiting for one. A wider layout takes the software route whatever the load
-    // says, so paying the long budget there is black screen bought for an answer nobody reads.
+fn plane_budget(pref: AudioRoutePref) -> std::time::Duration {
     match pref {
-        AudioRoutePref::NdlOpus if channels == 2 => crate::platform::webos::ndl::AUDIO_PROVE_BUDGET,
-        AudioRoutePref::NdlOpus | AudioRoutePref::Software => crate::platform::webos::ndl::AUDIO_PRIME_BUDGET,
+        AudioRoutePref::NdlOpus => crate::platform::webos::ndl::AUDIO_PROVE_BUDGET,
+        AudioRoutePref::Software => crate::platform::webos::ndl::AUDIO_PRIME_BUDGET,
     }
 }
 
@@ -153,7 +149,13 @@ fn load_player(client: &NativeClient, params: &ConnectParams) -> Result<(Box<dyn
                 width,
                 height,
                 codec,
-                Some(plane_budget(params.audio_route, client.audio_channels)),
+                Some(plane_budget(params.audio_route)),
+                // Offload loads the plane at the session's width; the metronome rides stereo.
+                if params.audio_route == AudioRoutePref::NdlOpus {
+                    client.audio_channels
+                } else {
+                    2
+                },
             )
             .context("NDL load")?,
         )),
@@ -198,9 +200,8 @@ fn load_player(client: &NativeClient, params: &ConnectParams) -> Result<(Box<dyn
 fn audio_path_label(pref: AudioRoutePref, route: AudioRoutePref, has_plane: bool, proven: bool) -> &'static str {
     match (route, has_plane) {
         (AudioRoutePref::NdlOpus, _) => "NDL hardware Opus decode (+ clock plane standing by)",
-        // The user asked for the plane and the load never confirmed it in its budget. Stereo was
-        // already negotiated on the strength of that request and cannot be widened now. Gated on
-        // `proven` because a >2ch session takes the same downgrade for an unrelated reason.
+        // The user asked for the plane and the load never confirmed it in its budget, so the
+        // session plays through SDL at the width it already negotiated.
         (AudioRoutePref::Software, true) if pref == AudioRoutePref::NdlOpus && !proven => {
             "software Opus decode -> SDL2 + NDL clock plane (offload asked for, plane unconfirmed)"
         }
@@ -263,11 +264,12 @@ fn spawn_plane_threads(
     };
     // Folded into the spawn's own error type to keep ONE failure path: an early `?` here would
     // return before the clock thread above is joined, detaching a thread still feeding NDL.
-    let audio_thread = match AudioStage::new(sink, client.audio_channels) {
+    let audio_thread = match AudioStage::new(sink, client.audio_channels, client.audio_layout) {
         Ok(stage) => {
             tracing::info!(
-                "audio stage: {} channel(s) into {}",
+                "audio stage: {} channel(s), layout {} into {}",
                 client.audio_channels,
+                client.audio_layout,
                 stage.sink_name()
             );
             spawn_audio_feed(client.clone(), stage, stop.clone())

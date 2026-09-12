@@ -174,7 +174,7 @@ CX/G5 are 32-bit userland on ARMv8-A. RustCrypto's `aes` crate has ARMv8 intrins
 
 ## Audio: two routes, one pipeline (SDL is the default)
 
-`Settings` → **Experimental** → **Audio processing** picks the route
+`Settings` → **Audio** → **Audio processing** picks the route
 (`core::model::AudioRoutePref`), and both are
 built on the same pipeline: `session::audio::AudioStage` decodes (or forwards) into whatever
 `core::media::AudioSink` the route selected, and one pump drives it. Adding a third route is one
@@ -183,16 +183,28 @@ built on the same pipeline: `session::audio::AudioStage` decodes (or forwards) i
 | Route | Label | Path | Layouts |
 | --- | --- | --- | --- |
 | `Software` (default) | Software (SDL) | libopus here → SDL device, NDL's clock plane on its metronome | up to 7.1 |
-| `NdlOpus` | Offload (NDL) | the wire's Opus, decoded by the TV | 2 |
+| `NdlOpus` | Offload (NDL) | Opus decoded by the TV; 5.1 re-encoded into NDL's layout first | 2, 5.1 |
 
 **Why software is the default.** NDL paces the picture against a *fed* audio plane, so a plane fed
 from the network inherits the stream's arrival jitter — which is the stutter the silent clock plane
 was introduced to cure. The offload route is shorter and stays selectable for exactly that
 comparison; the overlay names which one ran (`Opus SW` / `Opus HW`).
 
-**The offload route is stereo, and stereo only.** NDL's Opus struct has no multistream mapping
-field, so there is no 5.1 to negotiate — and some sets accept the load and then play nothing, which
-no runtime probe detects. That is why it lives under Experimental rather than beside the codec pick.
+**Offload is also the surround route.** NDL decodes stereo Opus and exactly one 5.1 layout: the
+standard coupling, `(FL,FR)+(RL,RR)` with FC and LFE mono (`AudioLayout::Standard`,
+`ndl::OPUS_51_LAYOUT`, ss4s's `IsOpusPassthroughSupported`). Every session asks the host for it
+(`Hello::audio_layout`); a host that knows it encodes it, and the plane is fed the wire untouched.
+An older host answers legacy — `(FC,LFE)` coupled — and `session::audio` decodes and re-encodes
+into NDL's layout, one 5 ms packet per frame (ss4s's `opus_fix`, the path aurora-tv ships). Some
+sets accept the load and then play nothing, which no runtime probe detects, so it stays a choice
+rather than the default.
+
+**Surround reaches a receiver only through the Opus plane.** Measured on a G5 (webOS 10.3) into a
+Denon AVC-X3800H over HDMI, with NDL reporting multi-channel PCM `Supported`: the SDL route plays
+into `PulseAudio`'s one hardware sink, `pcm_output`, which is s16le 2ch; and a plane loaded as
+6-channel PCM (`NDL_DIRECTAUDIO_PCM_INFO_T`, `channelMode = "6-channel"`) confirms and plays, but
+the AVR reports PCM 2.0. aurora-tv dropped its NDL PCM 5.1 path too. Read the AVR, not the ears:
+a Denon answers `OPINFINS ?` on telnet port 23 with one digit per input channel (`2` = present).
 
 **Offload is not free of the metronome.** `run_clock_plane` still runs on that route, yielding to
 the real stream and filling silence only after `REAL_FEED_GRACE_MS` without a packet — a dead host
@@ -202,33 +214,28 @@ capture would otherwise starve the plane and freeze the picture.
 so `caps::VideoCaps::audio_plane` is false there and
 `AudioRoutePref::available` collapses to `Software` — the row locks, and `Settings::clamp_to_caps`
 rewrites a document carried over from a v2 set. The Audio row's layouts follow the *selected*
-route, so picking `Offload (NDL)` locks that row to stereo with the reason on it.
+route, so picking `Offload (NDL)` offers stereo and 5.1, not 7.1.
 
 **Nothing is ever mixed down, and the layout row is a preference.** `Settings::audio_channels` says
 "5.1 where it can play"; `Negotiated::clamp` is the one place it becomes a width on the wire, narrowing it by
-what the selected route carries (`AudioRoutePref::max_channels`) and by what the TV's Sound Out
-passes right now (`ndl::audio_output_width`). So a layout the sink can't put on a speaker is never
-encoded, never sent, never decoded and never folded — and the preference survives a route change or
-an unplugged receiver instead of being rewritten out of the document. A width mismatch at
-`AudioStage::new` is an error, not a downmix.
+what the selected route carries (`AudioRoutePref::max_channels`). So a layout the route can't carry
+is never encoded, sent or decoded, this client never folds, and the preference survives a route
+change instead of being rewritten out of the document. A width mismatch at `AudioStage::new` is an
+error, not a downmix.
 
 **The menu is narrowed by the static limits only.** The Audio row lists what this client can
-decode, capped by what the *selected* route can put on a speaker — the Opus plane carries nothing
-above stereo, so those widths are never offered, and a route left with one entry locks the row with
-the reason on it. The TV's Sound Out is deliberately not in that filter: it changes under a running
-app, so it applies per session and lands in the log, not in a menu that would be stale by the time
-it was drawn. The stored `audio_channels` is still never rewritten (`menu::audio_row_channels` shows
+decode, capped by what the *selected* route can put on a speaker — the Opus plane stops at 5.1, so
+7.1 is never offered there, and a route left with one entry locks the row with the reason on it. The stored `audio_channels` is never rewritten (`menu::audio_row_channels` shows
 the preference held down to the route), so a 5.1 pick comes back whole on the route that plays it.
 
-- **Capability and routing are different questions, asked in different places.**
-  `NDL_DirectAudioSupportMultiChannel` answers the second: whether 5.1 reaches a speaker *right
-  now*, which also depends on Sound Out (TV speakers are 2.0/2.2 and ARC/optical carry 2-channel
-  PCM only). ss4s declines to check it at all and lets webOS fold. Here `ndl::audio_output_width`
-  reads it **once per session, at connect** — fresh, after `NDL_DirectMediaInit`, and early enough
-  to size the wire request. Never in the menu: the answer would be stale by the time it was drawn.
-  It initialises NDL a moment before the load would have anyway (process-global and idempotent),
-  so it costs no extra call. It narrows the SOFTWARE route too: 5.1 the TV would only fold down is
-  airlink, host CPU and local decode spent on nothing.
+- **Sound Out narrows nothing.** `NDL_DirectAudioSupportMultiChannel` says whether multi-channel
+  PCM leaves the set *right now*. It reads "will play" only with Sound Out on Pass Through, and it
+  describes NDL's own PCM path, not the SDL device the software route plays through — so gating
+  the handshake on it turns a 5.1 pick on a default-configured TV into a stereo session. Like
+  ss4s, the client asks for the chosen layout and lets webOS fold. `ndl::log_audio_output` logs
+  the answer at connect for sessions wider than stereo: the first line to read when 5.1 sounds
+  like stereo. It initialises NDL a moment before the load would have anyway (process-global and
+  idempotent), so it costs no extra call.
 - ⚠ **`NDL_DirectAudioSupportMultiChannel` has an out-parameter**:
   `int NDL_DirectAudioSupportMultiChannel(int *isSupported)`, returning 0/-1, with the code written
   through the pointer — `0` unsupported, `1` no device, `2` device but not passthrough, `3` will
@@ -239,9 +246,9 @@ the preference held down to the route), so a 5.1 pick comes back whole on the ro
   until something has `dlopen`'d `libNDL_directmedia` — and the capability probes run at startup,
   before any decode session. `ffi::optional_sym` forces `ffi::common()` first; without it every
   optional symbol reads as absent and the TV silently loses 5.1.
-- **Samples are never converted.** libopus decodes straight into f32, which is exactly what the SDL
-  device takes; the offload route decodes nothing at all. There is no second buffer and no
-  conversion pass on either route.
+- **Samples are converted only where NDL needs its own layout.** libopus decodes straight into
+  f32, which is exactly what the SDL device takes; offload forwards stereo Opus untouched and
+  re-encodes only 5.1. There is no second buffer and no conversion pass on the SDL route.
 - **The software route's latency is buffering, not decode.** Software Opus is 5% of a core and the
   target is hardware-FP (`-soft-float`, § "Toolchain"), so the only client-side terms are the ring
   depth and the device quantum. Two things follow, and they are the whole lever list here:

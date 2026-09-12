@@ -127,6 +127,7 @@ fn run(stop: &Arc<AtomicBool>, rx: &mpsc::Receiver<Command>, meta: HdrMeta, patt
         // The short budget: this screen never routes real audio, it only needs the plane fed so
         // NDL paces the pattern. An unconfirmed plane does that (see `NdlVideo::run_clock_plane`).
         Some(ndl::AUDIO_PRIME_BUDGET),
+        2,
     )?);
     let color = ColorInfo {
         primaries: ColorInfo::CP_BT2020,
