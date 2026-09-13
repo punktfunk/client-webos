@@ -194,7 +194,7 @@ pub(super) fn run(
                     break 'ui UiOutcome::Quit(exit_plan(&service, identity));
                 }
                 Event::ControllerDeviceAdded { which, .. } => {
-                    if controller.is_none() {
+                    if controller.is_none() && !crate::platform::webos::gamepad::is_remote_at(game_controller, which) {
                         match game_controller.open(which) {
                             Ok(c) => {
                                 tracing::info!("controller connected: {}", c.name());

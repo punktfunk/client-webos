@@ -88,6 +88,12 @@ pub fn is_tv_remote(name: &str) -> bool {
     name.contains("remote") || name.contains("rcu")
 }
 
+/// Whether the controller SDL enumerates at `index` is [the TV's remote](is_tv_remote). Neither
+/// loop opens it: it would take the one pad slot and leave the real pad closed.
+pub fn is_remote_at(subsystem: &sdl2::GameControllerSubsystem, index: u32) -> bool {
+    subsystem.name_for_index(index).is_ok_and(|name| is_tv_remote(&name))
+}
+
 /// Whether a real game pad is attached — what the "With a controller" console-UI mode reads.
 ///
 /// [`is_tv_remote`] is the whole point of the filter: every webOS set enumerates its own remote

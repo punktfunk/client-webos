@@ -486,6 +486,8 @@ pub(super) fn run_inner() -> Result<()> {
             );
             // Gamepad routes to the disconnect dialog — see `DisconnectChord`.
             let mut chord = DisconnectChord::default();
+            // One log line per stream is enough to show a TV that echoes pad presses as keys.
+            let mut echo_logged = false;
             // Short Back tap forwards Esc; a held Back becomes webOS's EXIT gesture, polled below.
             // Seeded like the colour keys above — see there.
             let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
@@ -547,7 +549,7 @@ pub(super) fn run_inner() -> Result<()> {
                             break 'running StreamOutcome::Quit;
                         }
                         Event::ControllerDeviceAdded { which, .. } => {
-                            if controller.is_none() {
+                            if controller.is_none() && !gamepad::is_remote_at(&game_controller, which) {
                                 match game_controller.open(which) {
                                     Ok(c) => {
                                         tracing::info!("controller connected: {}", c.name());
@@ -586,10 +588,25 @@ pub(super) fn run_inner() -> Result<()> {
                                 }
                             }
                         }
-                        Event::ControllerDeviceRemoved { .. } => {
+                        // Only the pad we hold: the Magic Remote drops and re-adds constantly.
+                        Event::ControllerDeviceRemoved { which, .. }
+                            if controller.as_ref().is_some_and(|c| c.instance_id() == which) =>
+                        {
                             controller = None;
                             // An unplugged pad sends no releases, so a held chord would stay armed forever.
                             chord.clear();
+                        }
+                        // webOS 23+ also types each pad press as a remote key (arrows, OK, Back) unless
+                        // the window's `cloudgame_active` holds. The pad already carries the press, so
+                        // the copy is a second one on the host and its key repeat a burst of them.
+                        Event::KeyDown { keycode: Some(k), .. } | Event::KeyUp { keycode: Some(k), .. }
+                            if controller.is_some()
+                                && crate::platform::webos::input::menu_event_for_key(k).is_some() =>
+                        {
+                            if !echo_logged {
+                                echo_logged = true;
+                                tracing::info!(key = ?k, "pad key echo dropped");
+                            }
                         }
                         // Dialog open: navigate it only, don't forward input to the host.
                         _ if disconnect.is_open() => {
