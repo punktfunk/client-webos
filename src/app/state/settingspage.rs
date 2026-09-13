@@ -395,6 +395,9 @@ impl App {
         let sp = &self.screens.settings_page;
         let mut settings = self.scope_settings();
         let rows = page_rows(sp.page, &sp.scope);
+        // Calibration has nothing to measure without an HDR stream, and the kit hides the HDR
+        // row itself on a panel that cannot take one.
+        let hdr_on = settings.hdr_enabled && crate::core::caps::video_caps().hdr;
         self.with_engine(&mut settings, |ctx| {
             let mut out: Rows = Vec::new();
             let mut pending_header: Option<&'static str> = None;
@@ -409,6 +412,7 @@ impl App {
                     {
                         false
                     }
+                    Row::CalibrateHdr => hdr_on,
                     Row::Kit(id) => engine::row_on(id, pf_console_ui::Platform::WebOS) && engine::row_applies(id, ctx),
                     _ => true,
                 };
@@ -441,8 +445,7 @@ impl App {
                                 spec = spec.locked(lock);
                             } else if id == RowId::PadType && self.dualsense_limited() {
                                 spec = spec.with_note("DualSense is only partly supported on this webOS release");
-                            }
-                            if id == RowId::PresentPriority {
+                            } else if id == RowId::PresentPriority {
                                 spec = spec.with_note("Smoother video, more delay");
                             }
                             spec.dot = overlay.as_ref().is_some_and(|o| overridden(o, id));
@@ -458,14 +461,8 @@ impl App {
                                 None => spec.locked("Checking whether this TV is rooted…"),
                             }
                         }
-                        Row::CalibrateHdr => {
-                            let spec = RowSpec::action("Calibrate HDR…", true);
-                            if core.hdr_enabled && crate::core::caps::video_caps().hdr {
-                                spec
-                            } else {
-                                spec.locked("Turn HDR on to calibrate")
-                            }
-                        }
+                        // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
+                        Row::CalibrateHdr => RowSpec::action("Calibrate HDR…", true),
                         Row::Pad => match self.detected_gamepad_type {
                             Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
@@ -802,8 +799,8 @@ impl App {
 /// Why a shared row is on no page, or `None` when it is on one.
 ///
 /// Exhaustive on purpose. A `RowId` added upstream is a build error here, so a new setting
-/// gets a decision instead of silently never appearing — which is how Compositor, Render
-/// scale and the pacing rows stayed off the TV.
+/// gets a decision instead of silently never appearing — which is how Compositor and Render
+/// scale stayed off the TV.
 #[cfg(test)]
 fn absence(id: RowId) -> Option<&'static str> {
     Some(match id {

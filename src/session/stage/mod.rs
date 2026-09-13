@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pf_client_core::trust::PresentPriority;
 use punktfunk_core::quic;
 
 use crate::core::media::{AudioPlane, NotReady, VideoSink, VideoSinkCaps};
@@ -73,9 +74,10 @@ pub enum SinkResult {
 
 /// Everything the sink needs to know up front.
 pub struct SinkConfig {
-    /// Negotiated host cadence used to convert the smoothness budget into time.
+    /// Negotiated host cadence — never the panel's: it is the adaptive cushion's ceiling in
+    /// [`Pacing`], and what converts the smoothness budget into time.
     pub stream_hz: u32,
-    pub present_priority: pf_client_core::trust::PresentPriority,
+    pub present_priority: PresentPriority,
     /// Whether the host asked for decode-latency reports (its ABR controller).
     pub report_decode_latency: bool,
 }
@@ -149,16 +151,14 @@ impl VideoStage {
         let stream_hz = cfg.stream_hz.max(1);
         let audio_plane = sink.audio_plane();
         let caps = sink.caps();
-        let priority = if sink.clock().is_some() && audio_plane.is_some() {
-            cfg.present_priority
-        } else {
-            if matches!(
-                cfg.present_priority,
-                pf_client_core::trust::PresentPriority::Smooth { .. }
-            ) {
+        let paced = sink.clock().is_some() && audio_plane.is_some();
+        let priority = match cfg.present_priority {
+            p if paced => p,
+            PresentPriority::Smooth { .. } => {
                 tracing::warn!("smoothness unavailable: decoder has no paced audio/video timeline");
+                PresentPriority::Latency
             }
-            pf_client_core::trust::PresentPriority::Latency
+            p => p,
         };
         let pacing = Pacing::new(1_000_000_000 / u64::from(stream_hz), priority);
         tracing::info!(?priority, stream_hz, "video presentation");
@@ -393,8 +393,12 @@ impl VideoStage {
         match play_result {
             Ok(()) if flags.partial => SinkResult::Presented { decode_us: None },
             Ok(()) => {
-                if let Some(clock) = self.sink.clock() {
-                    self.pacing.note_submitted(base_ns, clock.now_ns());
+                // Behind `timed` like every other figure here: the clock read is a per-picture
+                // vDSO call, and nothing reads `late_submit` unless the diagnostics are on.
+                if timed {
+                    if let Some(clock) = self.sink.clock() {
+                        self.pacing.note_submitted(base_ns, clock.now_ns());
+                    }
                 }
                 // NDL exposes no decoded-output callback. Render depth measures neither decode
                 // duration nor reliable presentation headroom, so ABR uses timed feed calls
@@ -555,7 +559,7 @@ mod tests {
             Arc::new(StreamStats::default()),
             SinkConfig {
                 stream_hz: 60,
-                present_priority: pf_client_core::trust::PresentPriority::Latency,
+                present_priority: PresentPriority::Latency,
                 report_decode_latency: false,
             },
         )

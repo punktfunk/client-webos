@@ -25,16 +25,10 @@ impl Pacing {
     /// Pass a priority resolved by the shared settings resolver (including Automatic).
     pub fn new(source_interval_ns: u64, priority: PresentPriority) -> Self {
         let interval = i64::try_from(source_interval_ns).unwrap_or(i64::MAX).max(1);
-        let smooth_cushion_ns = match priority {
-            PresentPriority::Latency => None,
-            PresentPriority::Smooth { buffer } => {
-                debug_assert!(
-                    (1..=3).contains(&buffer),
-                    "presentation priority must be resolved before pacing"
-                );
-                Some(interval.saturating_mul(i64::from(buffer)))
-            }
-        };
+        // `fifo_capacity` is core's own reading of the enum: 0 means the latency intent, and
+        // `PresentPriority::resolve` has already clamped the buffer to 1–3.
+        let frames = priority.fifo_capacity();
+        let smooth_cushion_ns = (frames > 0).then(|| interval.saturating_mul(i64::from(frames)));
         Self {
             // Default tuning assumes roughly half a refresh of panel-latch slack. Smoothness replaces
             // its cushion; the firmware scheduling assumption still needs device validation.
@@ -60,14 +54,14 @@ impl Pacing {
             self.clock.due_ns(host_pts_ns, ready, self.source_interval_ns)
         };
         self.last_host_pts_ns = Some(host_pts_ns);
-        if let Some(cushion) = self.smooth_cushion_ns {
+        let base = if let Some(cushion) = self.smooth_cushion_ns {
             due = due.saturating_sub(self.clock.cushion_ns()).saturating_add(cushion);
-        }
-        let mut base = u64::try_from(due).unwrap_or(0).max(self.last_base_ns);
-        if self.smooth_cushion_ns.is_some() {
+            let base = u64::try_from(due).unwrap_or(0).max(self.last_base_ns);
             // Choose the later integer-ms timestamp; this adds less than 1 ms to the target.
-            base = base.saturating_add(999_999) / 1_000_000 * 1_000_000;
-        }
+            base.div_ceil(1_000_000) * 1_000_000
+        } else {
+            u64::try_from(due).unwrap_or(0).max(self.last_base_ns)
+        };
         self.last_base_ns = base;
         if base <= player_clock_ns {
             self.late_stamps += 1;
