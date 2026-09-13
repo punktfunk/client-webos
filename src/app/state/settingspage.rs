@@ -148,6 +148,10 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             push(Row::Kit(K::Hdr), None);
             if !profile {
                 push(Row::CalibrateHdr, None);
+            }
+            push(Row::Kit(K::PresentPriority), Some("Presentation"));
+            push(Row::Kit(K::SmoothBuffer), None);
+            if !profile {
                 push(Row::GameMode, Some("TV"));
             }
         }
@@ -192,6 +196,8 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
         RowId::Bitrate => "bitrate_kbps",
         RowId::Codec => "codec",
         RowId::Hdr => "hdr_enabled",
+        RowId::PresentPriority => "present_priority",
+        RowId::SmoothBuffer => "smooth_buffer",
         RowId::Audio => "audio_channels",
         RowId::Mouse => "mouse_mode",
         RowId::InvertScroll => "invert_scroll",
@@ -209,6 +215,8 @@ fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
         RowId::Bitrate => o.bitrate_kbps.is_some(),
         RowId::Codec => o.codec.is_some(),
         RowId::Hdr => o.hdr_enabled.is_some(),
+        RowId::PresentPriority => o.present_priority.is_some(),
+        RowId::SmoothBuffer => o.smooth_buffer.is_some(),
         RowId::Audio => o.audio_channels.is_some(),
         RowId::Mouse => o.mouse_mode.is_some(),
         RowId::InvertScroll => o.invert_scroll.is_some(),
@@ -387,6 +395,9 @@ impl App {
         let sp = &self.screens.settings_page;
         let mut settings = self.scope_settings();
         let rows = page_rows(sp.page, &sp.scope);
+        // Calibration has nothing to measure without an HDR stream, and the kit hides the HDR
+        // row itself on a panel that cannot take one.
+        let hdr_on = settings.hdr_enabled && crate::core::caps::video_caps().hdr;
         self.with_engine(&mut settings, |ctx| {
             let mut out: Rows = Vec::new();
             let mut pending_header: Option<&'static str> = None;
@@ -395,6 +406,13 @@ impl App {
                     pending_header = header;
                 }
                 let shown = match row {
+                    // Only NDL v2 has an audio plane here; it also supplies timestamped video.
+                    Row::Kit(RowId::PresentPriority | RowId::SmoothBuffer)
+                        if !crate::core::caps::video_caps().audio_plane =>
+                    {
+                        false
+                    }
+                    Row::CalibrateHdr => hdr_on,
                     Row::Kit(id) => engine::row_on(id, pf_console_ui::Platform::WebOS) && engine::row_applies(id, ctx),
                     _ => true,
                 };
@@ -416,6 +434,7 @@ impl App {
         let rows = self.settings_page_rows();
         let profiles: Vec<(String, String)> = self.profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
         let core = self.settings_ui.settings.clone();
+        let priority = settings.present_priority();
         self.with_engine(&mut settings, |ctx| {
             rows.iter()
                 .enumerate()
@@ -427,6 +446,15 @@ impl App {
                                 spec = spec.locked(lock);
                             } else if id == RowId::PadType && self.dualsense_limited() {
                                 spec = spec.with_note("DualSense is only partly supported on this webOS release");
+                            } else if id == RowId::PresentPriority {
+                                spec = spec.with_note(match priority {
+                                    pf_client_core::trust::PresentPriority::Latency => {
+                                        "Lowest latency, but an uneven frame rate can stutter"
+                                    }
+                                    pf_client_core::trust::PresentPriority::Smooth { .. } => {
+                                        "Buffers to smooth the stream, adds latency"
+                                    }
+                                });
                             }
                             spec.dot = overlay.as_ref().is_some_and(|o| overridden(o, id));
                             spec
@@ -441,14 +469,8 @@ impl App {
                                 None => spec.locked("Checking whether this TV is rooted…"),
                             }
                         }
-                        Row::CalibrateHdr => {
-                            let spec = RowSpec::action("Calibrate HDR…", true);
-                            if core.hdr_enabled && crate::core::caps::video_caps().hdr {
-                                spec
-                            } else {
-                                spec.locked("Turn HDR on to calibrate")
-                            }
-                        }
+                        // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
+                        Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
                         Row::Pad => match self.detected_gamepad_type {
                             Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
@@ -785,8 +807,8 @@ impl App {
 /// Why a shared row is on no page, or `None` when it is on one.
 ///
 /// Exhaustive on purpose. A `RowId` added upstream is a build error here, so a new setting
-/// gets a decision instead of silently never appearing — which is how Compositor, Render
-/// scale and the pacing rows stayed off the TV.
+/// gets a decision instead of silently never appearing — which is how Compositor and Render
+/// scale stayed off the TV.
 #[cfg(test)]
 fn absence(id: RowId) -> Option<&'static str> {
     Some(match id {
@@ -796,6 +818,8 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Bitrate
         | RowId::Codec
         | RowId::Hdr
+        | RowId::PresentPriority
+        | RowId::SmoothBuffer
         | RowId::Audio
         | RowId::AudioRoute
         | RowId::Mouse
@@ -832,8 +856,6 @@ fn absence(id: RowId) -> Option<&'static str> {
         // reader anywhere in this crate. A row would write a value nothing ever sends.
         RowId::Compositor
         | RowId::RenderScale
-        | RowId::PresentPriority
-        | RowId::SmoothBuffer
         | RowId::AudioFormat
         | RowId::KeepHostAudio
         | RowId::Mic

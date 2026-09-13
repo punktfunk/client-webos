@@ -130,9 +130,6 @@ impl VideoPump {
             index: frame.frame_index,
             part: frame.part,
             reanchor: frame.flags & u32::from(FLAG_SOF) != 0 || frame.flags & USER_FLAG_RECOVERY_ANCHOR != 0,
-            // Parts repeat the AU flags. Count a recovery boundary once.
-            recovery_mark: frame.flags & punktfunk_core::packet::USER_FLAG_RECOVERY_POINT != 0
-                && frame.part.is_none_or(|part| part.first),
             loss: self.note_loss(frame),
         };
         // Sampled ahead of the feed so a stalled decoder is not handed one more frame first.
@@ -176,12 +173,17 @@ impl VideoPump {
             return;
         }
         // Latched for the feed path, so the timing decision there costs a field read rather than
-        // an atomic load per AU piece. A toggle takes effect within one heartbeat.
-        let wanted = self.stats.wants_diagnostics();
-        self.stage.set_diagnostics(wanted);
+        // an atomic load per AU piece. A toggle takes effect within one heartbeat. DEBUG latches
+        // it too: the log below reads the same `timed`-gated figures the overlay does
+        // (`late_submit`, the backpressure warning), which would otherwise stay zero forever.
+        let overlay = self.stats.wants_diagnostics();
+        let debug = tracing::enabled!(tracing::Level::DEBUG);
+        self.stage.set_diagnostics(overlay || debug);
         // `due()` on its own line, so the tick keeps advancing on a level where nothing listens.
-        let log_due = self.video_log.due() && tracing::enabled!(tracing::Level::DEBUG);
-        if !wanted && !log_due {
+        // The body stays behind a real reader: the render-buffer query below is an FFI call
+        // behind the feed's own lock, so DEBUG alone must not run it every heartbeat.
+        let log_due = self.video_log.due() && debug;
+        if !overlay && !log_due {
             return;
         }
         let backlog = self.stage.backlog_depth();
@@ -206,11 +208,11 @@ impl VideoPump {
         // DEBUG, so it costs a telemetry listener or `TELEMETRY_LEVEL=debug` to see — the
         // on-device file sink is INFO-only (`logger::resolved_level`).
         if log_due {
-            // `late_stamp` is the judder, counted: frames NDL was handed too late to pace. The
-            // rest describes the loop that produced them (see `session::timeline::PacingHealth`).
+            // Neither counter measures on-glass cadence; final submission includes AU tail and FFI waits.
             tracing::debug!(
-                "pacing: late_stamp={} jitter={:.1}ms cushion={:.1}ms reanchors={}",
+                "pacing: late_stamp={} late_submit={} jitter={:.1}ms cushion={:.1}ms reanchors={}",
                 pacing.late_stamps,
+                pacing.late_submissions,
                 pacing.jitter_ns as f64 / 1e6,
                 pacing.cushion_ns as f64 / 1e6,
                 pacing.reanchors,

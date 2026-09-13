@@ -31,6 +31,8 @@ const ROW_GAP: f32 = 6.0;
 const HEADER_H: f32 = 34.0;
 /// The card keeps this much of the screen clear above and below, so a long list scrolls.
 const MARGIN: f32 = 40.0;
+/// Height of the scroll fade at each edge.
+const FADE_H: f32 = 40.0;
 
 pub(crate) struct Layout {
     pub card: Rect,
@@ -162,9 +164,91 @@ pub(crate) fn draw(
             theme::fg(if hover_close { 1.0 } else { 0.5 }),
         );
     }
-    list.render(c, l.rows, rows, f.fonts, f64::from(k), dt, active);
+    render_faded(c, list, l.rows, rows, f.fonts, k, dt, active);
     c.restore();
     c.restore();
+}
+
+/// Render the rows, fading whichever edge still has rows behind it — the kit clips hard, and a
+/// cut row reads as the end of the list. Used by every `MenuList` site.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_faded(
+    c: &skia_safe::Canvas,
+    list: &mut MenuList,
+    rect: Rect,
+    rows: &[RowSpec],
+    fonts: &Fonts,
+    k: f32,
+    dt: f64,
+    active: bool,
+) {
+    let (content_h, focused_center) = row_metrics(rows, list.cursor);
+    let (top, bottom) = crate::ui::scroll::edge_fades(content_h, rect.height() / k, focused_center, FADE_H);
+    // Mask the rows themselves, not the glass: a painted strip would opacify the card.
+    let faded = top > 0.0 || bottom > 0.0;
+    if faded {
+        c.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&rect));
+    }
+    list.render(c, rect, rows, fonts, f64::from(k), dt, active);
+    if faded {
+        edge_mask(c, rect, top, bottom, k);
+        c.restore();
+    }
+}
+
+/// The kit's own layout, restated: total row height and where the focused row centres, in
+/// design units. `MenuList` keeps its scroll private, so the fade recomputes it from these.
+fn row_metrics(rows: &[RowSpec], cursor: usize) -> (f32, f32) {
+    let mut y = 0.0f32;
+    let mut focused_center = 0.0;
+    for (i, row) in rows.iter().enumerate() {
+        if row.header.is_some() {
+            y += HEADER_H;
+        }
+        if i == cursor {
+            focused_center = y + ROW_H as f32 / 2.0;
+        }
+        y += ROW_H as f32 + ROW_GAP;
+    }
+    ((y - ROW_GAP).max(0.0), focused_center)
+}
+
+/// Ramp the layer's alpha to zero over the faded edges.
+fn edge_mask(c: &skia_safe::Canvas, rect: Rect, top: f32, bottom: f32, k: f32) {
+    // Never let the two bands overlap: DstIn is multiplicative, so a shared strip would be
+    // masked twice and the middle of a short list would wash out.
+    let band = (FADE_H * k).min(rect.height() / 2.0);
+    let bands = [
+        (
+            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + band),
+            top,
+            true,
+        ),
+        (
+            Rect::from_ltrb(rect.left, rect.bottom - band, rect.right, rect.bottom),
+            bottom,
+            false,
+        ),
+    ];
+    for (r, strength, from_top) in bands {
+        if strength <= 0.0 {
+            continue;
+        }
+        let mut p = skia_safe::Paint::default();
+        p.set_blend_mode(skia_safe::BlendMode::DstIn);
+        let clear = skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0 - strength);
+        let keep = skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0);
+        let stops = if from_top { [clear, keep] } else { [keep, clear] };
+        p.set_shader(skia_safe::gradient::shaders::linear_gradient(
+            (Point::new(r.left, r.top), Point::new(r.left, r.bottom)),
+            &skia_safe::gradient::Gradient::new(
+                skia_safe::gradient::Colors::new_evenly_spaced(&stops, skia_safe::TileMode::Clamp, None),
+                skia_safe::gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        c.draw_rect(r, &p);
+    }
 }
 
 /// One of this app's rows in the kit's vocabulary.
@@ -210,6 +294,7 @@ pub(crate) fn with_row_buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::app::view::icons;
     use pf_console_ui::widgets::Control;
 

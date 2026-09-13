@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pf_client_core::trust::PresentPriority;
 use punktfunk_core::quic;
 
 use crate::core::media::{AudioPlane, NotReady, VideoSink, VideoSinkCaps};
@@ -35,8 +36,6 @@ pub struct WireFrame<'a> {
     pub part: Option<punktfunk_core::session::FramePart>,
     /// This frame can restart decoding on its own (IDR, or an LTR recovery anchor).
     pub reanchor: bool,
-    /// One intra-refresh wave boundary. Two after loss prove a clean picture.
-    pub recovery_mark: bool,
     /// Loss was detected at or before this frame — a sequence gap, or a frame the transport
     /// dropped.
     pub loss: bool,
@@ -46,7 +45,6 @@ pub struct WireFrame<'a> {
 #[derive(Clone, Copy)]
 struct FrameFlags {
     reanchor: bool,
-    recovery_mark: bool,
     loss: bool,
     /// Host frame index, for logs only.
     index: u64,
@@ -76,8 +74,10 @@ pub enum SinkResult {
 
 /// Everything the sink needs to know up front.
 pub struct SinkConfig {
-    /// The host's frame cadence — the cushion's ceiling in [`Pacing`].
+    /// Negotiated host cadence — never the panel's: it is the adaptive cushion's ceiling in
+    /// [`Pacing`], and what converts the smoothness budget into time.
     pub stream_hz: u32,
+    pub present_priority: PresentPriority,
     /// Whether the host asked for decode-latency reports (its ABR controller).
     pub report_decode_latency: bool,
 }
@@ -86,9 +86,8 @@ pub struct SinkConfig {
 /// QUIC control stream, so a tight interval costs nothing but the request itself.
 const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Render-buffer depth past which the decoder is behind for real: eight frames is 133 ms of
-/// picture at 60 fps that NDL accepted and has not shown. Sessions measure 0–1 whether smooth
-/// or stuttering, so this fires on a stall, not on jitter.
+/// Conservative recovery threshold for sustained reported backlog. This opaque count does
+/// not reliably measure timestamp headroom; observed smooth and stuttery sessions both read 0–1.
 const BACKLOG_HOLD_FRAMES: u32 = 8;
 /// Deep samples in a row before acting; one can catch a burst mid-drain.
 const BACKLOG_HOLD_SAMPLES: u8 = 2;
@@ -132,12 +131,9 @@ pub struct VideoStage {
     /// parts for an AU spanning more than one FEC block, so at small AU sizes the feature is inert.
     parts_fed: u64,
     /// Freeze-until-reanchor: while holding, frames are skipped rather than fed — the
-    /// punch-through plane keeps the last good picture. Resumes on IDR / LTR-RFI recovery
-    /// anchor, or two intra-refresh recovery marks. `Some` for exactly as long as the hold lasts
-    /// (see [`Self::holding`]).
+    /// punch-through plane keeps the last good picture. Resumes on an IDR or an LTR-RFI
+    /// recovery anchor only. `Some` for exactly as long as the hold lasts (see [`Self::holding`]).
     hold_started: Option<Instant>,
-    /// Intra-refresh wave boundaries observed since the latest loss.
-    recovery_marks: u32,
     /// Backpressure sampling (`backpressure`): when the depth was last read, and how many reads
     /// in a row found it past [`BACKLOG_HOLD_FRAMES`].
     backlog_sampled: Option<Instant>,
@@ -155,23 +151,28 @@ impl VideoStage {
         let stream_hz = cfg.stream_hz.max(1);
         let audio_plane = sink.audio_plane();
         let caps = sink.caps();
+        let paced = sink.clock().is_some() && audio_plane.is_some();
+        let priority = match cfg.present_priority {
+            p if paced => p,
+            PresentPriority::Smooth { .. } => {
+                tracing::warn!("smoothness unavailable: decoder has no paced audio/video timeline");
+                PresentPriority::Latency
+            }
+            p => p,
+        };
+        let pacing = Pacing::new(1_000_000_000 / u64::from(stream_hz), priority);
+        tracing::info!(?priority, stream_hz, "video presentation");
         Self {
             parts: AuParts::default(),
             caps,
             sink,
             audio_plane,
             stats,
-            // The cushion's ceiling, so it describes the cadence the HOST produces — never the
-            // panel's. Core says so with a test of its own
-            // (`the_cadence_interval_comes_from_the_stream_mode_not_the_panel`): a 120 fps
-            // stream on a 60 Hz panel would otherwise license twice the hold the source's own
-            // cadence can justify.
-            pacing: Pacing::new(1_000_000_000 / u64::from(stream_hz)),
+            pacing,
             au_base_ns: None,
             cfg,
             last_keyframe_request: None,
             hold_started: None,
-            recovery_marks: 0,
             backlog_sampled: None,
             deep_samples: 0,
             au_feed_us: 0,
@@ -234,7 +235,6 @@ impl VideoStage {
     fn begin_hold(&mut self) {
         self.stats.holding.store(true, Ordering::Relaxed);
         self.hold_started.get_or_insert_with(Instant::now);
-        self.recovery_marks = 0;
     }
 
     /// What the live mapping has to say for itself — see [`PacingHealth`]. The whole point of
@@ -322,7 +322,6 @@ impl VideoStage {
         };
         let flags = FrameFlags {
             reanchor: frame.reanchor,
-            recovery_mark: frame.recovery_mark,
             loss: frame.loss || lost_parts,
             index: u64::from(frame.index),
             partial,
@@ -394,10 +393,16 @@ impl VideoStage {
         match play_result {
             Ok(()) if flags.partial => SinkResult::Presented { decode_us: None },
             Ok(()) => {
-                // NDL exposes no decoded-output callback. Its render-buffer depth is presentation
-                // lead, not decoder latency, and feeding it into ABR created false learned caps at
-                // 4K120. `play` duration is the only measured decoder-pressure signal available:
-                // when input backpressures, it rises naturally.
+                // Behind `timed` like every other figure here: the clock read is a per-picture
+                // vDSO call, and nothing reads `late_submit` unless the diagnostics are on.
+                if timed {
+                    if let Some(clock) = self.sink.clock() {
+                        self.pacing.note_submitted(base_ns, clock.now_ns());
+                    }
+                }
+                // NDL exposes no decoded-output callback. Render depth measures neither decode
+                // duration nor reliable presentation headroom, so ABR uses timed feed calls
+                // as a decoder-pressure proxy instead.
                 SinkResult::Presented {
                     decode_us: self.cfg.report_decode_latency.then_some(au_feed_us),
                 }
@@ -437,10 +442,10 @@ impl VideoStage {
         let Some(started) = self.hold_started else {
             return HoldGate::Feed;
         };
-        if flags.recovery_mark {
-            self.recovery_marks = self.recovery_marks.saturating_add(1);
-        }
-        let recovered = flags.reanchor || self.recovery_marks >= punktfunk_core::reanchor::REANCHOR_MARKS_TO_LIFT;
+        // An IDR or an RFI anchor predicts from nothing NDL lacks. An intra-refresh wave heals
+        // only a decoder that decoded every frame of it, and the hold skipped those: lifting on
+        // its marks would feed NDL a picture whose references it never saw.
+        let recovered = flags.reanchor;
         if !recovered {
             // The slot is taken only while frames are still skipped. The frame that lifts the hold
             // restarts decoding by itself, and reporting a request on it made `submit` read the
@@ -453,18 +458,15 @@ impl VideoStage {
             });
         }
         tracing::info!(
-            "resuming after {:.0}ms (frame {}, reanchor={}, recovery_marks={})",
+            "resuming after {:.0}ms (frame {})",
             started.elapsed().as_secs_f32() * 1000.0,
             flags.index,
-            flags.reanchor,
-            self.recovery_marks,
         );
         // The real timeline just jumped (freeze then reanchor) — nothing about
         // the pre-hold accumulator is worth continuing.
         self.reset_timeline();
         self.stats.holding.store(false, Ordering::Relaxed);
         self.hold_started = None;
-        self.recovery_marks = 0;
         HoldGate::Feed
     }
 
@@ -557,6 +559,7 @@ mod tests {
             Arc::new(StreamStats::default()),
             SinkConfig {
                 stream_hz: 60,
+                present_priority: PresentPriority::Latency,
                 report_decode_latency: false,
             },
         )
@@ -569,7 +572,6 @@ mod tests {
             index,
             part: part.map(|(first, last, offset)| punktfunk_core::session::FramePart { offset, first, last }),
             reanchor,
-            recovery_mark: false,
             loss,
         }
     }
@@ -596,6 +598,33 @@ mod tests {
         shallow.backlog_sampled = None;
         assert!(!shallow.backpressure());
         assert!(!stage(None).backpressure(), "no queue to read, nothing to steer on");
+    }
+
+    /// A loss hold lifts on a reanchor alone. Its frames never reach NDL, so an intra-refresh
+    /// wave cannot heal the picture NDL would resume on; an IDR or an RFI anchor predicts only
+    /// from pictures NDL still holds.
+    #[test]
+    fn a_loss_hold_lifts_on_a_reanchor_alone() {
+        let mut s = stage(None);
+        assert!(matches!(
+            s.submit(&frame(1, None, false, true)),
+            SinkResult::NeedKeyframe
+        ));
+        for index in 2..40 {
+            assert!(
+                !matches!(
+                    s.submit(&frame(index, None, false, false)),
+                    SinkResult::Presented { .. }
+                ),
+                "frame {index} reached NDL during the hold"
+            );
+        }
+        assert!(s.holding());
+        assert!(matches!(
+            s.submit(&frame(40, None, true, false)),
+            SinkResult::Presented { .. }
+        ));
+        assert!(!s.holding());
     }
 
     /// A keyframe lifting a hold is fed whole, however long since the last request — reporting a

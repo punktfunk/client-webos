@@ -62,7 +62,7 @@ impl MediaPipeline {
             player.name(),
             client.audio_channels,
         );
-        let video_thread = spawn_video_thread(client, player, stop, stats, is_hdr)?;
+        let video_thread = spawn_video_thread(client, player, stop, stats, is_hdr, params.present_priority)?;
         // Failing here after the video thread is already up would otherwise detach it.
         let (audio_thread, clock_thread) = match spawn_plane_threads(client, plane, stop, route) {
             Ok(handles) => handles,
@@ -220,10 +220,12 @@ fn spawn_video_thread(
     stop: &Arc<AtomicBool>,
     stats: &Arc<StreamStats>,
     is_hdr: bool,
+    present_priority: pf_client_core::trust::PresentPriority,
 ) -> Result<std::thread::JoinHandle<()>> {
     let cfg = SinkConfig {
         stream_hz: client.mode().refresh_hz,
         report_decode_latency: client.wants_decode_latency(),
+        present_priority,
     };
     let (client, stop, stats) = (client.clone(), stop.clone(), stats.clone());
     std::thread::Builder::new()
