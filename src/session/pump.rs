@@ -130,9 +130,6 @@ impl VideoPump {
             index: frame.frame_index,
             part: frame.part,
             reanchor: frame.flags & u32::from(FLAG_SOF) != 0 || frame.flags & USER_FLAG_RECOVERY_ANCHOR != 0,
-            // Parts repeat the AU flags. Count a recovery boundary once.
-            recovery_mark: frame.flags & punktfunk_core::packet::USER_FLAG_RECOVERY_POINT != 0
-                && frame.part.is_none_or(|part| part.first),
             loss: self.note_loss(frame),
         };
         // Sampled ahead of the feed so a stalled decoder is not handed one more frame first.
