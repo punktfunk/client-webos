@@ -434,6 +434,7 @@ impl App {
         let rows = self.settings_page_rows();
         let profiles: Vec<(String, String)> = self.profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
         let core = self.settings_ui.settings.clone();
+        let priority = settings.present_priority();
         self.with_engine(&mut settings, |ctx| {
             rows.iter()
                 .enumerate()
@@ -446,7 +447,14 @@ impl App {
                             } else if id == RowId::PadType && self.dualsense_limited() {
                                 spec = spec.with_note("DualSense is only partly supported on this webOS release");
                             } else if id == RowId::PresentPriority {
-                                spec = spec.with_note("Smoother video, more delay");
+                                spec = spec.with_note(match priority {
+                                    pf_client_core::trust::PresentPriority::Latency => {
+                                        "Lowest latency, but an uneven frame rate can stutter"
+                                    }
+                                    pf_client_core::trust::PresentPriority::Smooth { .. } => {
+                                        "Buffers to smooth the stream, adds latency"
+                                    }
+                                });
                             }
                             spec.dot = overlay.as_ref().is_some_and(|o| overridden(o, id));
                             spec
@@ -462,7 +470,7 @@ impl App {
                             }
                         }
                         // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
-                        Row::CalibrateHdr => RowSpec::action("Calibrate HDR…", true),
+                        Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
                         Row::Pad => match self.detected_gamepad_type {
                             Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
