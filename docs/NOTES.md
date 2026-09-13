@@ -347,6 +347,8 @@ What still matters:
 
 ## NDL's audio plane: why every load has one
 
+Optional video presentation headroom is configured separately through the shared Smoothness preference: it substitutes a fixed cushion of 1-3 source frame periods for the adaptive one, and needs a timestamp clock plus an accepted audio plane (NDL v2) or it falls back to Lowest latency with a warning.
+
 ⚠ **NDL only paces the picture when its audio plane is fed.** On a video-only load it ignores
 `pauseAtDecodeTime` entirely and presents at feed cadence, which beats against a 120 Hz panel —
 the long-standing "smooth at 1080p, randomly smooth above it" stutter. Measured on a CX: frames
