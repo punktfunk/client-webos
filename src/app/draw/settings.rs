@@ -150,7 +150,7 @@ pub(crate) fn draw(
             );
         });
     }
-    list.render(c, l.rows, rows, f.fonts, f64::from(k), dt, active && !column);
+    super::list::render_faded(c, list, l.rows, rows, f.fonts, k, dt, active && !column);
     c.restore();
     c.restore();
 }
@@ -175,7 +175,7 @@ mod tests {
             RowSpec::slider("Bitrate", "Automatic", 0.0).with_header("Quality"),
             RowSpec::choice("Video codec", "Automatic"),
             RowSpec::toggle("HDR", true).with_note("10-bit, BT.2020 PQ"),
-            RowSpec::action("Calibrate HDR…", true),
+            RowSpec::action("Calibrate HDR", true),
             RowSpec::toggle("Game mode", false)
                 .with_header("TV")
                 .locked("Needs a rooted TV"),
