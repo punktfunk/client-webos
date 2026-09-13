@@ -347,6 +347,8 @@ What still matters:
 
 ## NDL's audio plane: why every load has one
 
+Optional video presentation headroom is configured separately through the shared Smoothness preference; see [NDL smoothness](handovers/ndl-smoothness.md) for the implementation, limits and validation.
+
 ⚠ **NDL only paces the picture when its audio plane is fed.** On a video-only load it ignores
 `pauseAtDecodeTime` entirely and presents at feed cadence, which beats against a 120 Hz panel —
 the long-standing "smooth at 1080p, randomly smooth above it" stutter. Measured on a CX: frames

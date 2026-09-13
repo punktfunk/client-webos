@@ -86,6 +86,7 @@ pub struct ConnectParams {
     /// `CLIENT_CAP_PAD_AUDIO`. The per-pad declaration rides the arrival, not the handshake.
     pub pad_audio_caps: u8,
     pub audio_route: crate::services::store::AudioRoutePref,
+    pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
     pub display_hdr: quic::HdrMeta,
 }

@@ -203,11 +203,11 @@ impl VideoPump {
         // DEBUG, so it costs a telemetry listener or `TELEMETRY_LEVEL=debug` to see — the
         // on-device file sink is INFO-only (`logger::resolved_level`).
         if log_due {
-            // `late_stamp` is the judder, counted: frames NDL was handed too late to pace. The
-            // rest describes the loop that produced them (see `session::timeline::PacingHealth`).
+            // Neither counter measures on-glass cadence; final submission includes AU tail and FFI waits.
             tracing::debug!(
-                "pacing: late_stamp={} jitter={:.1}ms cushion={:.1}ms reanchors={}",
+                "pacing: late_stamp={} late_submit={} jitter={:.1}ms cushion={:.1}ms reanchors={}",
                 pacing.late_stamps,
+                pacing.late_submissions,
                 pacing.jitter_ns as f64 / 1e6,
                 pacing.cushion_ns as f64 / 1e6,
                 pacing.reanchors,

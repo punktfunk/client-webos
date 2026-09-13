@@ -73,8 +73,9 @@ pub enum SinkResult {
 
 /// Everything the sink needs to know up front.
 pub struct SinkConfig {
-    /// The host's frame cadence — the cushion's ceiling in [`Pacing`].
+    /// Negotiated host cadence used to convert the smoothness budget into time.
     pub stream_hz: u32,
+    pub present_priority: pf_client_core::trust::PresentPriority,
     /// Whether the host asked for decode-latency reports (its ABR controller).
     pub report_decode_latency: bool,
 }
@@ -83,9 +84,8 @@ pub struct SinkConfig {
 /// QUIC control stream, so a tight interval costs nothing but the request itself.
 const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Render-buffer depth past which the decoder is behind for real: eight frames is 133 ms of
-/// picture at 60 fps that NDL accepted and has not shown. Sessions measure 0–1 whether smooth
-/// or stuttering, so this fires on a stall, not on jitter.
+/// Conservative recovery threshold for sustained reported backlog. This opaque count does
+/// not reliably measure timestamp headroom; observed smooth and stuttery sessions both read 0–1.
 const BACKLOG_HOLD_FRAMES: u32 = 8;
 /// Deep samples in a row before acting; one can catch a burst mid-drain.
 const BACKLOG_HOLD_SAMPLES: u8 = 2;
@@ -149,18 +149,26 @@ impl VideoStage {
         let stream_hz = cfg.stream_hz.max(1);
         let audio_plane = sink.audio_plane();
         let caps = sink.caps();
+        let priority = if sink.clock().is_some() && audio_plane.is_some() {
+            cfg.present_priority
+        } else {
+            if matches!(
+                cfg.present_priority,
+                pf_client_core::trust::PresentPriority::Smooth { .. }
+            ) {
+                tracing::warn!("smoothness unavailable: decoder has no paced audio/video timeline");
+            }
+            pf_client_core::trust::PresentPriority::Latency
+        };
+        let pacing = Pacing::new(1_000_000_000 / u64::from(stream_hz), priority);
+        tracing::info!(?priority, stream_hz, "video presentation");
         Self {
             parts: AuParts::default(),
             caps,
             sink,
             audio_plane,
             stats,
-            // The cushion's ceiling, so it describes the cadence the HOST produces — never the
-            // panel's. Core says so with a test of its own
-            // (`the_cadence_interval_comes_from_the_stream_mode_not_the_panel`): a 120 fps
-            // stream on a 60 Hz panel would otherwise license twice the hold the source's own
-            // cadence can justify.
-            pacing: Pacing::new(1_000_000_000 / u64::from(stream_hz)),
+            pacing,
             au_base_ns: None,
             cfg,
             last_keyframe_request: None,
@@ -385,10 +393,12 @@ impl VideoStage {
         match play_result {
             Ok(()) if flags.partial => SinkResult::Presented { decode_us: None },
             Ok(()) => {
-                // NDL exposes no decoded-output callback. Its render-buffer depth is presentation
-                // lead, not decoder latency, and feeding it into ABR created false learned caps at
-                // 4K120. `play` duration is the only measured decoder-pressure signal available:
-                // when input backpressures, it rises naturally.
+                if let Some(clock) = self.sink.clock() {
+                    self.pacing.note_submitted(base_ns, clock.now_ns());
+                }
+                // NDL exposes no decoded-output callback. Render depth measures neither decode
+                // duration nor reliable presentation headroom, so ABR uses timed feed calls
+                // as a decoder-pressure proxy instead.
                 SinkResult::Presented {
                     decode_us: self.cfg.report_decode_latency.then_some(au_feed_us),
                 }
@@ -545,6 +555,7 @@ mod tests {
             Arc::new(StreamStats::default()),
             SinkConfig {
                 stream_hz: 60,
+                present_priority: pf_client_core::trust::PresentPriority::Latency,
                 report_decode_latency: false,
             },
         )
