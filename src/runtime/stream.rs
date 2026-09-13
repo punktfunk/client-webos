@@ -428,6 +428,8 @@ pub(super) fn run_inner() -> Result<()> {
                     HidReport::Rich(rich) => input.send_rich(rich),
                 }
             });
+            // Tells the remote's keys from a pad's echo, off the remote's own nodes.
+            let mut remote_gate = RemoteGate::default();
             // Flips once a HID mouse is found — `HidInput::start` no longer scans before returning
             // (that blocked every stream connect on the node-open cost), so presence is only known
             // once the reader thread's own scan catches up; checked each tick below.
@@ -486,8 +488,6 @@ pub(super) fn run_inner() -> Result<()> {
             );
             // Gamepad routes to the disconnect dialog — see `DisconnectChord`.
             let mut chord = DisconnectChord::default();
-            // One log line per stream is enough to show a TV that echoes pad presses as keys.
-            let mut echo_logged = false;
             // Short Back tap forwards Esc; a held Back becomes webOS's EXIT gesture, polled below.
             // Seeded like the colour keys above — see there.
             let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
@@ -520,6 +520,15 @@ pub(super) fn run_inner() -> Result<()> {
                     cursor.reassert_hidden();
                     cursor.flush(canvas.window());
                 }
+                // The remote's presses, read before SDL's events so each is there to claim the key it
+                // caused. A key the remote did not press is a pad's echo (webOS 23+), unless the
+                // on-screen keyboard, which has no node of its own, typed it.
+                let now = Instant::now();
+                if let Some(hid) = hid.as_ref() {
+                    remote_gate.adopt(hid.take_remote_nodes());
+                }
+                remote_gate.poll(now);
+                let osk = text_input.is_shown(canvas.window());
                 for event in events.poll_iter() {
                     use sdl2::event::Event;
                     // Never real pointer input, so never the host's — see `mouse::is_touch_emulated`.
@@ -596,34 +605,27 @@ pub(super) fn run_inner() -> Result<()> {
                             // An unplugged pad sends no releases, so a held chord would stay armed forever.
                             chord.clear();
                         }
-                        // webOS 23+ also types each pad press as a remote key (arrows, OK, Back) unless
-                        // the window's `cloudgame_active` holds. The pad already carries the press, so
-                        // the copy is a second one on the host and its key repeat a burst of them.
-                        Event::KeyDown { keycode: Some(k), .. } | Event::KeyUp { keycode: Some(k), .. }
-                            if controller.is_some()
-                                && crate::platform::webos::input::menu_event_for_key(k).is_some() =>
-                        {
-                            if !echo_logged {
-                                echo_logged = true;
-                                tracing::info!(key = ?k, "pad key echo dropped");
-                            }
-                        }
-                        // Dialog open: navigate it only, don't forward input to the host.
+                        // Dialog open: navigate it only, don't forward input to the host. A key only if
+                        // the remote pressed it: a pad's echo would move it a second time.
                         _ if disconnect.is_open() => {
-                            match disconnect.handle_event(&event, &overlay_fonts, display.0, display.1) {
-                                Some(ConfirmAction::Confirmed) => {
-                                    tracing::info!("disconnecting to menu");
-                                    client_initiated_disconnect = true;
-                                    connected.disconnect_quit();
-                                    disconnect.dismiss();
-                                    pending_outcome = Some(StreamOutcome::ReturnToMenu);
+                            if remote_gate.admits(&event, now) {
+                                match disconnect.handle_event(&event, &overlay_fonts, display.0, display.1) {
+                                    Some(ConfirmAction::Confirmed) => {
+                                        tracing::info!("disconnecting to menu");
+                                        client_initiated_disconnect = true;
+                                        connected.disconnect_quit();
+                                        disconnect.dismiss();
+                                        pending_outcome = Some(StreamOutcome::ReturnToMenu);
+                                    }
+                                    Some(ConfirmAction::Dismissed) => overlay_last = None,
+                                    Some(ConfirmAction::Navigated) | None => {}
                                 }
-                                Some(ConfirmAction::Dismissed) => overlay_last = None,
-                                Some(ConfirmAction::Navigated) | None => {}
                             }
                         }
                         // Scancode keys are real game input — forward only, never open the dialog.
-                        Event::KeyDown { scancode: Some(sc), .. } if !hid_keys => {
+                        Event::KeyDown { scancode: Some(sc), .. }
+                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sc, true) {
                                 connected.send_input(&ev);
                             }
@@ -678,7 +680,9 @@ pub(super) fn run_inner() -> Result<()> {
                             scancode: None,
                             repeat: false,
                             ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back) => {
+                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
+                            && remote_gate.admits(&event, now) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, true) {
                                 connected.send_input(&ev);
                             }
@@ -687,12 +691,16 @@ pub(super) fn run_inner() -> Result<()> {
                             keycode: Some(k),
                             scancode: None,
                             ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back) => {
+                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
+                            && remote_gate.admits(&event, now) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, false) {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::KeyUp { scancode: Some(sc), .. } if !hid_keys => {
+                        Event::KeyUp { scancode: Some(sc), .. }
+                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sc, false) {
                                 connected.send_input(&ev);
                             }
