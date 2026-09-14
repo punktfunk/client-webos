@@ -326,7 +326,7 @@ fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One console fetcher's cache accounting; scans only at startup and quota crossings.
+/// Per-host cover cache accounting; scans on `new()` and when budget is exceeded.
 pub(crate) struct CoverCache {
     dir: PathBuf,
     totals: CacheTotals,
@@ -733,6 +733,7 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &SyncSender<(Art
         while let Ok(req) = rx.try_recv() {
             queue.push_back(req);
         }
+        // Drop requests that the UI cancelled by calling `forget*()` or dropping the loader.
         queue.retain(|req| req.live.load(Ordering::Relaxed));
         let at = queue.iter().position(|r| r.kind == ArtKind::Hero).unwrap_or_default();
         let Some(req) = queue.remove(at) else { continue };
@@ -754,6 +755,7 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &SyncSender<(Art
             }),
         };
         if let Some(loaded) = from_raw_cache {
+            // Request was cancelled; don't bother sending.
             if !req.live.load(Ordering::Relaxed) {
                 continue;
             }
@@ -799,6 +801,7 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &SyncSender<(Art
             }
         };
 
+        // Request was cancelled; don't bother decoding.
         if !req.live.load(Ordering::Relaxed) {
             continue;
         }
@@ -857,6 +860,7 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &SyncSender<(Art
         if totals[req.kind as usize] > cache_budget(req.kind) {
             totals = prune_cache(dir);
         }
+        // Request was cancelled; don't bother sending.
         if !req.live.load(Ordering::Relaxed) {
             continue;
         }

@@ -241,7 +241,7 @@ impl HidInput {
     /// newly adopted nodes inherit it.
     pub fn set_active(&self, active: bool) {
         if self.shared.grab.swap(active, Ordering::Relaxed) && !active {
-            // Preserve a release edge even if the dialog closes before poll returns.
+            // Release edge survives dialog close.
             self.shared.gate_epoch.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -585,7 +585,7 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
         }
         gate_epoch = epoch;
         apply_grab(&mut devices, active);
-        // Poll can outlive a dialog opening; gate each report against live state.
+        // Gate reports; poll outlives dialog open.
         let gated_sink = |report: HidReport<'_>| {
             if shared.grab.load(Ordering::Relaxed) || matches!(report, HidReport::Rich(_) | HidReport::Release(_)) {
                 sink(report);
@@ -638,7 +638,7 @@ fn scan_loop(
     removed: &std::sync::mpsc::Receiver<PathBuf>,
 ) {
     let mut seen = Vec::new();
-    // Avoid subtracting an interval from Instant: shortly after boot it can underflow.
+    // Instant underflows shortly after boot; use is_none_or.
     let mut last_scan: Option<Instant> = None;
     let mut dir_mtime = None;
     let mut next_source = 1;
@@ -655,7 +655,7 @@ fn scan_loop(
         if pending.is_none() && due {
             let first = last_scan.is_none();
             last_scan = Some(Instant::now());
-            // Opening ~20 empty nodes at ~40ms each makes unconditional rescans expensive.
+            // 20 empty nodes × 40ms each; gate on mtime.
             let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
             if first || mtime != dir_mtime {
                 dir_mtime = mtime;
@@ -673,7 +673,7 @@ fn scan_loop(
         match removed.recv_timeout(idle) {
             Ok(path) => {
                 seen.retain(|p| *p != path);
-                // A freed node is worth re-probing even if the directory's mtime is unchanged.
+                // Freed node worth re-probing; reset mtime.
                 dir_mtime = None;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

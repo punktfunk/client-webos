@@ -1,4 +1,4 @@
-//! Latest-state delivery, with transport deadlines independent of incoming events.
+//! Latest-state delivery; deadlines independent of events.
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,7 @@ impl<T> Mailbox<T> {
         }
     }
 
-    /// A final release cannot be overwritten by later ordinary updates.
+    /// Sealed state; immune to `replace()`.
     pub fn finish(&self, value: T) {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.1 {
@@ -99,7 +99,7 @@ impl<T: Copy + PartialEq> Pending<T> {
             return None;
         }
         let value = self.value.take()?;
-        // Failed attempts are throttled too; a broken service must not become a busy loop.
+        // Throttle failures too; prevent busy-loop.
         self.next_send = Some(now + self.interval);
         Some(value)
     }

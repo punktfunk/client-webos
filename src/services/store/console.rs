@@ -95,8 +95,8 @@ impl SettingsStore for ConsoleStore {
             }
             state.clone()
         };
-        // Whole document, one writer — see the module note. Unconditional even when nothing
-        // changed here: the writer owns the dedupe, and only it knows a previous write failed.
+        // Whole document, one writer - see the module note. Unconditional even when nothing
+        // changed here: the writer owns the dedupe, and only it knows if a previous write failed.
         self.writer.save(snapshot);
     }
 

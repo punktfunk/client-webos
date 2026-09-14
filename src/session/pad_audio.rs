@@ -229,7 +229,7 @@ impl Envelope {
         self.coils_owned.store(true, Ordering::Relaxed);
     }
 
-    /// A failed wired sink must restore the motor fallback.
+    /// Release USB audio; revert to motor-envelope rumble.
     pub fn release_usb(&self) {
         self.usb_pcm.store(false, Ordering::Relaxed);
         self.applied.store(0, Ordering::Relaxed);

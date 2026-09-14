@@ -97,8 +97,7 @@ impl App {
         for id in dropped {
             self.render.grid.arrivals.release(&id);
             self.render.covers.remove(&id);
-            // Drop the decoded cover too (several × card size); the disk cache answers a
-            // scroll back.
+            // Drop decoded cover; cache covers scrollback.
             self.library.art.remove(&id);
             if let Some(loader) = &mut self.jobs.art {
                 loader.forget(&id);
@@ -118,8 +117,7 @@ impl App {
             if let Some(loader) = &mut self.jobs.art {
                 loader.request(game);
             }
-            // A card first seen on a settled grid arrives with a pop; an art refresh swaps in
-            // place; the grid's first fill is the reveal wave's job.
+            // Pop new cards on settled grid; refresh swaps art; reveal fills initial page.
             if self.render.grid.arrivals.note(&game.id) && settled {
                 self.render.grid.arm_card_pop(&game.id, now);
             }

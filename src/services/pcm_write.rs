@@ -61,7 +61,7 @@ pub fn write_all(
             return Err(WriteError::NoProgress);
         }
         retries += 1;
-        // Bound consecutive stalls; positive writes reset both recovery budgets.
+        // Successful writes reset both counters; delay bounds stalls.
         wait(RETRY_DELAY);
     }
     Ok(())

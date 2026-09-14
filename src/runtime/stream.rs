@@ -851,8 +851,7 @@ pub(super) fn run_inner() -> Result<()> {
                     hid.set_active(!disconnect.is_open());
                 }
                 input_suspended = disconnect.is_open();
-                // Wider than `is_open()`: a dismissed dialog still draws (fading out) a few more
-                // ticks, used below to skip the stats overlay for exactly those ticks.
+                // True during fade-out, past `is_open()`; gates the stats overlay below.
                 let dialog_animating = disconnect.tick();
                 let dialog_frame = disconnect.frame();
                 if dialog_frame.is_some() && disconnect.redraw_due(dialog_animating) {

@@ -385,7 +385,7 @@ pub fn poison() -> LeakGuard {
 
 /// Checked early by `session::connect` to avoid holding a host slot for a connect that can only fail.
 pub fn ensure_not_poisoned() -> Result<()> {
-    // Cancelled media initialization must finish before another load, even without a poisoned pump.
+    // Cancelled media init must complete before another load.
     if CANCELLED_LOADS.load(Ordering::SeqCst) > 0 {
         bail!("Previous connection is still being cancelled — try reconnecting shortly");
     }

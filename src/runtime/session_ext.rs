@@ -27,8 +27,7 @@ pub(crate) const SOURCE_UI: u32 = 0;
 
 type Held = std::sync::Mutex<crate::core::input::HeldInputs>;
 
-/// Edges go through the held-input ledger so every forwarded press has exactly one release;
-/// everything else (motion, scroll, axes) carries its own state and goes straight out.
+/// Buttons route through the held-input ledger for 1:1 press/release; other events bypass it.
 fn send_edge(client: &NativeClient, held: &Held, source: u32, ev: &InputEvent) {
     if crate::core::input::HeldInputs::is_edge(ev) {
         held.lock()
@@ -244,11 +243,8 @@ impl Connected {
                 continue;
             }
             if let Some(pad) = controller.as_deref_mut() {
-                // `backstop_ms` passes straight through, including 0: SDL2 reads a zero duration as
-                // "no expiration" (`rumble_expiration = 0`, run until changed), not "stop now", which
-                // is exactly the semantics wanted here — the policy engine guarantees an explicit
-                // zero-level command at every stop, so a self-expiring effect would only risk
-                // cutting a held rumble short. Don't "fix" this into a floor.
+                // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
+                // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
                 //
                 // Errors here are the common "this pad has no rumble motors" case, not a fault:
                 // logging per command would spam a tick loop, and there is no recovery to attempt.
@@ -275,7 +271,7 @@ impl Connected {
 
         if let (Some(envelope), Some(pad)) = (haptics, controller) {
             if let Some((low, high)) = envelope.take_change() {
-                // 0 = until changed; the envelope itself sends the zero that ends it.
+                // 0 = until changed; envelope sends the stop.
                 let _ = pad.set_rumble(low, high, 0);
             }
         }

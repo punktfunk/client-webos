@@ -143,7 +143,7 @@ impl PadSink {
             interleaved,
             CHANNELS,
             |tail| {
-                // SAFETY: the remaining slice contains whole interleaved frames.
+                // SAFETY: tail is whole frames, ready for writei.
                 let n =
                     unsafe { (self.fns.writei)(self.pcm, tail.as_ptr().cast(), (tail.len() / CHANNELS) as c_ulong) };
                 if n >= 0 {

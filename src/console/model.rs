@@ -186,8 +186,8 @@ impl Service {
     /// The home carousel: saved hosts (most recently used first), each followed by its pinned
     /// profile cards, then discovered-but-unsaved ones. A pinned card shares its host's live
     /// state; its key rides the profile id behind a NUL, as the desktop's does.
-    // Inputs: persisted hosts/profiles, discovery adverts, reachability and rights.
-    // Store revision and rows_dirty cover those; game arrivals supply no row fields.
+    // Inputs: persisted hosts/profiles, adverts, reachability, rights.
+    // Store revision and rows_dirty gate updates; game arrivals affect no row fields.
     fn rows(&self) -> Vec<HostRow> {
         let state = self.store.snapshot();
         let catalog = pf_client_core::profiles::ProfilesFile {
@@ -588,7 +588,9 @@ impl Service {
                 ..KnownHost::default()
             };
             record.set_fingerprint(fingerprint);
-            store::upsert_known_host(&mut state.known_hosts, record);
+            if let Some(fresh) = store::upsert_known_host(&mut state.known_hosts, record) {
+                store::seed_new_host_profiles(fresh, &mut state.profiles);
+            }
             true
         });
         self.handles.console.set_pair(PairPhase::Paired { key });
@@ -971,7 +973,7 @@ enum ArtItem {
 ///
 /// A full-size PNG cover costs ~90 ms on a CX — five frames — and the shelf used to stop for
 /// each one. This thread is already waiting on the network, so the work lands where nothing is
-/// watching. Wait for the shelf's decode scale before fetching, keeping pending results bounded.
+/// watching. Wait for the shelf's decode scale; bound pending results with `sync_channel`.
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
@@ -1050,8 +1052,7 @@ fn spawn_art(
 /// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
 
-/// Timeout for fetched covers waiting for the shelf's decode scale. Bounds the wait if the shelf
-/// never opens: those covers go over encoded, as they did before the fetcher decoded at all.
+/// Timeout for covers waiting on decode scale. If shelf never publishes, deliver encoded.
 const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
 
 struct ArtReceiver {

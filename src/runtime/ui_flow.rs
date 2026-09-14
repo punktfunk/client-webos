@@ -284,14 +284,12 @@ pub(super) fn run_ui_flow(
                 }
                 Event::ControllerDeviceRemoved { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
-                    // Only the owned pad: the Magic Remote enumerates as a controller and drops
-                    // constantly, and clearing on its removal took the real pad's handle with it.
+                    // Magic Remote enumerates as controller; check instance_id to avoid losing the real pad.
                     if controller.as_ref().is_some_and(|c| c.instance_id() == which) {
-                        // An unplugged pad sends no releases — drop any armed chord, and the
-                        // held direction it can no longer let go of.
+                        // Unplugged pads send no releases; clear armed chords and held directions.
                         chord.clear();
                         input.clear_nav_repeat();
-                        // Adopt whatever pad is left: a still-attached one sends no Added event.
+                        // Still-attached pads send no Added event.
                         *controller = (0..game_controller.num_joysticks().unwrap_or(0))
                             .filter(|&i| game_controller.is_game_controller(i))
                             .filter_map(|i| game_controller.open(i).ok())

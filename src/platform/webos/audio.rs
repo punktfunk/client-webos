@@ -45,7 +45,7 @@ const DEVICE_BUFFER_FRAMES: u16 = 512;
 /// Chunks in flight between the decode thread and the callback. 5 ms each.
 const CHUNK_QUEUE: usize = 64;
 
-/// Reserve the larger of the policy cap and device period, plus queued chunks, before playback.
+/// Pre-allocate to satisfy both the policy cap and device period, accounting for chunks in flight.
 fn ring_capacity(device_samples: u16, channels: u8) -> usize {
     const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1000;
     const CHUNK_MS: usize = 5;

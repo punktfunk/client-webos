@@ -206,7 +206,7 @@ pub(super) enum ConfirmAction {
     Navigated,
 }
 
-// Decouple dialog animation from the stream loop's 2ms polling.
+// Decouple from stream's 2ms polling.
 const DIALOG_FRAME_STEP: Duration = Duration::from_millis(16);
 
 /// A two-button confirm dialog (stop streaming mid-stream, quit in the menu) with the same

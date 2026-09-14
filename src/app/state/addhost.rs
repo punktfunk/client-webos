@@ -35,11 +35,9 @@ impl App {
         } else {
             format!("{host}:{port}")
         };
-        store::upsert_known_host(
+        if let Some(fresh) = store::upsert_known_host(
             &mut self.hosts.known,
-            // Only reaches a genuinely new host: `upsert_known_host` keeps an existing record's
-            // pins, wol_auto and fingerprint, so re-adding a paired host neither unpairs it
-            // nor resets its preferences.
+            // Returns Some for new, None for existing (preserves pins/wol/fingerprint).
             KnownHost {
                 shared: pf_client_core::trust::KnownHost {
                     name,
@@ -49,7 +47,9 @@ impl App {
                 },
                 ..KnownHost::default()
             },
-        );
+        ) {
+            store::seed_new_host_profiles(fresh, &mut self.profiles);
+        }
         self.persist();
         self.rebuild_entries();
         self.set_home_focus(HomeFocus::Sidebar(self.hosts.entry_index(&host, port).unwrap_or(0)));

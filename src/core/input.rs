@@ -1,6 +1,6 @@
 use punktfunk_core::input::{InputEvent, InputKind};
 
-/// Forwarded edges, shared by input sources using the host's single keyboard and mouse.
+/// Dedupes key/button edges across input sources sharing the host's input devices.
 #[derive(Default)]
 pub struct HeldInputs {
     held: Vec<(u32, InputEvent)>,

@@ -306,9 +306,7 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
 
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StreamStats::default());
-    // One call builds the whole decode path — sinks, stages and the threads that drive them — and
-    // unwinds itself if any part of it fails. Nothing about which backend or which audio route it
-    // settled on reaches back out here beyond the two figures the loop displays.
+    // Spawns the decode threads; fails atomically if any setup step fails.
     attempt.enter_media()?;
     let (pipeline, route, is_hdr) = MediaPipeline::build(params, &client, &stop, &stats)?;
 

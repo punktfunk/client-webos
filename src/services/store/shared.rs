@@ -201,8 +201,9 @@ mod tests {
 
 /// The settings one launch runs with: the global document with the resolved profile applied
 /// — one-off ?? per-title ?? host default, the shared resolver's own precedence — then the
-/// Desktop card's standing rule that pointer capture is off there (unless the profile sets
-/// the mouse mode), then this set's caps. The single merge point both menu loops call.
+/// Desktop card's standing rule that pointer capture is off there (unless a profile is bound to
+/// that card, or the resolved one pins the mouse mode), then this set's caps. The single merge
+/// point both menu loops call.
 pub fn launch_settings(
     state: &Persisted,
     addr: &str,
@@ -223,7 +224,12 @@ pub fn launch_settings(
     let mut settings = profile
         .as_ref()
         .map_or_else(|| global.clone(), |p| p.overrides.apply(global));
-    if id == DESKTOP_PIN_ID && profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none()) {
+    // Desktop defaults to absolute pointer. Two overrides: profile bound to this card (wins
+    // wholesale, inherited mouse mode included), or resolved profile pinning mouse mode.
+    // Pin presence is read; LOAD_BEARING_PIN must exempt this field.
+    let bound_to_card = per_title.is_some_and(|id| state.profiles.iter().any(|p| p.id == id));
+    let inherits_pointer = profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none());
+    if id == DESKTOP_PIN_ID && !bound_to_card && inherits_pointer {
         settings.set_cursor_capture(false);
     }
     settings.clamp_to_caps();
@@ -275,15 +281,20 @@ mod launch_tests {
     use super::*;
     use pf_client_core::profiles::StreamProfile;
 
-    fn state_with(profile: StreamProfile, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
-        let mut host = crate::core::model::KnownHost {
+    /// The one host every test in here uses, at the address they all assert against.
+    fn host_record() -> crate::core::model::KnownHost {
+        crate::core::model::KnownHost {
             shared: trust::KnownHost {
                 addr: "10.0.0.2".into(),
                 port: 47989,
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+    }
+
+    fn state_with(profile: StreamProfile, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
+        let mut host = host_record();
         bind(&mut host);
         let mut state = Persisted::default();
         state.known_hosts.push(host);

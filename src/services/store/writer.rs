@@ -12,7 +12,7 @@ struct Queue {
     /// The last snapshot queued. Outlives `pending`, since the unchanged-snapshot comparison has
     /// to keep working after the worker has drained it.
     last: Persisted,
-    /// Consecutive failed attempts at `last`; nonzero means what is on disk is older than it.
+    /// Consecutive failures at `last`; zero means disk is fresh.
     failures: u8,
     retry_at: Option<Instant>,
     stop: bool,
@@ -79,7 +79,7 @@ impl StateWriter {
                             tracing::warn!("settings write failed: {e:#}");
                         }
                         guard = lock.lock().expect(POISONED);
-                        // A failed old snapshot must never replace a newer queued document.
+                        // Skip retry if a newer snapshot was queued.
                         if guard.last != state {
                             continue;
                         }
