@@ -1,6 +1,7 @@
 pub mod caps;
 pub mod errors;
 pub mod event;
+pub mod input;
 pub mod media;
 pub mod model;
 pub mod perf;

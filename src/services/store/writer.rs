@@ -1,6 +1,7 @@
 //! Off-thread, coalescing writer for the persisted document.
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use super::{save, Persisted};
 
@@ -11,6 +12,9 @@ struct Queue {
     /// The last snapshot queued. Outlives `pending`, since the unchanged-snapshot comparison has
     /// to keep working after the worker has drained it.
     last: Persisted,
+    /// Consecutive failed attempts at `last`; nonzero means what is on disk is older than it.
+    failures: u8,
+    retry_at: Option<Instant>,
     stop: bool,
 }
 
@@ -41,6 +45,8 @@ pub struct StateWriter {
 
 /// Poisoning means the worker panicked inside `save`, which nothing here can recover from.
 const POISONED: &str = "state-writer mutex poisoned";
+const SAVE_ATTEMPTS: u8 = 3;
+const RETRY_DELAY: Duration = Duration::from_millis(250);
 
 impl StateWriter {
     /// `baseline` is the document as loaded from disk, so a save matching it is a no-op.
@@ -57,12 +63,35 @@ impl StateWriter {
             let (lock, cvar) = &*worker;
             let mut guard = lock.lock().expect(POISONED);
             loop {
+                if !guard.stop {
+                    if let Some(wait) = guard.retry_at.and_then(|at| at.checked_duration_since(Instant::now())) {
+                        guard = cvar.wait_timeout(guard, wait).expect(POISONED).0;
+                        continue;
+                    }
+                }
+                guard.retry_at = None;
                 match guard.pending.take() {
                     Some(state) => {
                         // Unlocked across the write so `save` below never blocks on disk I/O.
                         drop(guard);
-                        let _ = save(&state);
+                        let result = save(&state);
+                        if let Err(e) = &result {
+                            tracing::warn!("settings write failed: {e:#}");
+                        }
                         guard = lock.lock().expect(POISONED);
+                        // A failed old snapshot must never replace a newer queued document.
+                        if guard.last != state {
+                            continue;
+                        }
+                        if result.is_err() {
+                            guard.failures = guard.failures.saturating_add(1);
+                            if !guard.stop && guard.failures < SAVE_ATTEMPTS {
+                                guard.pending = Some(state);
+                                guard.retry_at = Some(Instant::now() + RETRY_DELAY * u32::from(guard.failures));
+                            }
+                        } else {
+                            guard.failures = 0;
+                        }
                     }
                     // Stopping only once nothing is pending, so the last snapshot still lands.
                     None if guard.stop => return,
@@ -81,11 +110,13 @@ impl StateWriter {
     pub fn save(&self, state: Persisted) {
         let (lock, cvar) = &*self.queue;
         let mut queue = lock.lock().expect(POISONED);
-        if queue.last == state {
+        if queue.last == state && (queue.failures == 0 || queue.pending.is_some()) {
             return;
         }
         queue.last.clone_from(&state);
         queue.pending = Some(state);
+        queue.failures = 0;
+        queue.retry_at = None;
         drop(queue);
         cvar.notify_one();
     }

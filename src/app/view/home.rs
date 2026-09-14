@@ -93,6 +93,22 @@ pub(crate) fn visible_cards(
     (first * cols).min(count)..((last + 1) * cols).min(count)
 }
 
+pub(crate) fn cover_windows(
+    available_w: u32,
+    layout: GridLayout,
+    grid_scroll: i32,
+    screen_h: i32,
+) -> [std::ops::Range<usize>; 3] {
+    let page = visible_cards(available_w, layout, grid_scroll, screen_h, CARD_SHADOW_PAD);
+    let extend = |rows: i32| {
+        let pad = rows as usize * layout.columns();
+        page.start.saturating_sub(pad)..page.end.saturating_add(pad).min(layout.len())
+    };
+    let build = extend(crate::app::grid::CARD_PREFETCH_ROWS);
+    let keep = extend(crate::app::grid::CARD_KEEP_ROWS);
+    [page, build, keep]
+}
+
 /// `floor(a / b)` for a positive `b` — `/` truncates towards zero, which is the wrong way for
 /// a negative scroll offset.
 fn div_floor(a: i32, b: i32) -> i32 {
@@ -108,6 +124,8 @@ pub const GRID_PAD: i32 = 32;
 pub const GRID_GAP: i32 = 24;
 pub const GRID_TOP_Y: i32 = 160;
 pub const CARD_MIN_W: u32 = 220;
+/// Slack for the card shadow, which draws outside the card's own rect.
+const CARD_SHADOW_PAD: i32 = 24;
 
 /// `clamp(2, available_w / (min_card_w + gap), 5)` — moonlight-tv's own formula.
 pub fn grid_columns(available_w: u32) -> usize {

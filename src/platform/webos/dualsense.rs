@@ -25,7 +25,6 @@
 //! they cannot fight the kernel's force-feedback state — see [`build_report`].
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -33,6 +32,7 @@ use std::time::{Duration, Instant};
 use punktfunk_core::quic::HidOutput;
 
 use super::ls2;
+use crate::services::feedback::{Mailbox, Pending, Received};
 use crate::session::pad_audio::{Envelope, COIL_REPORT_FRAMES, SPEAKER_IN_SAMPLES};
 
 /// Counts trigger effects folded in, so a "triggers do nothing" report can be told apart from a
@@ -260,14 +260,10 @@ fn probe_hid_playstation_bound() -> bool {
 
 /// Owns the pad's feedback state and the thread that ships it.
 ///
-/// The thread exists because a send is a fork/exec of `luna-send-pub` (see [`crate::platform::webos::luna`]),
-/// which must never land on the render/input loop. Queue depth is one with latest-wins
-/// replacement — the same discipline as [`crate::services::store::StateWriter`] — because the state
-/// is absolute: a superseded update carries no information the newer one lacks.
+/// Transport work stays off the input loop. The mailbox replaces obsolete absolute states.
 pub struct Feedback {
     state: State,
-    /// `None` only after [`Drop`] has taken it to close the channel.
-    tx: Option<SyncSender<State>>,
+    mailbox: Arc<Mailbox<State>>,
     /// `None` only after [`Drop`] has taken and joined it.
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -279,18 +275,16 @@ impl Feedback {
         if !crate::platform::webos::luna::available() {
             return None;
         }
-        // Depth 1 + `try_send`: at most one pending state, and a full queue means the sender
-        // is mid-call — that pending value is stale by definition, so the next update replaces
-        // it rather than queueing behind it.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<State>(1);
+        let mailbox = Arc::new(Mailbox::new());
+        let receiver = mailbox.clone();
         let thread = std::thread::Builder::new()
             .name("ds5-feedback".into())
-            .spawn(move || sender_loop(&address, &rx, coils))
+            .spawn(move || sender_loop(&address, &receiver, coils))
             .ok()?;
         tracing::info!("DualSense feedback active (adaptive triggers, lightbar)");
         Some(Self {
             state: State::default(),
-            tx: Some(tx),
+            mailbox,
             thread: Some(thread),
         })
     }
@@ -301,15 +295,16 @@ impl Feedback {
     /// own UAC audio card, so the coils are NOT claimed here and the derived rumble envelope keeps
     /// the motors — which is what gives a wired pad any vibration at all under a libScePad title.
     pub fn new_usb(node: crate::platform::webos::hidraw::Hidraw) -> Option<Self> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<State>(1);
+        let mailbox = Arc::new(Mailbox::new());
+        let receiver = mailbox.clone();
         tracing::info!("DualSense feedback active over USB ({})", node.path);
         let thread = std::thread::Builder::new()
             .name("ds5-feedback-usb".into())
-            .spawn(move || usb_sender_loop(&node, &rx))
+            .spawn(move || usb_sender_loop(&node, &receiver))
             .ok()?;
         Some(Self {
             state: State::default(),
-            tx: Some(tx),
+            mailbox,
             thread: Some(thread),
         })
     }
@@ -352,20 +347,14 @@ impl Feedback {
             }
             HidOutput::TrackpadHaptic { .. } | HidOutput::HidRaw { .. } | HidOutput::AudioCtl { .. } => return,
         }
-        // Dropping on a full queue *is* the coalescing: the waiting value is strictly older.
-        if let Some(tx) = &self.tx {
-            let _ = tx.try_send(self.state);
-        }
+        self.mailbox.replace(self.state);
     }
 
     /// Releases everything this client took over — both triggers back to no resistance, the
     /// lightbar handed back to the system.
     ///
-    /// Trigger resistance lives in the pad's firmware, not in the stream, so without this a
-    /// game that left R2 stiff leaves it stiff on the TV's home screen and after the app
-    /// exits, with nothing to connect that to punktfunk. Blocking send, unlike
-    /// [`apply`](Self::apply): this one must not be the update that gets coalesced away, and
-    /// [`Drop`] joins the sender right after so it is actually delivered.
+    /// Finalizes the mailbox so later updates cannot overwrite the release.
+    /// [`Drop`] joins after its throttled send attempt.
     ///
     /// Called on the way out of a stream, so it delays return-to-menu by one send — tens of
     /// milliseconds normally, and at worst two [`crate::platform::webos::luna::CALL_TIMEOUT`] windows if the
@@ -375,9 +364,7 @@ impl Feedback {
             triggers_owned: true, // assert mode 0x00 explicitly rather than staying silent
             ..State::default()
         };
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(self.state);
-        }
+        self.mailbox.finish(self.state);
     }
 }
 
@@ -385,7 +372,7 @@ impl Drop for Feedback {
     fn drop(&mut self) {
         // Closing the channel ends `sender_loop`; joining lets a send in flight (and anything
         // `release` just queued) complete — the same reason `StateWriter` joins its writer.
-        drop(self.tx.take());
+        self.mailbox.close();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -621,10 +608,10 @@ pub fn build_usb_speaker_setup() -> [u8; USB_REPORT_LEN] {
 /// No throttle and no dedupe interval, unlike the Luna routes: a hidraw write is one syscall, not
 /// the fork/exec that blacked out the video plane, so there is nothing here to protect the render
 /// loop from. Identical states are still dropped — the pad gains nothing from being told twice.
-fn usb_sender_loop(node: &crate::platform::webos::hidraw::Hidraw, rx: &Receiver<State>) {
+fn usb_sender_loop(node: &crate::platform::webos::hidraw::Hidraw, mailbox: &Mailbox<State>) {
     let mut last: Option<State> = None;
     let mut failing = false;
-    while let Ok(state) = rx.recv() {
+    while let Received::State(state) = mailbox.receive(None) {
         if last == Some(state) {
             continue;
         }
@@ -689,14 +676,12 @@ const MIN_SEND_INTERVAL: Duration = Duration::from_millis(250);
 ///
 /// Two guards keep the spawn rate down, both necessary: identical states are dropped outright
 /// (a host re-asserting the same lightbar colour costs nothing), and the remainder are spaced
-/// by [`MIN_SEND_INTERVAL`]. Sleeping *after* a send rather than dropping the update is what
-/// makes the throttle lossless — the depth-1 channel keeps replacing the pending state while
-/// this thread waits, so the newest one goes out next.
+/// by [`MIN_SEND_INTERVAL`]. The mailbox replaces the pending state while this thread waits.
 ///
 /// One log per run of failures, not per send: if the Bluetooth service stops accepting (pad
 /// powered off mid-session) every later update would otherwise repeat the same line for as
 /// long as the game keeps changing effects.
-fn sender_loop(address: &str, rx: &Receiver<State>, coils: Option<Arc<Envelope>>) {
+fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelope>>) {
     // In-process bus first: one function call per report instead of a spawn. Its failure is the
     // normal state on a TV whose hub refuses the registration, and the spawn route still works
     // there — so it is logged as information and the throttle stays at the spawn-safe value.
@@ -763,9 +748,8 @@ fn sender_loop(address: &str, rx: &Receiver<State>, coils: Option<Arc<Envelope>>
         MIN_SEND_INTERVAL
     };
     let mut failing = false;
-    let mut last_sent: Option<State> = None;
-    let mut last_sent_at: Option<Instant> = None;
-    let mut pending: Option<State> = None;
+    let mut pending = Pending::new(interval);
+    let mut closing = false;
     let mut sends: u32 = 0;
     // The pad expects a changing sequence number per report; low 4 bits, so it wraps freely.
     // Shared by state and coil reports: it is per link, not per report kind.
@@ -778,27 +762,25 @@ fn sender_loop(address: &str, rx: &Receiver<State>, coils: Option<Arc<Envelope>>
     let mut frames = [[0i8; 2]; COIL_REPORT_FRAMES];
     let mut coil_sends: u32 = 0;
     loop {
-        // A state update, or the coil tick — whichever is first. Without a lane the wait is
-        // unbounded, as before; the spawn route also sleeps between sends, which the lane cannot.
-        let received = match &lane {
-            Some(_) => match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
-                Ok(state) => Some(state),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match rx.recv() {
-                Ok(state) => Some(state),
-                Err(_) => break,
-            },
-        };
-        if let Some(state) = received {
-            if last_sent != Some(state) {
-                pending = Some(state);
+        let now = Instant::now();
+        let send_deadline = pending.deadline(now);
+        if closing {
+            let Some(deadline) = send_deadline else { break };
+            std::thread::sleep(deadline.saturating_duration_since(now));
+        } else {
+            let deadline = match (send_deadline, lane.as_ref()) {
+                (Some(at), Some(_)) => Some(at.min(next_tick)),
+                (Some(at), None) => Some(at),
+                (None, Some(_)) => Some(next_tick),
+                (None, None) => None,
+            };
+            match mailbox.receive(deadline) {
+                Received::State(state) => pending.offer(state),
+                Received::Deadline => {}
+                Received::Closed => closing = true,
             }
         }
-        let due = last_sent_at.is_none_or(|at| at.elapsed() >= interval);
-        if let (Some(state), true) = (pending, due) {
-            pending = None;
+        if let Some(state) = pending.take_due(Instant::now()) {
             seq = seq.wrapping_add(1);
             let report = build_report(seq, &state);
             let sent = match &bus {
@@ -808,9 +790,8 @@ fn sender_loop(address: &str, rx: &Receiver<State>, coils: Option<Arc<Envelope>>
             match sent {
                 Ok(()) => {
                     failing = false;
-                    last_sent = Some(state);
+                    pending.sent(state, Instant::now());
                     current = state;
-                    last_sent_at = Some(Instant::now());
                     sends += 1;
                     // Rate visible in the log without one line per send — the symptom the
                     // spawn throttle exists for is invisible from the client's own counters.

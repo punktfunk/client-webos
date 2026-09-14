@@ -3,7 +3,7 @@
 //! quit). Immediate mode on the kit, like every menu screen (`app::draw`); the stream loop
 //! keeps its own redraw cadence and its transparent clear for NDL's punch-through plane.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
@@ -206,6 +206,9 @@ pub(super) enum ConfirmAction {
     Navigated,
 }
 
+// Decouple dialog animation from the stream loop's 2ms polling.
+const DIALOG_FRAME_STEP: Duration = Duration::from_millis(16);
+
 /// A two-button confirm dialog (stop streaming mid-stream, quit in the menu) with the same
 /// open/close fade as the menu's modals, drawn as `app::draw::dialog` draws them.
 pub(super) struct ConfirmDialog {
@@ -217,6 +220,8 @@ pub(super) struct ConfirmDialog {
     /// The focused button's press dip, playing out over the close fade it starts.
     press: ui::animation::Press,
     hover_close: bool,
+    last_draw: Option<Instant>,
+    last_visual: Option<(usize, bool, bool, bool)>,
 }
 
 impl ConfirmDialog {
@@ -235,6 +240,8 @@ impl ConfirmDialog {
             focus_anim: None,
             press: ui::animation::Press::default(),
             hover_close: false,
+            last_draw: None,
+            last_visual: None,
         }
     }
 
@@ -248,6 +255,8 @@ impl ConfirmDialog {
     }
 
     pub(super) fn open(&mut self, focus: usize) {
+        self.last_visual = None;
+        self.last_draw = None;
         self.focus = Some(focus);
         self.press = ui::animation::Press::default();
         self.fade.reopen();
@@ -275,6 +284,7 @@ impl ConfirmDialog {
 
     pub(super) fn tick(&mut self) -> bool {
         let mut animating = self.fade.tick();
+        animating |= self.press.armed() && !self.press.landed();
         if let Some(t) = self.focus_anim {
             if t.elapsed() >= ui::animation::FOCUS_POP {
                 self.focus_anim = None;
@@ -282,6 +292,22 @@ impl ConfirmDialog {
             animating = true;
         }
         animating
+    }
+
+    pub(super) fn redraw_due(&mut self, animating: bool) -> bool {
+        let Some((focus, _, closing)) = self.frame() else {
+            return false;
+        };
+        let visual = (focus, closing, self.hover_close, animating);
+        if self.last_visual != Some(visual)
+            || (animating && self.last_draw.is_none_or(|at| at.elapsed() >= DIALOG_FRAME_STEP))
+        {
+            self.last_visual = Some(visual);
+            self.last_draw = Some(Instant::now());
+            true
+        } else {
+            false
+        }
     }
 
     /// Pointer and pad input while open. The layout is the same one [`Self::draw`] draws.

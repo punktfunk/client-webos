@@ -18,9 +18,43 @@ use crate::services::store::{CodecPref, GamepadType};
 use crate::session::pipeline::MediaPipeline;
 use crate::session::StreamStats;
 
+#[derive(Default)]
+pub struct ConnectAttempt(std::sync::Mutex<AttemptState>);
+
+#[derive(Default)]
+struct AttemptState {
+    cancelled: bool,
+    media_started: bool,
+}
+
+impl ConnectAttempt {
+    pub fn cancel(&self) -> Option<crate::platform::webos::ndl::LoadGuard> {
+        let mut state = self.0.lock().expect("connect attempt poisoned");
+        state.cancelled = true;
+        // Network-only attempts cannot enter media after cancellation. Once media starts,
+        // retain exclusion until cleanup; a timer cannot safely revoke NDL ownership.
+        state.media_started.then(crate::platform::webos::ndl::suspend_loads)
+    }
+
+    pub fn if_active(&self, action: impl FnOnce()) {
+        let state = self.0.lock().expect("connect attempt poisoned");
+        if !state.cancelled {
+            action();
+        }
+    }
+
+    fn enter_media(&self) -> Result<()> {
+        let mut state = self.0.lock().expect("connect attempt poisoned");
+        anyhow::ensure!(!state.cancelled, "connection cancelled");
+        state.media_started = true;
+        Ok(())
+    }
+}
+
 pub struct Connected {
     pub client: Arc<NativeClient>,
     pub stop: Arc<AtomicBool>,
+    pub(crate) input_state: Arc<std::sync::Mutex<crate::core::input::HeldInputs>>,
     /// Live pump counters for stats overlay; see `StreamStats`.
     pub stats: Arc<StreamStats>,
     /// The decode pipeline and the threads that drive it. Kept alive so `shutdown()` can join
@@ -262,7 +296,7 @@ fn log_handshake(client: &NativeClient, negotiated: &Negotiated) {
 /// Blocks until the handshake completes or `params.timeout` elapses. NDL manages its own
 /// punch-through area natively (see [`crate::platform::webos::ndl`]'s module docs), so no
 /// display geometry is needed here.
-pub fn connect(params: &ConnectParams) -> Result<Connected> {
+pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Connected> {
     // Fails before touching the network: a full handshake would only end in `NdlVideo::load()`
     // rejecting the same gate, pointlessly holding the host's pending-session slot for `timeout`.
     crate::platform::webos::ndl::ensure_not_poisoned()?;
@@ -275,11 +309,13 @@ pub fn connect(params: &ConnectParams) -> Result<Connected> {
     // One call builds the whole decode path — sinks, stages and the threads that drive them — and
     // unwinds itself if any part of it fails. Nothing about which backend or which audio route it
     // settled on reaches back out here beyond the two figures the loop displays.
+    attempt.enter_media()?;
     let (pipeline, route, is_hdr) = MediaPipeline::build(params, &client, &stop, &stats)?;
 
     Ok(Connected {
         client,
         stop,
+        input_state: Arc::default(),
         stats,
         pipeline,
         audio_route: route,

@@ -82,7 +82,7 @@ pub(super) fn run_ui_flow(
     // running by then, so this just carries its handle out of the loop for
     // `run_inner` to join once the launch animation finishes.
     let mut connect_handle: Option<(
-        std::thread::JoinHandle<Result<session::Connected>>,
+        crate::runtime::PendingConnect,
         crate::app::ConnectTarget,
         store::Settings,
         bool,
@@ -282,15 +282,22 @@ pub(super) fn run_ui_flow(
                     app.set_gamepad_type(gamepad::detect_type(game_controller));
                     continue;
                 }
-                Event::ControllerDeviceRemoved { .. } => {
+                Event::ControllerDeviceRemoved { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
-                    *controller = None;
-                    // Re-poll rather than clearing: another pad may still be attached.
+                    // Only the owned pad: the Magic Remote enumerates as a controller and drops
+                    // constantly, and clearing on its removal took the real pad's handle with it.
+                    if controller.as_ref().is_some_and(|c| c.instance_id() == which) {
+                        // An unplugged pad sends no releases — drop any armed chord, and the
+                        // held direction it can no longer let go of.
+                        chord.clear();
+                        input.clear_nav_repeat();
+                        // Adopt whatever pad is left: a still-attached one sends no Added event.
+                        *controller = (0..game_controller.num_joysticks().unwrap_or(0))
+                            .filter(|&i| game_controller.is_game_controller(i))
+                            .filter_map(|i| game_controller.open(i).ok())
+                            .find(|c| !gamepad::is_tv_remote(&c.name()));
+                    }
                     app.set_gamepad_type(gamepad::detect_type(game_controller));
-                    // An unplugged pad sends no releases — drop any armed chord, and the
-                    // held direction it can no longer let go of.
-                    chord.clear();
-                    input.clear_nav_repeat();
                     continue;
                 }
                 _ => {}

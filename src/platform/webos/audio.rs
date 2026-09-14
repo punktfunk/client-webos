@@ -45,6 +45,15 @@ const DEVICE_BUFFER_FRAMES: u16 = 512;
 /// Chunks in flight between the decode thread and the callback. 5 ms each.
 const CHUNK_QUEUE: usize = 64;
 
+/// Reserve the larger of the policy cap and device period, plus queued chunks, before playback.
+fn ring_capacity(device_samples: u16, channels: u8) -> usize {
+    const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1000;
+    const CHUNK_MS: usize = 5;
+    let period_ms = usize::from(device_samples) / SAMPLES_PER_MS + CHUNK_MS;
+    let depth_ms = (TUNING.hard_cap_ms as usize).max(period_ms) + CHUNK_QUEUE * CHUNK_MS;
+    depth_ms * SAMPLES_PER_MS * usize::from(channels)
+}
+
 /// De-jitter tuning: core's Android preset, unmodified.
 ///
 /// It is the right one on the merits rather than by convenience — `AAudio` hands the client a raw
@@ -100,7 +109,7 @@ impl AudioPlayer {
             .open_playback(None, &spec, |obtained| RingCallback {
                 rx: pcm_rx,
                 recycle: recycle_tx,
-                ring: VecDeque::new(),
+                ring: VecDeque::with_capacity(ring_capacity(obtained.samples, obtained.channels)),
                 // Built from what the device actually negotiated, not what was asked for: the
                 // policy denominates every depth in interleaved samples, so a channel count that
                 // disagrees with the ring's stride would scale every target silently.

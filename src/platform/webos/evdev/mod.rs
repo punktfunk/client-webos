@@ -41,7 +41,7 @@
 
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -143,7 +143,8 @@ const IN_USE_WINDOW: Duration = Duration::from_millis(250);
 /// mouse/keyboard event is an `InputEvent` datagram, a pad's touch contacts and motion samples
 /// are rich-input ones applied to the host's virtual `DualSense`.
 pub enum HidReport<'a> {
-    Input(&'a InputEvent),
+    Input(u32, &'a InputEvent),
+    Release(u32),
     Rich(RichInput),
 }
 
@@ -163,6 +164,7 @@ struct Shared {
     /// drive `EVIOCGRAB`) and by the reader thread's gated `sink` wrapper; the per-device
     /// *applied* grab state lives on [`Device`], not here.
     grab: AtomicBool,
+    gate_epoch: AtomicU32,
     /// Cursor capture, fixed for this reader's life (the setting only takes effect next stream):
     /// off leaves a pointer-only node with the compositor, so the TV cursor still aims.
     grab_mouse: bool,
@@ -218,25 +220,14 @@ impl HidInput {
             stop: AtomicBool::new(false),
             has_mouse: AtomicBool::new(false),
             grab: AtomicBool::new(active),
+            gate_epoch: AtomicU32::new(0),
             grab_mouse,
             keys: KeyActivity::new(),
         });
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("pf-evdev".into())
-            .spawn(move || {
-                let gate = Arc::clone(&thread_shared);
-                let gated_sink = move |report: HidReport| {
-                    // Rich reports are exempt from the gate: both are levels, not edges, so a
-                    // dropped contact is a finger the host holds down forever (see
-                    // `release_touches`) and a dropped motion sample is an attitude it keeps.
-                    // Keys and clicks self-clear on the next report.
-                    if gate.grab.load(Ordering::Relaxed) || matches!(report, HidReport::Rich(_)) {
-                        sink(report);
-                    }
-                };
-                reader_loop(&gated_sink, &thread_shared)
-            })
+            .spawn(move || reader_loop(&sink, &thread_shared))
             .ok()?;
         Some(Self {
             shared,
@@ -246,10 +237,13 @@ impl HidInput {
 
     /// Grab (or release) every open node exclusively, and — same flag — start or stop
     /// calling `sink` with what they report (see the module docs). Applied on the reader thread's
-    /// own cadence (bounded by [`POLL_TIMEOUT_MS`]), including to any node that shows up after
-    /// this call, so callers don't need to re-invoke it on hot-plug.
+    /// own cadence (bounded by [`POLL_TIMEOUT_MS`]). Forwarding reads the flag per report;
+    /// newly adopted nodes inherit it.
     pub fn set_active(&self, active: bool) {
-        self.shared.grab.store(active, Ordering::Relaxed);
+        if self.shared.grab.swap(active, Ordering::Relaxed) && !active {
+            // Preserve a release edge even if the dialog closes before poll returns.
+            self.shared.gate_epoch.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Whether the reader currently owns at least one pointing node — `false` right after
@@ -283,6 +277,8 @@ impl Drop for HidInput {
 /// together, at the next `SYN_REPORT`).
 struct Device {
     fd: RawFd,
+    // Never reused within a reader; source 0 belongs to SDL.
+    source: u32,
     path: PathBuf,
     /// Summed across this read burst — see `flush_motion`.
     dx: i32,
@@ -321,7 +317,7 @@ enum Probe {
 }
 
 /// Opens every node this reader wants that isn't already in `seen`, appending the paths it takes.
-fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool) -> Vec<Device> {
+fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool, stop: &AtomicBool, next_source: &mut u32) -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         tracing::warn!("/dev/input unreadable — no HID input support");
         return Vec::new();
@@ -340,8 +336,17 @@ fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool) -> Vec<Device> {
     paths.sort();
     let mut devices = Vec::new();
     for path in paths {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         match open_hid(&path, grab_mouse) {
-            Probe::Hid(dev) => {
+            Probe::Hid(mut dev) => {
+                let Some(next) = next_source.checked_add(1) else {
+                    tracing::warn!("HID source identifiers exhausted");
+                    break;
+                };
+                dev.source = *next_source;
+                *next_source = next;
                 seen.push(path);
                 devices.push(dev);
             }
@@ -379,6 +384,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
     // Built before the checks below so `Drop` closes `fd` on every reject path.
     let mut dev = Device {
         fd,
+        source: 0,
         path: path.to_path_buf(),
         dx: 0,
         dy: 0,
@@ -549,29 +555,49 @@ fn device_name(fd: RawFd) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
-fn reader_loop(sink: &impl Fn(HidReport), shared: &Shared) {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut devices = scan(&mut seen, shared.grab_mouse);
-    if devices.is_empty() {
-        tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
+fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
+    let (added_tx, added_rx) = std::sync::mpsc::sync_channel(1);
+    let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+    // Detached scanning never grabs nodes. Unadopted descriptors close on drop.
+    let scan_shared = shared.clone();
+    if let Err(e) = std::thread::Builder::new().name("pf-hid-scan".into()).spawn(move || {
+        scan_loop(&scan_shared, &added_tx, &removed_rx);
+    }) {
+        tracing::warn!("HID scanner unavailable: {e}");
+        return;
     }
+    let mut devices = Vec::new();
     store_presence(&devices, shared);
-    let mut last_scan = Instant::now();
-    let mut dir_mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
-    // Rebuilt only on device-set change — a moving 1kHz mouse makes `poll` return continuously,
-    // so rebuilding every iteration was a malloc/free per read burst.
-    let mut fds = pollfds(&devices);
+    let mut fds = Vec::<libc::pollfd>::new();
+    let mut gate_epoch = shared.gate_epoch.load(Ordering::Relaxed);
     while !shared.stop.load(Ordering::Relaxed) {
-        // No-op unless the state flipped; also covers the first iteration, so no separate
-        // pre-loop call is needed.
-        apply_grab(&mut devices, shared.grab.load(Ordering::Relaxed));
+        if let Ok(found) = added_rx.try_recv() {
+            devices.extend(found);
+            fds = pollfds(&devices);
+            store_presence(&devices, shared);
+        }
+        let active = shared.grab.load(Ordering::Relaxed);
+        let epoch = shared.gate_epoch.load(Ordering::Relaxed);
+        if epoch != gate_epoch {
+            for dev in &devices {
+                sink(HidReport::Release(dev.source));
+            }
+        }
+        gate_epoch = epoch;
+        apply_grab(&mut devices, active);
+        // Poll can outlive a dialog opening; gate each report against live state.
+        let gated_sink = |report: HidReport<'_>| {
+            if shared.grab.load(Ordering::Relaxed) || matches!(report, HidReport::Rich(_) | HidReport::Release(_)) {
+                sink(report);
+            }
+        };
         let iter_start = Instant::now();
         // SAFETY: `fds` is a valid slice of `nfds` pollfds for the duration of the call.
         let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, POLL_TIMEOUT_MS) };
         if rc > 0 {
             for (i, pfd) in fds.iter().enumerate() {
                 if pfd.revents & libc::POLLIN != 0 {
-                    read_device(&mut devices[i], sink, &shared.keys);
+                    read_device(&mut devices[i], &gated_sink, &shared.keys);
                 }
             }
             // An unplugged node polls ready forever with POLLERR/HUP; checked cheaply since
@@ -584,7 +610,8 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Shared) {
                     release_pad(&mut devices[i], sink);
                     let gone = devices.remove(i);
                     tracing::info!("HID device gone: {}", gone.path.display());
-                    seen.retain(|p| *p != gone.path);
+                    sink(HidReport::Release(gone.source));
+                    let _ = removed_tx.send(gone.path.clone());
                 }
                 fds = pollfds(&devices);
                 store_presence(&devices, shared);
@@ -596,26 +623,62 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Shared) {
                 std::thread::sleep(remaining);
             }
         }
-        // Gated on the directory's mtime, not just the interval: opening a node costs ~40ms and
-        // ~20 nodes are empty and retryable, so an unconditional rescan would stall this thread
-        // (read as motion jitter) every `RESCAN_INTERVAL`.
-        if last_scan.elapsed() >= RESCAN_INTERVAL {
-            last_scan = Instant::now();
-            let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
-            if mtime != dir_mtime {
-                dir_mtime = mtime;
-                let found = scan(&mut seen, shared.grab_mouse);
-                if !found.is_empty() {
-                    devices.extend(found);
-                    fds = pollfds(&devices);
-                    store_presence(&devices, shared);
-                }
-            }
-        }
     }
     // Stopping with a finger on the pad must not leave the host holding it.
     for dev in &mut devices {
         release_pad(dev, sink);
+        sink(HidReport::Release(dev.source));
+    }
+}
+
+// Probing empty webOS nodes can take tens of milliseconds each. Keep it off the input reader.
+fn scan_loop(
+    shared: &Shared,
+    added: &std::sync::mpsc::SyncSender<Vec<Device>>,
+    removed: &std::sync::mpsc::Receiver<PathBuf>,
+) {
+    let mut seen = Vec::new();
+    // Avoid subtracting an interval from Instant: shortly after boot it can underflow.
+    let mut last_scan: Option<Instant> = None;
+    let mut dir_mtime = None;
+    let mut next_source = 1;
+    let mut pending = None;
+    while !shared.stop.load(Ordering::Relaxed) {
+        if let Some(found) = pending.take() {
+            match added.try_send(found) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(found)) => pending = Some(found),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+            }
+        }
+        let due = last_scan.is_none_or(|at| at.elapsed() >= RESCAN_INTERVAL);
+        if pending.is_none() && due {
+            let first = last_scan.is_none();
+            last_scan = Some(Instant::now());
+            // Opening ~20 empty nodes at ~40ms each makes unconditional rescans expensive.
+            let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
+            if first || mtime != dir_mtime {
+                dir_mtime = mtime;
+                let found = scan(&mut seen, shared.grab_mouse, &shared.stop, &mut next_source);
+                if first && found.is_empty() {
+                    tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
+                }
+                if !found.is_empty() {
+                    pending = Some(found);
+                }
+            }
+        }
+        // Removals interrupt the scan interval.
+        let idle = last_scan.map_or(RESCAN_INTERVAL, |at| RESCAN_INTERVAL.saturating_sub(at.elapsed()));
+        match removed.recv_timeout(idle) {
+            Ok(path) => {
+                seen.retain(|p| *p != path);
+                // A freed node is worth re-probing even if the directory's mtime is unchanged.
+                dir_mtime = None;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
 }
 
@@ -694,7 +757,7 @@ fn decode_hid(dev: &mut Device, buf: &[u8], size: usize, sink: &impl Fn(HidRepor
                 REL_WHEEL | REL_HWHEEL => {
                     flush_motion(dev, sink);
                     if let Some(e) = dev.scroll.scroll_event(ev.value, ev.code == REL_HWHEEL) {
-                        sink(HidReport::Input(&e));
+                        sink(HidReport::Input(dev.source, &e));
                     }
                 }
                 _ => {}
@@ -707,12 +770,18 @@ fn decode_hid(dev: &mut Device, buf: &[u8], size: usize, sink: &impl Fn(HidRepor
                 if let Some(button) = (dev.mouse && ev.value != 2).then(|| button_code(ev.code)).flatten() {
                     // Motion first: the click must land where the pointer already is.
                     flush_motion(dev, sink);
-                    sink(HidReport::Input(&mouse::raw_button_event(button, ev.value == 1)));
+                    sink(HidReport::Input(
+                        dev.source,
+                        &mouse::raw_button_event(button, ev.value == 1),
+                    ));
                 } else if let Some(vk) = dev.keyboard.then(|| keyboard::vk_from_evdev(ev.code)).flatten() {
                     keys.touch();
                     // Autorepeat rides as a repeated KeyDown — the host has no repeat timer of
                     // its own, so dropping these kills held-key repeat.
-                    sink(HidReport::Input(&keyboard::raw_key_event(vk, ev.value != 0)));
+                    sink(HidReport::Input(
+                        dev.source,
+                        &keyboard::raw_key_event(vk, ev.value != 0),
+                    ));
                 }
             }
             _ => {}
@@ -726,7 +795,10 @@ fn flush_motion(dev: &mut Device, sink: &impl Fn(HidReport)) {
     if dev.dx == 0 && dev.dy == 0 {
         return;
     }
-    sink(HidReport::Input(&mouse::move_relative_event(dev.dx, dev.dy)));
+    sink(HidReport::Input(
+        dev.source,
+        &mouse::move_relative_event(dev.dx, dev.dy),
+    ));
     dev.dx = 0;
     dev.dy = 0;
 }

@@ -338,6 +338,20 @@ fn wait_load_completed() -> bool {
 /// nonzero, and dropping the [`LeakGuard`] clears it in-process (no restart) once the leaked
 /// thread actually returns — its handle's `Drop` has run the real unload by then.
 static LEAKED_THREADS: AtomicUsize = AtomicUsize::new(0);
+static CANCELLED_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+pub struct LoadGuard;
+
+pub fn suspend_loads() -> LoadGuard {
+    CANCELLED_LOADS.fetch_add(1, Ordering::SeqCst);
+    LoadGuard
+}
+
+impl Drop for LoadGuard {
+    fn drop(&mut self) {
+        CANCELLED_LOADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// One leaked NDL-touching thread, for as long as this value lives (see [`LEAKED_THREADS`]).
 ///
@@ -371,6 +385,10 @@ pub fn poison() -> LeakGuard {
 
 /// Checked early by `session::connect` to avoid holding a host slot for a connect that can only fail.
 pub fn ensure_not_poisoned() -> Result<()> {
+    // Cancelled media initialization must finish before another load, even without a poisoned pump.
+    if CANCELLED_LOADS.load(Ordering::SeqCst) > 0 {
+        bail!("Previous connection is still being cancelled — try reconnecting shortly");
+    }
     if LEAKED_THREADS.load(Ordering::SeqCst) > 0 {
         bail!("NDL is still tearing down a wedged decode thread from the previous session — try reconnecting shortly");
     }

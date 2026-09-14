@@ -1,8 +1,12 @@
 //! On-demand cover-art loading with disk cache (not all-at-once, which caused OOM).
 //! Fetches via mTLS, decodes with the pure-Rust `image` crate, handed to the UI as pixels.
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::services::library::GameEntry;
 
@@ -62,6 +66,7 @@ const ART_KINDS: usize = 2;
 
 /// An image the UI wants soon.
 struct ArtRequest {
+    live: Arc<AtomicBool>,
     game_id: String,
     kind: ArtKind,
     /// Candidate art paths (host-relative or external URL), tried in order — a
@@ -270,16 +275,14 @@ pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
 /// this loader does and so cannot use the `.raw` beside it. One cache either way: whichever UI
 /// browsed last warms the other, and the same per-host budget and orphan sweep bound both.
 pub(crate) fn cached_cover(host: &str, port: u16, game_id: &str) -> Option<Vec<u8>> {
-    let dir = cache_dir(host, port);
-    let bytes = std::fs::read(cache_path(&dir, game_id, ArtKind::Card, false))
-        .ok()
-        .filter(|b| !b.is_empty())?;
+    let path = cache_path(&cache_dir(host, port), game_id, ArtKind::Card, false);
+    let bytes = std::fs::read(&path).ok().filter(|b| !b.is_empty())?;
     // An entry written by a build that cached full-size covers costs ~99 ms to decode, every
     // visit, forever. Shrink it the first time it is read and this visit is the last one.
     let Some(shrunk) = shrink_cover(&bytes) else {
         return Some(bytes);
     };
-    write_cover(&dir, game_id, &shrunk);
+    write_cover(&path, &shrunk);
     Some(shrunk)
 }
 
@@ -323,31 +326,39 @@ fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Store encoded cover bytes, then bring the host's directory back inside its budget.
-/// Best-effort throughout: a cache that cannot be written costs a re-fetch, nothing more.
-pub(crate) fn store_cover(host: &str, port: u16, game_id: &str, bytes: &[u8]) {
-    let dir = cache_dir(host, port);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    // Shrunk on the way in, so what every later visit decodes is already small — this is the
-    // single funnel both UIs' covers pass through, which is why it belongs here rather than at
-    // one caller.
-    let shrunk = shrink_cover(bytes);
-    write_cover(&dir, game_id, shrunk.as_deref().unwrap_or(bytes));
-    prune_cache(&dir);
+/// One console fetcher's cache accounting; scans only at startup and quota crossings.
+pub(crate) struct CoverCache {
+    dir: PathBuf,
+    totals: CacheTotals,
 }
 
-/// The cached bytes for `game_id`, without the prune — the caller decides when the directory is
-/// worth walking.
-fn write_cover(dir: &std::path::Path, game_id: &str, bytes: &[u8]) {
-    let path = cache_path(dir, game_id, ArtKind::Card, false);
-    let tmp = path.with_extension("tmp");
-    // Write-then-rename, like the raw path above: a kill mid-write must not leave a truncated
-    // file that later reads as a cover.
-    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+impl CoverCache {
+    pub(crate) fn new(host: &str, port: u16) -> Self {
+        let dir = cache_dir(host, port);
+        let _ = std::fs::create_dir_all(&dir);
+        let totals = prune_cache(&dir);
+        Self { dir, totals }
     }
+
+    pub(crate) fn store(&mut self, game_id: &str, bytes: &[u8]) {
+        let path = cache_path(&self.dir, game_id, ArtKind::Card, false);
+        let old_len = path.metadata().map_or(0, |meta| meta.len());
+        let shrunk = shrink_cover(bytes);
+        let bytes = shrunk.as_deref().unwrap_or(bytes);
+        if !write_cover(&path, bytes) {
+            return;
+        }
+        let total = &mut self.totals[ArtKind::Card as usize];
+        *total = total.saturating_sub(old_len).saturating_add(bytes.len() as u64);
+        if *total > CARD_CACHE_BUDGET {
+            self.totals = prune_cache(&self.dir);
+        }
+    }
+}
+
+/// Atomic replacement prevents interrupted writes from poisoning the cache.
+fn write_cover(path: &std::path::Path, bytes: &[u8]) -> bool {
+    crate::services::atomic::write_parts(path, &[bytes], "cover cache").is_ok()
 }
 
 fn cache_path(dir: &std::path::Path, game_id: &str, kind: ArtKind, raw: bool) -> PathBuf {
@@ -519,12 +530,12 @@ struct WorkerConfig {
 /// non-blocking for the UI thread.
 pub struct ArtLoader {
     tx: Sender<ArtRequest>,
-    rx: Receiver<ArtLoaded>,
+    rx: Receiver<(ArtLoaded, Arc<AtomicBool>)>,
     /// Ids already handed to the worker, so scrolling over the same card repeatedly doesn't
     /// queue it repeatedly. Kept per kind (indexed by `ArtKind as usize`) because focus moving
     /// back and forth over a card must not re-queue its much larger hero either, and the two
     /// are forgotten independently.
-    requested: [HashSet<String>; ART_KINDS],
+    requested: [HashMap<String, Arc<AtomicBool>>; ART_KINDS],
     /// This host's cache directory, so [`Self::cached_hero`] can read it without going
     /// through the worker — the worker's own copy is in its `WorkerConfig`.
     dir: PathBuf,
@@ -542,7 +553,8 @@ impl ArtLoader {
         (card_w, card_h): (u32, u32),
     ) -> Self {
         let (tx_req, rx_req) = std::sync::mpsc::channel::<ArtRequest>();
-        let (tx_done, rx_done) = std::sync::mpsc::channel::<ArtLoaded>();
+        // Bounds decoded backlog by eight configured card/hero images, not encoded bytes.
+        let (tx_done, rx_done) = std::sync::mpsc::sync_channel::<(ArtLoaded, Arc<AtomicBool>)>(8);
         let dir = cache_dir(&host, port);
         let config = WorkerConfig {
             host,
@@ -575,10 +587,11 @@ impl ArtLoader {
         let requested = &mut self.requested[kind as usize];
         // Membership before insert: an already-requested id shouldn't pay for an allocation
         // just to be looked up.
-        if requested.contains(game_id) {
+        if requested.contains_key(game_id) {
             return;
         }
-        requested.insert(game_id.to_string());
+        let live = Arc::new(AtomicBool::new(true));
+        requested.insert(game_id.to_string(), live.clone());
         let mut paths = paths();
         // Dropped before anything is fetched: a format this build cannot decode costs a full
         // download and a cache write to end in `load_from_memory` failing.
@@ -594,6 +607,7 @@ impl ArtLoader {
         }
         // A closed channel means the worker is gone; the card keeps its placeholder.
         let _ = self.tx.send(ArtRequest {
+            live,
             game_id: game_id.to_string(),
             kind,
             paths,
@@ -642,7 +656,7 @@ impl ArtLoader {
     /// A hit counts as a request, so nothing queues the same image a second time.
     pub fn cached_hero(&mut self, game_id: &str) -> Option<HeroImage> {
         let image = read_hero_raw(&cache_path(&self.dir, game_id, ArtKind::Hero, true))?;
-        self.requested[ArtKind::Hero as usize].insert(game_id.to_string());
+        self.requested[ArtKind::Hero as usize].insert(game_id.to_string(), Arc::new(AtomicBool::new(true)));
         Some(image)
     }
 
@@ -650,22 +664,39 @@ impl ArtLoader {
     /// when a hero arrives too late to be of use and is dropped — without this the game
     /// would never get another chance at one, even though its bytes are now cached.
     pub fn forget_hero(&mut self, game_id: &str) {
-        self.requested[ArtKind::Hero as usize].remove(game_id);
+        self.forget_kind(game_id, ArtKind::Hero);
     }
 
     /// Forgets that `game_id` was requested, so a later scroll back re-requests it. Served
     /// from the disk cache, so this costs a decode rather than a round-trip.
     pub fn forget(&mut self, game_id: &str) {
-        self.requested[ArtKind::Card as usize].remove(game_id);
+        self.forget_kind(game_id, ArtKind::Card);
     }
 
-    /// Drains everything decoded since the last call.
+    fn forget_kind(&mut self, game_id: &str, kind: ArtKind) {
+        if let Some(live) = self.requested[kind as usize].remove(game_id) {
+            live.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Drains current results, dropping completions from cancelled requests.
     pub fn drain(&self) -> Vec<ArtLoaded> {
-        self.rx.try_iter().collect()
+        self.rx
+            .try_iter()
+            .filter_map(|(art, live)| live.load(Ordering::Relaxed).then_some(art))
+            .collect()
     }
 }
 
-fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoaded>) {
+impl Drop for ArtLoader {
+    fn drop(&mut self) {
+        for live in self.requested.iter().flat_map(HashMap::values) {
+            live.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &SyncSender<(ArtLoaded, Arc<AtomicBool>)>) {
     let &WorkerConfig {
         ref host,
         query_port,
@@ -702,6 +733,7 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
         while let Ok(req) = rx.try_recv() {
             queue.push_back(req);
         }
+        queue.retain(|req| req.live.load(Ordering::Relaxed));
         let at = queue.iter().position(|r| r.kind == ArtKind::Hero).unwrap_or_default();
         let Some(req) = queue.remove(at) else { continue };
 
@@ -722,7 +754,10 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
             }),
         };
         if let Some(loaded) = from_raw_cache {
-            if tx.send(loaded).is_err() {
+            if !req.live.load(Ordering::Relaxed) {
+                continue;
+            }
+            if tx.send((loaded, req.live.clone())).is_err() {
                 return;
             }
             continue;
@@ -764,6 +799,9 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
             }
         };
 
+        if !req.live.load(Ordering::Relaxed) {
+            continue;
+        }
         // Sniffed before the decoder is handed 8 MB it will refuse: the extension filter at
         // queue time cannot see through a content-negotiating CDN, so the bytes are the last
         // word on what actually arrived.
@@ -819,7 +857,10 @@ fn worker(config: &WorkerConfig, rx: &Receiver<ArtRequest>, tx: &Sender<ArtLoade
         if totals[req.kind as usize] > cache_budget(req.kind) {
             totals = prune_cache(dir);
         }
-        if tx.send(loaded).is_err() {
+        if !req.live.load(Ordering::Relaxed) {
+            continue;
+        }
+        if tx.send((loaded, req.live.clone())).is_err() {
             return;
         }
     }

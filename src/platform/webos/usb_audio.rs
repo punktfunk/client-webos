@@ -19,6 +19,8 @@ use std::sync::OnceLock;
 use anyhow::{bail, Context, Result};
 
 use super::dl;
+use crate::services::pcm_write::{self, WriteError};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const ASOUND_LIB: &CStr = c"libasound.so.2";
 
@@ -135,23 +137,43 @@ impl PadSink {
         Ok(sink)
     }
 
-    /// Writes one interleaved chunk: `frames * CHANNELS` samples.
-    ///
-    /// Recovers from an underrun rather than failing: the card stops on one, and a session that
-    /// dropped a chunk should keep playing rather than lose the lane for the rest of the run.
-    pub fn write(&self, interleaved: &[i16]) -> Result<()> {
-        let frames = (interleaved.len() / CHANNELS) as c_ulong;
-        // SAFETY: the slice is live and holds `frames * CHANNELS` samples of the format set above.
-        let n = unsafe { (self.fns.writei)(self.pcm, interleaved.as_ptr().cast(), frames) };
-        if n >= 0 {
-            return Ok(());
+    /// The device remains the clock; only recoverable failures introduce a bounded wait.
+    pub fn write(&self, interleaved: &[i16], stop: &AtomicBool) -> Result<()> {
+        let result = pcm_write::write_all(
+            interleaved,
+            CHANNELS,
+            |tail| {
+                // SAFETY: the remaining slice contains whole interleaved frames.
+                let n =
+                    unsafe { (self.fns.writei)(self.pcm, tail.as_ptr().cast(), (tail.len() / CHANNELS) as c_ulong) };
+                if n >= 0 {
+                    Ok(n as usize)
+                } else {
+                    Err(match -(n as c_int) {
+                        libc::EINTR => WriteError::Interrupted,
+                        libc::EAGAIN => WriteError::WouldBlock,
+                        libc::EPIPE => WriteError::Underrun,
+                        _ => WriteError::Device(n as c_int),
+                    })
+                }
+            },
+            || {
+                // SAFETY: the handle is live; prepare recovers an underrun.
+                let rc = unsafe { (self.fns.prepare)(self.pcm) };
+                if rc < 0 {
+                    Err(WriteError::Device(rc))
+                } else {
+                    Ok(())
+                }
+            },
+            || stop.load(Ordering::Relaxed),
+            std::thread::sleep,
+        );
+        match result {
+            Ok(()) | Err(WriteError::Stopped) => Ok(()),
+            Err(WriteError::Device(rc)) => bail!("snd_pcm_writei: {}", describe(self.fns, rc)),
+            Err(e) => bail!("USB PCM write stopped: {e:?}"),
         }
-        // SAFETY: the handle is live; `prepare` is the documented recovery for -EPIPE.
-        let rc = unsafe { (self.fns.prepare)(self.pcm) };
-        if rc < 0 {
-            bail!("snd_pcm_writei: {}", describe(self.fns, n as c_int));
-        }
-        Ok(())
     }
 }
 
@@ -197,7 +219,7 @@ pub fn spawn(
             };
             // Claimed only once the card is actually open: a failed open must leave the motor
             // envelope holding the coils rather than park it for a lane that never plays.
-            envelope.own_usb();
+            let _ownership = UsbOwnership::claim(&envelope);
             // Route the pad's audio to its speaker. Its own handle rather than the feedback
             // thread's: routing belongs to whoever plays the lane, and the pad may have no
             // feedback sender at all (a host that sends no effects still sends audio).
@@ -213,7 +235,6 @@ pub fn spawn(
             let mut speaker = vec![0f32; CHUNK_FRAMES * 2];
             let mut coils = vec![0f32; CHUNK_FRAMES * 2];
             let mut out = vec![0i16; CHUNK_FRAMES * CHANNELS];
-            let mut failing = false;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 envelope.take_speaker_pcm(&mut speaker);
                 envelope.take_coils_pcm(&mut coils);
@@ -226,16 +247,29 @@ pub fn spawn(
                     frame[2] = q(coils[i * 2]);
                     frame[3] = q(coils[i * 2 + 1]);
                 }
-                match sink.write(&out) {
-                    Ok(()) => failing = false,
-                    Err(e) => {
-                        if !failing {
-                            tracing::warn!("pad audio: wired write failed (further errors quiet): {e:#}");
-                            failing = true;
-                        }
-                    }
+                if let Err(e) = sink.write(&out, &stop) {
+                    tracing::warn!("pad audio: wired lane stopped; coils return to the motors: {e:#}");
+                    break;
                 }
             }
         })
         .ok()
+}
+
+/// The wired lane's claim on the coils, for exactly as long as the lane can play them. Claim and
+/// release are one type's job: an early exit that left the claim standing would mute the motors
+/// for the rest of the session.
+struct UsbOwnership<'a>(&'a crate::session::pad_audio::Envelope);
+
+impl<'a> UsbOwnership<'a> {
+    fn claim(envelope: &'a crate::session::pad_audio::Envelope) -> Self {
+        envelope.own_usb();
+        Self(envelope)
+    }
+}
+
+impl Drop for UsbOwnership<'_> {
+    fn drop(&mut self) {
+        self.0.release_usb();
+    }
 }

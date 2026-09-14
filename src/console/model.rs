@@ -103,11 +103,13 @@ pub(crate) struct Service {
     last_sweep: Option<Instant>,
     /// When [`Self::tick`] last did its work — see [`SERVICE_EVERY`].
     last_tick: Option<Instant>,
+    rows_revision: Option<u64>,
+    rows_dirty: bool,
     games: Option<Receiver<GamesLoaded>>,
     /// Covers as they arrive, decoded on the fetch thread where possible — see [`spawn_art`].
     /// Deliberately NOT through `services::art`, which decodes to a card-sized pixmap for the
     /// old UI's tiny-skia compositor.
-    art: Option<Receiver<(String, ArtItem)>>,
+    art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
@@ -126,6 +128,8 @@ impl Service {
             sweep: None,
             last_sweep: None,
             last_tick: None,
+            rows_revision: None,
+            rows_dirty: true,
             games: None,
             art: None,
             pair: None,
@@ -139,6 +143,7 @@ impl Service {
         // Commands are the one thing that must not wait for the cadence: they are a button
         // press, and the shell shows nothing until one is served.
         for cmd in self.handles.bus.drain() {
+            self.rows_dirty = true;
             self.handle(cmd);
         }
         if self.last_tick.is_some_and(|t| t.elapsed() < SERVICE_EVERY) {
@@ -147,6 +152,7 @@ impl Service {
         self.last_tick = Some(Instant::now());
         if let Some(discovery) = &mut self.discovery {
             for host in discovery.poll() {
+                self.rows_dirty = true;
                 self.discovered
                     .retain(|d| !(d.addr == host.addr && d.port == host.port));
                 self.discovered.push(host);
@@ -159,9 +165,12 @@ impl Service {
         if self.last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
             self.start_sweep();
         }
-        // `set_hosts` bumps its generation only on a real change, so the shell redraws when the
-        // list moves rather than on this cadence.
-        self.handles.console.set_hosts(self.rows());
+        let revision = self.store.revision();
+        if self.rows_dirty || self.rows_revision != Some(revision) {
+            self.handles.console.set_hosts(self.rows());
+            self.rows_revision = Some(revision);
+            self.rows_dirty = false;
+        }
     }
 
     /// Stop everything this service started. The wake worker is the only one that would
@@ -177,6 +186,8 @@ impl Service {
     /// The home carousel: saved hosts (most recently used first), each followed by its pinned
     /// profile cards, then discovered-but-unsaved ones. A pinned card shares its host's live
     /// state; its key rides the profile id behind a NUL, as the desktop's does.
+    // Inputs: persisted hosts/profiles, discovery adverts, reachability and rights.
+    // Store revision and rows_dirty cover those; game arrivals supply no row fields.
     fn rows(&self) -> Vec<HostRow> {
         let state = self.store.snapshot();
         let catalog = pf_client_core::profiles::ProfilesFile {
@@ -494,7 +505,7 @@ impl Service {
             if started.elapsed() >= ART_DRAIN_BUDGET {
                 return;
             }
-            let Ok((id, item)) = rx.try_recv() else { return };
+            let Some((id, item)) = rx.try_recv() else { return };
             match item {
                 ArtItem::Decoded(poster) => self.handles.library.push_decoded(id, poster),
                 ArtItem::Encoded(bytes) => self.handles.library.push_art(id, bytes),
@@ -725,6 +736,7 @@ impl Service {
         loop {
             match rx.try_recv() {
                 Ok(s) => {
+                    self.rows_dirty = true;
                     self.reachable.insert(s.key.clone(), s.online);
                     match s.rights {
                         Some(r) => {
@@ -764,6 +776,7 @@ impl Service {
             .iter()
             .find(|h| h.addr == addr && h.port == port)
             .map_or_else(|| shared::host_key("", addr, port), shared::known_host_key);
+        self.rows_dirty = true;
         self.reachable.insert(key, online);
     }
 
@@ -958,8 +971,7 @@ enum ArtItem {
 ///
 /// A full-size PNG cover costs ~90 ms on a CX — five frames — and the shelf used to stop for
 /// each one. This thread is already waiting on the network, so the work lands where nothing is
-/// watching. The shelf publishes the size it caches at; before it has drawn once there is no
-/// size to decode to, and those few covers go over encoded as they always did.
+/// watching. Wait for the shelf's decode scale before fetching, keeping pending results bounded.
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
@@ -971,8 +983,10 @@ fn spawn_art(
     identity: (String, String),
     games: Vec<GameEntry>,
     library: pf_console_ui::LibraryShared,
-) -> Receiver<(String, ArtItem)> {
-    let (tx, rx) = std::sync::mpsc::channel();
+) -> ArtReceiver {
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancel = cancelled.clone();
     std::thread::Builder::new()
         .name("punktfunk-webos-console-art".into())
         .spawn(move || {
@@ -980,14 +994,25 @@ fn spawn_art(
             let Ok(agent) = library::agent(&identity, pin) else {
                 return;
             };
-            // Scale published only on shelf's first frame; fetch thread arrives early. Park to
-            // avoid render-thread decode (~50ms per poster on this `SoC`).
-            let mut sink = ArtSink {
-                tx: &tx,
-                library: &library,
-                parked: Vec::new(),
+            let waited = Instant::now();
+            let scale = loop {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(scale) = library.art_scale() {
+                    break Some(scale);
+                }
+                if waited.elapsed() >= ART_SCALE_WAIT {
+                    tracing::debug!("console: art scale unavailable; delivering encoded covers");
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(16));
             };
+            let mut cache = crate::services::art::CoverCache::new(&addr, port);
             for game in games {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let bytes = crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
                     // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
@@ -995,7 +1020,7 @@ fn spawn_art(
                         .flatten()
                         .find_map(|path| match library::fetch_art(&agent, &addr, mgmt, path) {
                             Ok(bytes) => {
-                                crate::services::art::store_cover(&addr, port, &game.id, &bytes);
+                                cache.store(&game.id, &bytes);
                                 Some(bytes)
                             }
                             Err(e) => {
@@ -1006,63 +1031,43 @@ fn spawn_art(
                 });
                 // A closed channel means the shelf moved on; stop fetching for it.
                 if let Some(bytes) = bytes {
-                    if sink.push(game.id.clone(), bytes).is_err() {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if tx
+                        .send((game.id, decode_at(&bytes, library.art_scale().or(scale))))
+                        .is_err()
+                    {
                         return;
                     }
                 }
             }
-            sink.finish();
         })
         .ok();
-    rx
+    ArtReceiver { rx, cancelled }
 }
 
 /// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
 
-/// Timeout for fetched covers waiting for shelf's decode scale. Bounds the wait if shelf never opens.
+/// Timeout for fetched covers waiting for the shelf's decode scale. Bounds the wait if the shelf
+/// never opens: those covers go over encoded, as they did before the fetcher decoded at all.
 const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
 
-/// Fetched covers: decoded at shelf's scale if published, parked otherwise. Parking avoids
-/// render-thread decode (~50ms per poster on this `SoC`).
-struct ArtSink<'a> {
-    tx: &'a std::sync::mpsc::Sender<(String, ArtItem)>,
-    library: &'a pf_console_ui::LibraryShared,
-    parked: Vec<(String, Vec<u8>)>,
+struct ArtReceiver {
+    rx: Receiver<(String, ArtItem)>,
+    cancelled: Arc<AtomicBool>,
 }
 
-impl ArtSink<'_> {
-    /// Park until scale arrives, maintaining order. Flush any pending first.
-    fn push(&mut self, id: String, bytes: Vec<u8>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
-        let Some(k) = self.library.art_scale() else {
-            self.parked.push((id, bytes));
-            return Ok(());
-        };
-        self.flush(Some(k))?;
-        self.tx.send((id, decode_at(&bytes, Some(k))))
+impl ArtReceiver {
+    fn try_recv(&self) -> Option<(String, ArtItem)> {
+        self.rx.try_recv().ok()
     }
+}
 
-    /// Timeout for scale; fallback to encoded if shelf never opens.
-    fn finish(&mut self) {
-        let waited = Instant::now();
-        while self.library.art_scale().is_none() && !self.parked.is_empty() {
-            if waited.elapsed() >= ART_SCALE_WAIT {
-                tracing::debug!(
-                    "console: art scale never published — {} covers go encoded",
-                    self.parked.len()
-                );
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-        }
-        let _ = self.flush(self.library.art_scale());
-    }
-
-    fn flush(&mut self, k: Option<f64>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
-        for (id, bytes) in std::mem::take(&mut self.parked) {
-            self.tx.send((id, decode_at(&bytes, k)))?;
-        }
-        Ok(())
+impl Drop for ArtReceiver {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 

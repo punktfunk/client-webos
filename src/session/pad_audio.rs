@@ -229,6 +229,14 @@ impl Envelope {
         self.coils_owned.store(true, Ordering::Relaxed);
     }
 
+    /// A failed wired sink must restore the motor fallback.
+    pub fn release_usb(&self) {
+        self.usb_pcm.store(false, Ordering::Relaxed);
+        self.applied.store(0, Ordering::Relaxed);
+        self.applied_at_ms.store(u64::MAX, Ordering::Relaxed);
+        self.coils_owned.store(false, Ordering::Relaxed);
+    }
+
     /// One decoded coil frame into whichever ring the live transport reads.
     fn push_coils_frame(&self, pcm: &[f32]) {
         if self.usb_pcm.load(Ordering::Relaxed) {
