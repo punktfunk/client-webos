@@ -103,7 +103,7 @@ impl SettingsStore for ConsoleStore {
     /// The document's catalog, in display order. Non-empty as soon as one game has its own
     /// settings: giving a game an override IS creating a profile here (`shared::bind_game_
     /// overrides`), which is what lets a TV with no desktop app beside it fill this list at all.
-    fn profiles(&self) -> Vec<(String, String)> {
+    fn presets(&self) -> Vec<(String, String)> {
         self.state
             .lock()
             .expect(POISONED)

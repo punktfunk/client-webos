@@ -3,7 +3,7 @@
 //! creating it first. The catalog is the shared one every client reads; a title binds to a
 //! profile by id on its host record.
 
-use pf_client_core::profiles::StreamProfile;
+use pf_client_core::presets::StreamPreset;
 
 use crate::app::state::settingspage::{Page, Scope};
 use crate::app::state::textfield::TextField;
@@ -16,7 +16,7 @@ impl App {
     /// Editing ▸ New profile…: an empty overlay under a placeholder name, opened for naming.
     /// Nothing is written until that name is confirmed.
     pub(crate) fn new_profile(&mut self) {
-        let profile = StreamProfile::new(unique_profile_name(&self.profiles, "New profile"));
+        let profile = StreamPreset::new(unique_profile_name(&self.profiles, "New profile"));
         let id = profile.id.clone();
         self.profiles.push(profile);
         self.screens.settings_page.scope = Scope::Profile(id);
@@ -52,11 +52,11 @@ impl App {
         let id = match bound {
             Some(id) => id,
             None => {
-                let profile = StreamProfile::new(unique_profile_name(&self.profiles, title));
+                let profile = StreamPreset::new(unique_profile_name(&self.profiles, title));
                 let id = profile.id.clone();
                 self.profiles.push(profile);
                 if let Some(h) = self.known_host_mut(&host, port) {
-                    h.bind_game_profile(pin_id, Some(&id));
+                    h.bind_game_preset(pin_id, Some(&id));
                 }
                 self.persist();
                 id
@@ -133,7 +133,7 @@ impl App {
         let Some(source) = self.profiles.iter().find(|p| p.id == id).cloned() else {
             return;
         };
-        let mut copy = StreamProfile::new(unique_profile_name(&self.profiles, &format!("{} copy", source.name)));
+        let mut copy = StreamPreset::new(unique_profile_name(&self.profiles, &format!("{} copy", source.name)));
         copy.overrides = source.overrides;
         let new_id = copy.id.clone();
         self.profiles.push(copy);
@@ -151,13 +151,13 @@ impl App {
             .hosts
             .known
             .iter()
-            .filter(|h| h.profile_id.as_deref() == Some(id))
+            .filter(|h| h.preset_id.as_deref() == Some(id))
             .count();
         let titles = self
             .hosts
             .known
             .iter()
-            .flat_map(|h| h.game_profiles.values())
+            .flat_map(|h| h.game_presets.values())
             .filter(|p| p.as_str() == id)
             .count();
         (hosts, titles)
@@ -191,10 +191,10 @@ impl App {
         };
         self.profiles.retain(|p| p.id != id);
         for h in &mut self.hosts.known {
-            if h.profile_id.as_deref() == Some(&id) {
-                h.profile_id = None;
+            if h.preset_id.as_deref() == Some(&id) {
+                h.preset_id = None;
             }
-            h.game_profiles.retain(|_, p| *p != id);
+            h.game_presets.retain(|_, p| *p != id);
         }
         self.screens.settings_page.scope = Scope::Global;
         self.persist();

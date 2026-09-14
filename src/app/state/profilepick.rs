@@ -17,7 +17,7 @@ pub(crate) enum ProfilePick {
     ConnectWith { host: String, port: u16 },
     /// A title's binding (`KnownHost::games[id].profile`); "None" clears it.
     BindGame { pin_id: String, title: String },
-    /// Toggle which profiles the host shows as sidebar cards (`KnownHost::pinned_profiles`).
+    /// Toggle which profiles the host shows as sidebar cards (`KnownHost::pinned_presets`).
     Pin { host: String, port: u16 },
 }
 
@@ -56,7 +56,7 @@ impl App {
     /// The id the purpose currently points at, if any.
     fn pick_current(&self, pick: &ProfilePick) -> Option<String> {
         match pick {
-            ProfilePick::HostDefault { host, port } => self.known_host(host, *port)?.profile_id.clone(),
+            ProfilePick::HostDefault { host, port } => self.known_host(host, *port)?.preset_id.clone(),
             ProfilePick::BindGame { pin_id, .. } => {
                 let (host, port) = self.library.selected_host.clone()?;
                 self.known_host(&host, port)?.game_profile(pin_id).map(str::to_string)
@@ -97,7 +97,7 @@ impl App {
         let pinned: Vec<String> = match pick {
             ProfilePick::Pin { host, port } => self
                 .known_host(host, *port)
-                .map(|h| h.pinned_profiles.clone())
+                .map(|h| h.pinned_presets.clone())
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -156,7 +156,7 @@ impl App {
         match pick {
             ProfilePick::HostDefault { host, port } => {
                 if let Some(h) = self.known_host_mut(&host, port) {
-                    h.profile_id = chosen;
+                    h.preset_id = chosen;
                 }
                 self.persist();
                 self.close_pick_profile();
@@ -164,7 +164,7 @@ impl App {
             ProfilePick::BindGame { pin_id, .. } => {
                 if let Some((host, port)) = self.library.selected_host.clone() {
                     if let Some(h) = self.known_host_mut(&host, port) {
-                        h.bind_game_profile(&pin_id, chosen.as_deref());
+                        h.bind_game_preset(&pin_id, chosen.as_deref());
                     }
                 }
                 self.persist();
@@ -172,11 +172,11 @@ impl App {
             }
             ProfilePick::Pin { host, port } => {
                 if let (Some(h), Some(id)) = (self.known_host_mut(&host, port), chosen) {
-                    match h.pinned_profiles.iter().position(|p| *p == id) {
+                    match h.pinned_presets.iter().position(|p| *p == id) {
                         Some(i) => {
-                            h.pinned_profiles.remove(i);
+                            h.pinned_presets.remove(i);
                         }
-                        None => h.pinned_profiles.push(id),
+                        None => h.pinned_presets.push(id),
                     }
                 }
                 self.persist();

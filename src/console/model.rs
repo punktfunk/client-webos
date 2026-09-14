@@ -59,8 +59,8 @@ struct PairOutcome {
 }
 
 /// A catalog profile as the shell's chip.
-fn chip(p: &pf_client_core::profiles::StreamProfile) -> pf_console_ui::ProfileChip {
-    pf_console_ui::ProfileChip {
+fn chip(p: &pf_client_core::presets::StreamPreset) -> pf_console_ui::PresetChip {
+    pf_console_ui::PresetChip {
         id: p.id.clone(),
         name: p.name.clone(),
         accent: p.accent.clone(),
@@ -190,23 +190,23 @@ impl Service {
     // Store revision and rows_dirty gate updates; game arrivals affect no row fields.
     fn rows(&self) -> Vec<HostRow> {
         let state = self.store.snapshot();
-        let catalog = pf_client_core::profiles::ProfilesFile {
-            version: pf_client_core::profiles::PROFILES_VERSION,
-            profiles: state.profiles.clone(),
+        let catalog = pf_client_core::presets::PresetsFile {
+            version: pf_client_core::presets::PRESETS_VERSION,
+            presets: state.profiles.clone(),
         };
         let mut hosts: Vec<(HostRow, Vec<HostRow>)> = state
             .known_hosts
             .iter()
             .map(|h| {
                 let mut row = self.saved_row(h);
-                row.bound_profile = h.profile_id.as_deref().and_then(|id| catalog.find_by_id(id)).map(chip);
+                row.bound_preset = h.preset_id.as_deref().and_then(|id| catalog.find_by_id(id)).map(chip);
                 let pins = h
                     .resolved_pins(&catalog)
                     .into_iter()
                     .map(|p| HostRow {
                         key: format!("{}\0{}", row.key, p.id),
                         pin: Some(chip(p)),
-                        bound_profile: None,
+                        bound_preset: None,
                         ..row.clone()
                     })
                     .collect();
@@ -242,8 +242,8 @@ impl Service {
                 // Unpaired: there is nothing it would let this TV do to it.
                 actions: Vec::new(),
                 pin: None,
-                bound_profile: None,
-                game_profiles: Default::default(),
+                bound_preset: None,
+                game_presets: Default::default(),
                 // Needs `/api/v1/status`, which this client does not ask — the same reason
                 // `LibraryGame::running` is false here. Empty renders as no line.
                 running: String::new(),
@@ -302,11 +302,11 @@ impl Service {
                 .map_or_else(|| h.os.clone(), |d| d.os.clone()),
             actions: self.rights.get(&key).copied().map(power_rows).unwrap_or_default(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             // Title id → profile id, straight off the record: the bind screen only compares
             // these against the catalog it was handed, and a dangling one resolves to nothing
             // there exactly as it does at launch.
-            game_profiles: h.game_profiles.clone(),
+            game_presets: h.game_presets.clone(),
             running: String::new(),
             key,
         }
@@ -361,19 +361,19 @@ impl Service {
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
             // rather than stored.
-            ConsoleCmd::BindProfile {
+            ConsoleCmd::BindPreset {
                 key,
                 game: Some(game),
-                profile_id,
-            } => self.bind_game_profile(&key, &game, profile_id.as_deref()),
+                preset_id: profile_id,
+            } => self.bind_game_preset(&key, &game, profile_id.as_deref()),
             // The host's own default binding (`KnownHost::profile_id`); `None` clears it.
-            ConsoleCmd::BindProfile {
+            ConsoleCmd::BindPreset {
                 key,
                 game: None,
-                profile_id,
+                preset_id: profile_id,
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
-            ConsoleCmd::SetPin { key, profile_id, pin } => self.set_pin(&key, profile_id, pin),
+            ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
             // Two commands with nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -387,7 +387,7 @@ impl Service {
     /// Point one title at a catalog profile, or clear it. Refuses an id the catalog does not
     /// hold: the record must never name a profile nothing resolves, and the shell can only
     /// offer ids it was handed, so one that misses means the two went out of step.
-    fn bind_game_profile(&self, key: &str, game: &str, profile_id: Option<&str>) {
+    fn bind_game_preset(&self, key: &str, game: &str, profile_id: Option<&str>) {
         let changed = self.store.edit(|state| {
             if let Some(id) = profile_id {
                 if !state.profiles.iter().any(|p| p.id == id) {
@@ -403,7 +403,7 @@ impl Service {
             if host.game_profile(game) == profile_id {
                 return false;
             }
-            host.bind_game_profile(game, profile_id);
+            host.bind_game_preset(game, profile_id);
             true
         });
         if changed {
@@ -1093,6 +1093,7 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             launcher: false,
             icon: g.icon.clone().unwrap_or_default(),
             platform: None,
+            stats: None,
             // Catalog detail the desktop's `GameEntry` carries and this client's does not, so
             // it is reported absent rather than guessed — the same rule as `launcher` above.
             developer: None,
