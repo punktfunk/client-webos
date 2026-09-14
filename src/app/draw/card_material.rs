@@ -92,17 +92,26 @@ fn shader(rect: Rect, corner: f32, k: f32) -> Option<skia_safe::Shader> {
     b.make_shader(&skia_safe::Matrix::default())
 }
 
+type Cached = (Rect, f32, f32, skia_safe::Shader);
+
 pub(super) fn draw(canvas: &Canvas, rr: RRect, rect: Rect, corner: f32, k: f32) {
+    // Two slots, not one: a card and the card-menu strip are drawn in the same frame, and the
+    // strip's rect animates through its wipe — a single slot had each evicting the other every
+    // frame, rebuilding both shaders. Most-recent first, so the hit is usually slot 0.
     thread_local! {
-        static SHADER: std::cell::RefCell<Option<(Rect, f32, f32, skia_safe::Shader)>> =
-            const { std::cell::RefCell::new(None) };
+        static SHADER: std::cell::RefCell<[Option<Cached>; 2]> =
+            const { std::cell::RefCell::new([None, None]) };
     }
     let shader = SHADER.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !matches!(&*cache, Some((r, c, scale, _)) if *r == rect && *c == corner && *scale == k) {
-            *cache = shader(rect, corner, k).map(|shader| (rect, corner, k, shader));
+        let hit = |s: &Option<Cached>| matches!(s, Some((r, c, scale, _)) if *r == rect && *c == corner && *scale == k);
+        if hit(&cache[1]) {
+            cache.swap(0, 1);
+        } else if !hit(&cache[0]) {
+            cache[1] = cache[0].take();
+            cache[0] = shader(rect, corner, k).map(|shader| (rect, corner, k, shader));
         }
-        cache.as_ref().map(|(_, _, _, shader)| shader.clone())
+        cache[0].as_ref().map(|(_, _, _, shader)| shader.clone())
     });
     if let Some(shader) = shader {
         let mut p = theme::shaded();

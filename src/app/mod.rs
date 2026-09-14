@@ -658,7 +658,11 @@ impl App {
         if self.render.grid.card_pops_running() || self.render.grid.reveal.dissolving() {
             backdrop_changed = true;
         }
-        if self.render.list.as_ref().is_some_and(|(_, l)| l.animating()) {
+        let closing = self.render.modal.fade.closing_frame().map(|(_, screen)| screen);
+        self.render.lists.retain(|slot| {
+            slot.screen == self.nav.screen || slot.screen == self.nav.last_screen || Some(slot.screen) == closing
+        });
+        if self.render.lists.iter().any(|slot| slot.list.animating()) {
             animating = true;
         }
         if self.render.sidebar_focus.animating() || self.render.tab_focus.animating() {
@@ -818,20 +822,13 @@ impl App {
         let columns = view::home::grid_columns(available_w);
         self.render.grid.card_size = view::home::grid_card_size(available_w, columns);
 
-        // Every screen transition triggers close-fade for the left screen and
-        // open-fade for the entered screen, centralized here rather than at each
-        // dispatch site. Every modal exit fades, modal-to-modal included: the leaving
-        // card's pixels go to `tile::MODAL_PREV` (see `snapshot_closing_modal`), so the
-        // entering screen taking over `tile::MODAL` no longer forces the close to be a cut.
+        // One transition hook starts the departing and arriving modal fades.
         let screen_changed = self.nav.screen != self.nav.last_screen;
         if screen_changed {
             let left = self.nav.last_screen;
             self.nav.last_screen = self.nav.screen;
-            // A list screen's rows rise on every arrival, whether it is being opened or
-            // returned to: dropping the widget here is what makes the entrance replay, and
-            // doing it on the one transition hook means a screen reached across a text form
-            // (the address dialog, which seats no list of its own) enters like any other.
-            self.render.list = None;
+            // Preserve the departing rows through their fade; only the arrival starts fresh.
+            self.render.lists.retain(|slot| slot.screen == left);
             // Modal-to-modal cross-fades: `ui::fade` makes the leaving card the entering
             // one's inverse. Anything involving Home is a plain open or close.
             if !matches!(left, Screen::Home) {
@@ -848,6 +845,9 @@ impl App {
                 self.render.modal.fade.cancel_closing(self.nav.screen);
             }
         }
+        // Latched last: every reader this frame must see the same alphas, whatever the clock
+        // does between the page snapshot and the modal layer.
+        self.render.modal.frames = self.sample_modal_frames();
         screen_changed
     }
 }

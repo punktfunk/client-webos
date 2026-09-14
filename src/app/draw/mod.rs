@@ -16,6 +16,7 @@ pub(crate) mod glass;
 pub(crate) mod home;
 pub(crate) mod list;
 pub(crate) mod settings;
+pub(crate) mod warmup;
 
 use std::sync::OnceLock;
 
@@ -333,10 +334,10 @@ pub(crate) fn with_pop(c: &Canvas, r: Rect, f: f32, paint: impl FnOnce(&Canvas))
 }
 
 impl App {
-    /// The modal cards this frame: the open one's alpha, and the one being left, already
-    /// filtered to the ported screens. Both `draw_modals` and [`App::modal_visible`] read it,
-    /// so the snapshot can never disagree with what actually draws.
-    fn modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
+    /// Samples the fades: the open card's alpha and the one being left, filtered to the ported
+    /// screens. Called once per frame by `App::advance_frame`; every reader takes the latch, so
+    /// the snapshot cannot disagree with what actually draws.
+    pub(crate) fn sample_modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
         let m = if matches!(self.nav.screen, Screen::Home) {
             0.0
         } else {
@@ -349,6 +350,11 @@ impl App {
             .closing_frame_against(m)
             .filter(|(_, left)| ported(*left));
         (m, leaving)
+    }
+
+    /// This frame's latched card alphas (see `modal::ModalState::frames`).
+    fn modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
+        self.render.modal.frames
     }
 
     /// Whether a modal card will be drawn this frame — i.e. whether the page behind it is
@@ -454,11 +460,16 @@ impl App {
             let l = settings::layout(f.w, f.h, f.k);
             let hover_close = live && self.render.hover_close;
             let (page, column) = (self.screens.settings_page.page, self.screens.settings_page.column);
-            self.kit_list(screen).cursor = focus;
+            self.kit_slot(screen).list.cursor = focus;
+            // Re-taken through `RenderState` so the rows and the tab strip borrow disjointly.
             let render = &mut self.render;
-            let list = &mut render.list.as_mut().expect("kit_list seats it").1;
             let tabs = &mut render.tab_focus;
-            settings::draw(f, list, tabs, &l, page, column, &rows, hover_close, alpha, dy, dt, live);
+            let slot = render
+                .lists
+                .iter_mut()
+                .find(|slot| slot.screen == screen)
+                .expect("just seated");
+            settings::draw(f, slot, tabs, &l, page, column, &rows, hover_close, alpha, dy, dt, live);
             return;
         }
         if is_list(screen) {
@@ -467,10 +478,10 @@ impl App {
             };
             let l = self.list_layout(screen, &card, f.w, f.h, f.k);
             let hover_close = live && self.render.hover_close;
-            let list = self.kit_list(screen);
+            let slot = self.kit_slot(screen);
             // The App's cursor is the one the handlers read; the widget's follows it.
-            list.cursor = focus;
-            list::draw(f, list, &l, &card.title, &card.rows, hover_close, alpha, dy, dt, live);
+            slot.list.cursor = focus;
+            list::draw(f, slot, &l, &card.title, &card.rows, hover_close, alpha, dy, dt, live);
             return;
         }
         let Some(title) = dialog::title_of(screen) else {
@@ -491,18 +502,20 @@ impl App {
         dialog::draw(f, title, &confirm, focus, motion.as_ref(), alpha, dy);
     }
 
-    /// The kit list for `screen`, seated fresh when the seat is empty or holds another
-    /// screen's — so a card enters with its own rise and no scroll carried over. `advance_frame`
-    /// empties the seat on every screen change; the screen it is tagged with is what keeps the
-    /// two cards of a cross-fade from sharing one widget, since the leaving one is drawn too.
-    pub(crate) fn kit_list(&mut self, screen: Screen) -> &mut pf_console_ui::widgets::MenuList {
-        let cursor = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
-        if !matches!(&self.render.list, Some((s, _)) if *s == screen) {
-            let mut list = pf_console_ui::widgets::MenuList::new();
-            list.jump_to(cursor);
-            self.render.list = Some((screen, list));
+    /// Each visible modal owns its row animations, including while fading out.
+    pub(crate) fn kit_slot(&mut self, screen: Screen) -> &mut crate::app::render::state::ListSlot {
+        if self.render.slot(screen).is_none() {
+            let cursor = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
+            let mut slot = crate::app::render::state::ListSlot::new(screen);
+            slot.list.jump_to(cursor);
+            self.render.lists.push(slot);
         }
-        &mut self.render.list.as_mut().expect("just seated").1
+        self.render.slot(screen).expect("just seated")
+    }
+
+    /// [`App::kit_slot`]'s widget, for the callers that only measure or nudge it.
+    pub(crate) fn kit_list(&mut self, screen: Screen) -> &mut pf_console_ui::widgets::MenuList {
+        &mut self.kit_slot(screen).list
     }
 
     /// `None` on any other screen.

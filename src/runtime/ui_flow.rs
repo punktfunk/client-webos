@@ -36,6 +36,11 @@ pub(super) fn run_ui_flow(
     canvas.window_mut().show();
     let gl = console_flow::bring_up(gl, canvas).context("menu: GL host")?;
     let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
+    gl.warm_glass(
+        &kit_fonts,
+        canvas.window().drawable_size(),
+        (display_mode.w as u32, display_mode.h as u32),
+    )?;
     tracing::info!(
         "menu fonts: {} (the kit's embedded faces)",
         kit_fonts
@@ -419,13 +424,22 @@ pub(super) fn run_ui_flow(
                 let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
                 app.draw_home(&frame, dt);
             }
-            // Overlay frames reuse the blur; content events and background motion invalidate it.
-            if !(app.modal_visible() || quit_dialog_active) {
+            // The card's frosted backdrop. Built when the page behind it moves, then held for
+            // as long as a card is up: `image_snapshot_with_bounds` forces a copy of the whole
+            // framebuffer (the modal layer draws into it straight after, so copy-on-write has
+            // to fire) and the blur runs on top of that. `backdrop_changed` counts the modal's
+            // own motion too — the open/close fade, a settings tab's ease — so rebuilding on it
+            // meant paying that for every frame of an animation, which is what the animation
+            // stuttered on. Nothing the user does inside a card moves the page behind it.
+            let card_up = app.modal_visible() || quit_dialog_active;
+            if backdrop_dirty && !card_up {
                 page = None;
-            } else if page.is_none() || backdrop_dirty {
+            }
+            if card_up && page.is_none() {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
                 let k = crate::app::draw::scale(display_mode.h as u32) * dh as f32 / display_mode.h.max(1) as f32;
-                page = snap.and_then(|snap| crate::app::draw::glass::blur_page(surface, &snap, k));
+                let sigma = crate::app::draw::glass::page_sigma(k);
+                page = snap.and_then(|snap| crate::app::draw::glass::blur_image(surface.canvas(), &snap, sigma));
             }
             let c = surface.canvas();
             let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)

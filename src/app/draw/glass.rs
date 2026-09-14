@@ -23,7 +23,7 @@ const CARD_TINT: f32 = 0.10;
 /// of quarter resolution. Grain dithers quantization, but cannot hide those contours.
 const DOWNSCALE: i32 = 2;
 
-/// The target chooses GPU storage for pages or raster storage for small covers.
+/// Both backdrops use a surface compatible with the drawing canvas.
 fn downscaled_blur(
     target: impl FnOnce(i32, i32) -> Option<skia_safe::Surface>,
     img: &skia_safe::Image,
@@ -45,13 +45,17 @@ fn downscaled_blur(
     Some(surface.image_snapshot())
 }
 
-/// Blur into a compatible offscreen surface to keep the page on the GPU.
-pub(crate) fn blur_page(surface: &mut skia_safe::Surface, page: &skia_safe::Image, k: f32) -> Option<skia_safe::Image> {
-    let info = surface.image_info();
+/// The sigma a card's page backdrop is blurred at, where `k` is [`super::scale`] times the
+/// drawable-over-layout ratio. One rule, so the startup warmup compiles the blur the menu draws.
+pub(crate) fn page_sigma(k: f32) -> f32 {
+    CARD_BLUR * k
+}
+
+pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) -> Option<skia_safe::Image> {
     downscaled_blur(
-        |w, h| surface.new_surface(&info.with_dimensions((w, h))),
-        page,
-        CARD_BLUR * k,
+        |w, h| canvas.new_surface(&canvas.image_info().with_dimensions((w, h)), None),
+        image,
+        sigma,
     )
 }
 
@@ -116,6 +120,11 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
         return;
     };
     draw_card_backdrop(f, bd, rr);
+    draw_face(canvas, rr, rect, corner, k);
+}
+
+/// The translucent face over whatever backdrop the caller has already laid down.
+fn draw_face(canvas: &Canvas, rr: RRect, rect: Rect, corner: f32, k: f32) {
     canvas.draw_rrect(rr, &theme::fill(frosted_face()));
     // theme::panel would re-opacify the translucent face.
     card_material::draw(canvas, rr, rect, corner, k);
@@ -125,21 +134,26 @@ pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
 /// Frost the cover in its original rect to preserve registration during zoom.
 /// Returns false when blur fails so the caller can draw an opaque strip.
 pub(crate) fn frost_over_art(canvas: &Canvas, img: &skia_safe::Image, art: Rect, window: Rect, k: f32) -> bool {
-    let Some(blurred) = blurred_cover(img, art, k) else {
+    let Some(blurred) = blurred_cover(canvas, img, art, k) else {
         return false;
     };
     canvas.draw_image_rect_with_sampling_options(&blurred, None, art, super::linear(), &theme::layer());
-    canvas.draw_rect(window, &theme::fill(frosted_face()));
+    // The caller clips the strip to the cover's rounded outer corners.
+    draw_face(canvas, RRect::new_rect(window), window, 0.0, k);
     true
 }
 
-/// One cached cover for the single open card menu. Quantize source-space sigma
-/// to avoid rebuilding the blur for every subpixel of the card's zoom animation.
-fn blurred_cover(img: &skia_safe::Image, art: Rect, k: f32) -> Option<skia_safe::Image> {
-    thread_local! {
-        static COVER: std::cell::RefCell<Option<(u32, i32, skia_safe::Image)>> =
-            const { std::cell::RefCell::new(None) };
-    }
+thread_local! {
+    static COVER: std::cell::RefCell<Option<(u32, i32, skia_safe::Image)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn clear_cover() {
+    COVER.with(|c| *c.borrow_mut() = None);
+}
+
+/// Quantize source-space sigma so subpixel zoom steps reuse the single cached cover.
+fn blurred_cover(canvas: &Canvas, img: &skia_safe::Image, art: Rect, k: f32) -> Option<skia_safe::Image> {
     if art.width() <= 0.0 {
         return None;
     }
@@ -147,9 +161,7 @@ fn blurred_cover(img: &skia_safe::Image, art: Rect, k: f32) -> Option<skia_safe:
     COVER.with(|c| {
         let mut c = c.borrow_mut();
         if !matches!(&*c, Some((image_id, s, _)) if *image_id == img.unique_id() && *s == sigma) {
-            // Raster blur avoids deferring GPU filter work to the menu's opening frame.
-            *c = downscaled_blur(|w, h| skia_safe::surfaces::raster_n32_premul((w, h)), img, sigma as f32)
-                .map(|blurred| (img.unique_id(), sigma, blurred));
+            *c = blur_image(canvas, img, sigma as f32).map(|blurred| (img.unique_id(), sigma, blurred));
         }
         c.as_ref().map(|(_, _, img)| img.clone())
     })

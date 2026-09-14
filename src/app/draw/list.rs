@@ -8,10 +8,11 @@
 
 use pf_console_ui::icons::{by_name, draw_icon};
 use pf_console_ui::theme::{self, Fonts, W};
-use pf_console_ui::widgets::{MenuList, RowSpec, ROW_H};
+use pf_console_ui::widgets::{RowSpec, ROW_H};
 use skia_safe::{Contains, Point, Rect};
 
 use super::{alpha_layer, glass_card, line_h, wrap, Frame};
+use crate::app::render::state::ListSlot;
 use crate::app::screens::rowbuttons::RowButton;
 use crate::ui::widgets::{FocusRow, RowKind};
 
@@ -116,7 +117,7 @@ pub(crate) fn layout(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     f: &Frame<'_>,
-    list: &mut MenuList,
+    slot: &mut ListSlot,
     l: &Layout,
     title: &str,
     rows: &[RowSpec],
@@ -164,7 +165,7 @@ pub(crate) fn draw(
             theme::fg(if hover_close { 1.0 } else { 0.5 }),
         );
     }
-    render_faded(c, list, l.rows, rows, f.fonts, k, dt, active);
+    render_faded(c, slot, l.rows, rows, f.fonts, k, dt, active);
     c.restore();
     c.restore();
 }
@@ -174,7 +175,7 @@ pub(crate) fn draw(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_faded(
     c: &skia_safe::Canvas,
-    list: &mut MenuList,
+    slot: &mut ListSlot,
     rect: Rect,
     rows: &[RowSpec],
     fonts: &Fonts,
@@ -182,8 +183,23 @@ pub(crate) fn render_faded(
     dt: f64,
     active: bool,
 ) {
-    let (content_h, focused_center) = row_metrics(rows, list.cursor);
-    let (top, bottom) = crate::ui::scroll::edge_fades(content_h, rect.height() / k, focused_center, FADE_H);
+    let (content_h, focused_center) = row_metrics(rows, slot.list.cursor);
+    let view_h = rect.height() / k;
+    let target = crate::ui::scroll::scroll_target(content_h, view_h, focused_center);
+    // Chase the target on the kit's own scroll constant so the mask sits where the rows are.
+    // Seated outright on the first render, which is the one `MenuList` snaps.
+    let mut scroll = match slot.fade_scroll {
+        Some(s) => pf_console_ui::anim::approach(f64::from(s), f64::from(target), dt, 0.08) as f32,
+        None => target,
+    };
+    // Land like the widget does, so the mask settles on the same frame the rows do — an
+    // `approach` never arrives, and the redraw gate stops asking for frames once they have.
+    if (scroll - target).abs() < 0.25 {
+        scroll = target;
+    }
+    slot.fade_scroll = Some(scroll);
+    let list = &mut slot.list;
+    let (top, bottom) = crate::ui::scroll::edge_fades_at(content_h, view_h, scroll, FADE_H);
     // Mask the rows themselves, not the glass: a painted strip would opacify the card.
     let faded = top > 0.0 || bottom > 0.0;
     if faded {
@@ -197,7 +213,7 @@ pub(crate) fn render_faded(
 }
 
 /// The kit's own layout, restated: total row height and where the focused row centres, in
-/// design units. `MenuList` keeps its scroll private, so the fade recomputes it from these.
+/// design units. `MenuList` keeps its scroll private, so `render_faded` mirrors it from these.
 fn row_metrics(rows: &[RowSpec], cursor: usize) -> (f32, f32) {
     let mut y = 0.0f32;
     let mut focused_center = 0.0;
@@ -337,7 +353,7 @@ mod tests {
         .collect();
         let l = layout(&fonts, w as f32, h as f32, k, Some(hostpower::SUBTITLE), rows.len(), 0);
         let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
-        let mut list = MenuList::new();
+        let mut list = ListSlot::new(crate::core::screen::Screen::HostPower);
         for _ in 0..90 {
             surface.canvas().clear(Color4f::new(0.075, 0.063, 0.16, 1.0));
             let f = Frame::new(surface.canvas(), &fonts, w, h);

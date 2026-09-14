@@ -47,6 +47,16 @@ clears transparent so NDL's plane shows through.
   a document (About) is wrapped once per width and kept.
 - **Glass over the menu is a backdrop blur** (`app::draw::glass_card`); over the stream there is no
   framebuffer to blur, so the dialog is the kit's panel on a transparent clear.
+- **Modal and game-card glass share the face, rim shader and GPU blur path.** The game strip
+  samples its cover; dialogs sample the page. Warmup uses the real game-strip painter and
+  advances separate host/settings widgets through arrival and settling, submitting each sample.
+  Warming only the material or a few static samples misses programs used later in the animation.
+  Driver measurements confirmed 19–36 ms compilation stalls during first openings; the complete
+  warmup removed the reported stutter on TV. Keep it once per GL context. Release the single
+  cached cover blur before streaming, while preserving compiled programs.
+- **Keep list widgets alive through modal fades.** Recreating the departing list restarts its
+  row entrance while the panel closes. Cross-fades need separate widgets for both screens;
+  sharing one slot rebuilds each on every frame. Retire the outgoing widget after its fade.
 - **The drawable can differ from the display mode** on webOS: every frame scales the canvas from
   `display_mode` units to `drawable_size`, and every layout and hit test works in display units.
 - **Icons are Lucide, by name** (`app::view::icons`), from the kit's table. A new mark is added to

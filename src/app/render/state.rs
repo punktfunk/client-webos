@@ -32,9 +32,8 @@ pub(crate) struct RenderState {
     pub(crate) grid: grid::GridState,
     pub(crate) focus_anim: Option<Instant>,
     pub(crate) press: ui::animation::Press,
-    /// The kit list widget of the open ported list screen (`app::draw::list`), with the
-    /// screen it was made for — a different screen gets a fresh one.
-    pub(crate) list: Option<(crate::core::screen::Screen, pf_console_ui::widgets::MenuList)>,
+    /// At most two widgets: the current modal and the one fading out.
+    pub(crate) lists: Vec<ListSlot>,
     /// The sidebar rows' and the settings tabs' eased focus (`app::draw::FocusEase`).
     pub(crate) sidebar_focus: crate::app::draw::FocusEase,
     pub(crate) tab_focus: crate::app::draw::FocusEase,
@@ -91,5 +90,36 @@ impl RunningPulse {
         let at = step as f32 / PULSE_STEPS as f32;
         self.breath = 0.5 + 0.5 * (at * std::f32::consts::TAU).cos();
         true
+    }
+}
+
+/// One modal's row widget plus the frame state the widget does not expose.
+pub(crate) struct ListSlot {
+    pub(crate) screen: crate::core::screen::Screen,
+    pub(crate) list: pf_console_ui::widgets::MenuList,
+    /// Mirror of the widget's own eased scroll, in design units. `MenuList` keeps its scroll
+    /// private, so the edge fade used to recompute it from the cursor — i.e. from the target,
+    /// which lands a whole ease ahead of the rows. That snapped the mask on the frame the
+    /// cursor or the row set changed, and rows at either edge blinked in and out. `None` until
+    /// the first render seats it, matching the widget's own snap-on-mount.
+    pub(crate) fade_scroll: Option<f32>,
+}
+
+impl ListSlot {
+    pub(crate) fn new(screen: crate::core::screen::Screen) -> Self {
+        Self {
+            screen,
+            list: pf_console_ui::widgets::MenuList::new(),
+            fade_scroll: None,
+        }
+    }
+}
+
+impl RenderState {
+    /// The seat `screen`'s rows live in, `None` before it has drawn once. The one place that
+    /// knows how `lists` is keyed — `App::kit_slot` seats through it, every other caller reads
+    /// through it, so a change of key lands in one function.
+    pub(crate) fn slot(&mut self, screen: crate::core::screen::Screen) -> Option<&mut ListSlot> {
+        self.lists.iter_mut().find(|slot| slot.screen == screen)
     }
 }
