@@ -424,15 +424,17 @@ pub(super) fn run_ui_flow(
                 let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
                 app.draw_home(&frame, dt);
             }
-            // The card's frosted backdrop. Built when the page behind it moves, then held for
-            // as long as a card is up: `image_snapshot_with_bounds` forces a copy of the whole
-            // framebuffer (the modal layer draws into it straight after, so copy-on-write has
-            // to fire) and the blur runs on top of that. `backdrop_changed` counts the modal's
-            // own motion too — the open/close fade, a settings tab's ease — so rebuilding on it
-            // meant paying that for every frame of an animation, which is what the animation
-            // stuttered on. Nothing the user does inside a card moves the page behind it.
+            // The card's frosted backdrop, refreshed whenever the page behind it moves, but
+            // held still for the length of an open or close fade. A refresh is expensive: the
+            // modal layer draws into this surface straight after, so `image_snapshot_with_bounds`
+            // makes copy-on-write copy the whole framebuffer, and the blur runs on top of that.
+            // `backdrop_changed` is set by the fade's own tick, so rebuilding on it paid that
+            // cost on every frame of the animation, which is what the animation stuttered on.
+            // One blur covers a whole fade; the page cannot move underneath it in ~200ms.
+            // Dropped and rebuilt inside the one frame, so no frame draws a card without a
+            // backdrop.
             let card_up = app.modal_visible() || quit_dialog_active;
-            if backdrop_dirty && !card_up {
+            if backdrop_dirty && !app.modal_fading() {
                 page = None;
             }
             if card_up && page.is_none() {

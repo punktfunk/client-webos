@@ -352,6 +352,14 @@ impl App {
         (m, leaving)
     }
 
+    /// Whether a card is mid open- or close-fade. The runtime holds the page blur still for
+    /// the length of one: rebuilding it copies the whole framebuffer and re-blurs it, and
+    /// paying that on frames of a ~200ms fade is what the fade stutters on. Outside a fade the
+    /// blur still refreshes whenever the page behind it moves.
+    pub(crate) fn modal_fading(&self) -> bool {
+        self.render.modal.fade.is_animating()
+    }
+
     /// This frame's latched card alphas (see `modal::ModalState::frames`).
     fn modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
         self.render.modal.frames
