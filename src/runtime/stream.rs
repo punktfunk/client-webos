@@ -1,12 +1,28 @@
 use super::overlay::{self, ConfirmAction, ConfirmDialog};
 use super::*;
+use crate::core::dial::{PadDial, PadRoute};
 use crate::core::settings::TvSettings;
 use crate::platform::webos::device;
 use crate::platform::webos::input::{
     webos_scancode_down as key_down, WEBOS_BLUE_KEYCODE, WEBOS_EXIT_SCANCODE, WEBOS_GREEN_SCANCODE,
     WEBOS_HOME_SCANCODE, WEBOS_YELLOW_SCANCODE,
 };
+use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
 use punktfunk_core::hud::{self, Extra, HudLine, Role, StatsSnapshot, StatsVerbosity};
+
+/// One frame of the dial's animation. The loop runs every 2 ms; the ring needs no more than 60 Hz.
+const RING_FRAME: Duration = Duration::from_millis(16);
+/// A synthetic system-button tap holds this long, so the host sees the press.
+const TAP_PRESS: Duration = Duration::from_millis(50);
+/// Every pad axis, for the dial's release on open and the re-send on close.
+const PAD_AXES: [sdl2::controller::Axis; 6] = [
+    sdl2::controller::Axis::LeftX,
+    sdl2::controller::Axis::LeftY,
+    sdl2::controller::Axis::RightX,
+    sdl2::controller::Axis::RightY,
+    sdl2::controller::Axis::TriggerLeft,
+    sdl2::controller::Axis::TriggerRight,
+];
 
 /// How long the finished launch frame is held waiting for the first frame to reach the decoder
 /// before uncovering the video plane regardless. `None` only when the loading screen never
@@ -487,6 +503,16 @@ pub(super) fn run_inner() -> Result<()> {
             );
             // Gamepad routes to the disconnect dialog — see `DisconnectChord`.
             let mut chord = DisconnectChord::default();
+            // The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
+            let mut ring = pf_console_ui::Ring::new();
+            let mut dial = PadDial::default();
+            let mut ring_was_open = false;
+            let mut ring_drawn = 0u64;
+            let mut ring_drawn_at = Instant::now();
+            let native_mode = connected.client.mode();
+            // A dial tap of Guide or QAM still owes its release: `(bit, due)`.
+            let mut tap_up: Option<(u32, Instant)> = None;
+            let mut ring_stats = false;
             // Short Back tap forwards Esc; a held Back becomes webOS's EXIT gesture, polled below.
             // Seeded like the colour keys above — see there.
             let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
@@ -592,6 +618,7 @@ pub(super) fn run_inner() -> Result<()> {
                             controller = None;
                             // An unplugged pad sends no releases, so a held chord would stay armed forever.
                             chord.clear();
+                            dial.clear();
                         }
                         // Dialog open: navigate it only, don't forward input to the host.
                         _ if disconnect.is_open() => {
@@ -607,6 +634,25 @@ pub(super) fn run_inner() -> Result<()> {
                                 Some(ConfirmAction::Navigated) | None => {}
                             }
                         }
+                        // Dial open: the remote's keys drive it, and no key or pointer input reaches
+                        // the host.
+                        Event::KeyDown {
+                            keycode: Some(k),
+                            repeat: false,
+                            ..
+                        } if ring.open() => {
+                            if let Some(ev) = ring_event_for_key(k) {
+                                ring.menu(ev);
+                            }
+                        }
+                        Event::KeyDown { .. }
+                        | Event::KeyUp { .. }
+                        | Event::TextInput { .. }
+                        | Event::MouseMotion { .. }
+                        | Event::MouseButtonDown { .. }
+                        | Event::MouseButtonUp { .. }
+                        | Event::MouseWheel { .. }
+                            if ring.open() => {}
                         // Scancode keys are real game input — forward only, never open the dialog.
                         Event::KeyDown { scancode: Some(sc), .. } if !hid_keys => {
                             if let Some(ev) = keyboard::key_event(sc, true) {
@@ -647,14 +693,7 @@ pub(super) fn run_inner() -> Result<()> {
                             repeat: false,
                             ..
                         } if k.into_i32() == WEBOS_BLUE_KEYCODE => {
-                            // webOS requires a rectangle before enabling the IME.
-                            let w = 400i32.min(display_mode.w);
-                            text_input.raise(sdl2::rect::Rect::new(
-                                (display_mode.w - w) / 2,
-                                display_mode.h - 120,
-                                w as u32,
-                                60,
-                            ));
+                            raise_keyboard(&mut text_input, display_mode.w, display_mode.h);
                         }
                         // Magic Remote Back has no scancode — forwarded as Esc. A held Back never
                         // arrives here; webOS delivers it as the EXIT gesture polled below instead.
@@ -682,21 +721,39 @@ pub(super) fn run_inner() -> Result<()> {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::ControllerButtonDown { button, .. } => {
-                            chord.set(button, true);
-                            // Still forwarded: the hold requirement is what keeps game input and
-                            // the shortcut apart.
-                            let ev = gamepad::button_event(button, true, 0);
-                            connected.send_input(&ev);
-                        }
-                        Event::ControllerButtonUp { button, .. } => {
-                            chord.set(button, false);
-                            let ev = gamepad::button_event(button, false, 0);
-                            connected.send_input(&ev);
+                        Event::ControllerButtonDown { button, .. } | Event::ControllerButtonUp { button, .. } => {
+                            let down = matches!(event, Event::ControllerButtonDown { .. });
+                            let open = ring.open();
+                            if !open {
+                                chord.set(button, down);
+                            }
+                            // Forwarded buttons still reach the host: the hold requirement is what
+                            // keeps game input and the disconnect shortcut apart.
+                            match dial.button(gamepad::button_bit(button), down, open) {
+                                PadRoute::Forward => connected.send_input(&gamepad::button_event(button, down, 0)),
+                                PadRoute::Open => {
+                                    ring.set_facts(&ring_facts(&settings, &connected, stats_tier, native_mode, true));
+                                    ring.input(RingInput::Toggle {
+                                        x: display.0 as f32 / 2.0,
+                                        y: display.1 as f32 / 2.0,
+                                    });
+                                }
+                                PadRoute::Menu(ev) => {
+                                    ring.menu(ev);
+                                }
+                                PadRoute::Drop => {}
+                            }
                         }
                         Event::ControllerAxisMotion { axis, value, .. } => {
-                            let ev = gamepad::axis_event(axis, value, 0);
-                            connected.send_input(&ev);
+                            let open = ring.open();
+                            if matches!(axis, sdl2::controller::Axis::LeftX | sdl2::controller::Axis::LeftY) {
+                                if let Some(ev) = dial.left_stick(axis == sdl2::controller::Axis::LeftX, value, open) {
+                                    ring.menu(ev);
+                                }
+                            }
+                            if !open {
+                                connected.send_input(&gamepad::axis_event(axis, value, 0));
+                            }
                         }
                         // Magic Remote pointer mode surfaces as plain SDL2 mouse events, forwarded
                         // to the host instead of driving local UI focus (see `mouse.rs`).
@@ -767,6 +824,86 @@ pub(super) fn run_inner() -> Result<()> {
                         _ => {}
                     }
                 }
+                // The dial took the pad: the host must see nothing held. On close the sticks are
+                // re-sent, since SDL only reports changes and a held stick would stay dead there.
+                let ring_open = ring.open();
+                if ring_open != ring_was_open {
+                    ring_was_open = ring_open;
+                    if ring_open {
+                        chord.clear();
+                        let held = dial.opened();
+                        for bit in (0..32).map(|i| 1u32 << i).filter(|bit| held & bit != 0) {
+                            connected.send_input(&gamepad::bit_event(bit, false, 0));
+                        }
+                        for axis in PAD_AXES {
+                            connected.send_input(&gamepad::axis_event(axis, 0, 0));
+                        }
+                        connected.release_input();
+                        buttons.release_held(|ev| connected.send_input(ev));
+                    } else {
+                        dial.closed();
+                        if let Some(pad) = controller.as_ref() {
+                            for axis in PAD_AXES {
+                                connected.send_input(&gamepad::axis_event(axis, pad.axis(axis), 0));
+                            }
+                        }
+                    }
+                }
+                if ring_open {
+                    ring.set_facts(&ring_facts(
+                        &settings,
+                        &connected,
+                        stats_tier,
+                        native_mode,
+                        controller.is_some(),
+                    ));
+                }
+                ring.tick();
+                while let Some(cmd) = ring.take_command() {
+                    tracing::info!(?cmd, "dial");
+                    match cmd {
+                        RingCommand::EndStream => {
+                            connected.disconnect_quit();
+                            break 'running StreamOutcome::ReturnToMenu;
+                        }
+                        // No quit code: the host keeps the session for a reconnect.
+                        RingCommand::DisconnectLinger => {
+                            break 'running StreamOutcome::ReturnToMenu;
+                        }
+                        RingCommand::CycleStats => ring_stats = true,
+                        RingCommand::Keyboard => raise_keyboard(&mut text_input, display_mode.w, display_mode.h),
+                        RingCommand::RequestMode {
+                            width,
+                            height,
+                            refresh_hz,
+                        } => {
+                            let mode = punktfunk_core::config::Mode {
+                                width,
+                                height,
+                                refresh_hz,
+                            };
+                            if let Err(e) = connected.client.request_mode(mode) {
+                                tracing::warn!("dial: mode request: {e}");
+                            }
+                        }
+                        RingCommand::Shortcut(keys) => send_shortcut(&connected, &keys),
+                        RingCommand::TapButton(bit) => {
+                            connected.send_input(&gamepad::bit_event(bit, true, 0));
+                            tap_up = Some((bit, Instant::now() + TAP_PRESS));
+                        }
+                        RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, controller.is_some()),
+                        // No microphone and no touch surface on a TV.
+                        RingCommand::ToggleMic | RingCommand::CycleTouchMode => {}
+                    }
+                }
+                // Host actions: this client keeps no action cache, so their slots stay dimmed.
+                drop(ring.take_cmds());
+                if let Some((bit, due)) = tap_up {
+                    if Instant::now() >= due {
+                        connected.send_input(&gamepad::bit_event(bit, false, 0));
+                        tap_up = None;
+                    }
+                }
                 // An open dialog swallows pointer input from here on, so no release ever arrives for
                 // whatever is down — the same trap `DisconnectChord::clear` covers for the pad. Done
                 // here rather than at each `open` site so every path into the dialog is covered.
@@ -791,13 +928,20 @@ pub(super) fn run_inner() -> Result<()> {
                     tracing::info!("EXIT gesture — opening disconnect dialog");
                     disconnect.open(1);
                 }
+                // The dialog owns input and the canvas, so the dial gives way to it.
+                if disconnect.is_open() && ring.open() {
+                    ring.input(RingInput::Cancel);
+                }
                 // Re-opens the webOS launcher; a long Back fires EXIT above, never this.
                 if home_key_fired(&mut home_held) {
                     crate::platform::webos::luna::launch_home();
                 }
                 // SDL2 lacks these colour scancodes. Ignore them while the dialog owns input.
                 let dialog_open = disconnect.is_open();
-                if rising_edge(!dialog_open && key_down(WEBOS_GREEN_SCANCODE), &mut green_held) {
+                // `|`, not `||`: the green key's edge must be read every tick, and so must the dial's.
+                if rising_edge(!dialog_open && key_down(WEBOS_GREEN_SCANCODE), &mut green_held)
+                    | std::mem::take(&mut ring_stats)
+                {
                     stats_tier = stats_tier.next();
                     let was_enabled = stats_enabled;
                     stats_enabled = stats_tier != StatsVerbosity::Off;
@@ -848,7 +992,7 @@ pub(super) fn run_inner() -> Result<()> {
                     cursor.set_captured(want_captured);
                 }
                 if let Some(hid) = &hid {
-                    hid.set_active(!disconnect.is_open());
+                    hid.set_active(!disconnect.is_open() && !ring.open());
                 }
                 input_suspended = disconnect.is_open();
                 // True during fade-out, past `is_open()`; gates the stats overlay below.
@@ -902,7 +1046,9 @@ pub(super) fn run_inner() -> Result<()> {
                 connected.set_hud_enabled(stats_alpha.is_some());
                 let log_overlay_on = log_overlay_state() != LogOverlayState::Off;
                 let log_alpha = log_fade.visibility_alpha(log_overlay_on);
-                let overlay_active = stats_alpha.is_some() || log_alpha.is_some() || notif_active;
+                let ring_damage = ring.damage();
+                let ring_visible = ring_damage != 0;
+                let overlay_active = stats_alpha.is_some() || log_alpha.is_some() || notif_active || ring_visible;
                 if overlay_was_active && !overlay_active {
                     // Nothing else clears this window — the faded-out card would stick otherwise.
                     overlay::wipe(&mut console_gl, &canvas, &overlay_fonts)?;
@@ -915,11 +1061,15 @@ pub(super) fn run_inner() -> Result<()> {
                 } else {
                     Duration::from_millis(500)
                 };
+                let ring_due = ring_visible && ring_damage != ring_drawn && ring_drawn_at.elapsed() >= RING_FRAME;
                 if overlay_active
                     && dialog_frame.is_none()
-                    && overlay_last.is_none_or(|t| t.elapsed() >= redraw_interval)
+                    && (ring_due || overlay_last.is_none_or(|t| t.elapsed() >= redraw_interval))
                 {
                     overlay_last = Some(Instant::now());
+                    let ring_dt = ring_drawn_at.elapsed().as_secs_f64();
+                    ring_drawn_at = Instant::now();
+                    ring_drawn = ring_damage;
                     // The core window closes once a second: every rate it reports is per window.
                     if stats_enabled && stats_built_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
                         stats_built_at = Some(Instant::now());
@@ -948,6 +1098,9 @@ pub(super) fn run_inner() -> Result<()> {
                             }
                             if let Some((text, alpha)) = &notif_frame {
                                 overlay::toast(f, text, *alpha);
+                            }
+                            if ring_visible {
+                                ring.render(f.canvas, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
                             }
                         },
                     )?;
@@ -1057,6 +1210,91 @@ pub(super) fn run_inner() -> Result<()> {
     }
     tracing::info!("punktfunk-webos exiting cleanly");
     Ok(())
+}
+
+/// What the dial's slots read this frame. Pad 0 is the only pad this client forwards.
+fn ring_facts(
+    settings: &store::Settings,
+    connected: &crate::session::Connected,
+    stats: StatsVerbosity,
+    native: punktfunk_core::config::Mode,
+    pad: bool,
+) -> RingFacts {
+    let c = &connected.client;
+    let m = c.mode();
+    RingFacts {
+        overlay_actions: settings.overlay_actions.clone(),
+        stats_tier: stats.label().into(),
+        pad_mouse_target: u16::from(pad),
+        pad_mouse_on: pad && c.pad_mouse() & 1 != 0,
+        pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
+        mode: (m.width, m.height, m.refresh_hz),
+        native_mode: (native.width, native.height, native.refresh_hz),
+        ..RingFacts::default()
+    }
+}
+
+/// Flips pad 0 between controller mouse and the game.
+fn toggle_pad_mouse(connected: &crate::session::Connected, pad: bool) {
+    if !pad {
+        return;
+    }
+    let on = connected.client.pad_mouse();
+    let next = if on & 1 != 0 { on & !1 } else { on | 1 };
+    if let Err(e) = connected.client.set_pad_mouse(next) {
+        tracing::warn!("dial: controller mouse: {e}");
+    }
+}
+
+/// A dial shortcut: every key down in order, then up in reverse. A key this build cannot name
+/// sends nothing, like the other clients.
+fn send_shortcut(connected: &crate::session::Connected, keys: &[String]) {
+    let vks: Vec<u8> = keys
+        .iter()
+        .filter_map(|k| pf_client_core::overlay_actions::key_vk(k))
+        .collect();
+    if vks.is_empty() || vks.len() != keys.len() {
+        return;
+    }
+    let key = |vk: u8, down: bool| punktfunk_core::input::InputEvent {
+        kind: if down {
+            punktfunk_core::input::InputKind::KeyDown
+        } else {
+            punktfunk_core::input::InputKind::KeyUp
+        },
+        _pad: [0; 3],
+        code: u32::from(vk),
+        x: 0,
+        y: 0,
+        flags: 0,
+    };
+    for &vk in &vks {
+        connected.send_input(&key(vk, true));
+    }
+    for &vk in vks.iter().rev() {
+        connected.send_input(&key(vk, false));
+    }
+}
+
+/// Raises the on-screen keyboard. webOS wants a rectangle before it enables the IME.
+fn raise_keyboard(text_input: &mut TextInputController, w: i32, h: i32) {
+    let width = 400i32.min(w);
+    text_input.raise(sdl2::rect::Rect::new((w - width) / 2, h - 120, width as u32, 60));
+}
+
+/// The remote's keys as dial events.
+fn ring_event_for_key(k: sdl2::keyboard::Keycode) -> Option<pf_client_core::menu_nav::MenuEvent> {
+    use crate::core::event::MenuEvent as E;
+    use pf_client_core::menu_nav::{MenuDir, MenuEvent as K};
+    Some(match crate::platform::webos::input::menu_event_for_key(k)? {
+        E::Up => K::Move(MenuDir::Up),
+        E::Down => K::Move(MenuDir::Down),
+        E::Left => K::Move(MenuDir::Left),
+        E::Right => K::Move(MenuDir::Right),
+        E::Confirm => K::Confirm,
+        E::Back => K::Back,
+        E::Secondary => K::Secondary,
+    })
 }
 
 /// What the green button does next: more detail, or hide from the top tier.
