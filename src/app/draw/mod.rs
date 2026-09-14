@@ -29,7 +29,7 @@ use crate::app::App;
 use crate::core::screen::Screen;
 use crate::platform::webos::device;
 use crate::ui;
-pub(crate) use glass::{glass_card, Backdrop};
+pub(crate) use glass::glass_card;
 
 /// Which screens draw here rather than as tiles. Every prepare, compose and hit-test path
 /// asks this, so a screen moves over by being added to this list and nowhere else.
@@ -85,7 +85,7 @@ pub(crate) struct Frame<'a> {
     /// hardware plane, composited outside our GL context, so a grab of our own framebuffer
     /// reads punch-through alpha and the card would frost a smear of the graphics plane.
     /// Frosting over video is unrepresentable rather than merely discouraged.
-    pub backdrop: Option<Backdrop<'a>>,
+    pub backdrop: Option<&'a skia_safe::Image>,
 }
 
 impl<'a> Frame<'a> {
@@ -103,10 +103,7 @@ impl<'a> Frame<'a> {
     /// The same frame with a page for its cards to frost. The borrow is what keeps a snapshot
     /// from outliving the frame it was taken in.
     pub fn with_backdrop(self, page: Option<&'a skia_safe::Image>) -> Self {
-        Self {
-            backdrop: page.map(|page| Backdrop { page }),
-            ..self
-        }
+        Self { backdrop: page, ..self }
     }
 }
 

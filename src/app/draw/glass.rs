@@ -7,13 +7,6 @@ use skia_safe::{Canvas, RRect, Rect};
 use super::card_material;
 use super::{surface, Frame};
 
-/// Preblurred page snapshot shared by modal draws. Explicit snapshots avoid the
-/// unfiltered output observed with `save_layer` backdrop filters.
-#[derive(Clone, Copy)]
-pub(crate) struct Backdrop<'a> {
-    pub page: &'a skia_safe::Image,
-}
-
 /// Blur sigma in design units, scaled by `k`.
 const CARD_BLUR: f32 = 28.0;
 const CARD_FROST: f32 = 0.88;
@@ -23,16 +16,20 @@ const CARD_TINT: f32 = 0.10;
 /// of quarter resolution. Grain dithers quantization, but cannot hide those contours.
 const DOWNSCALE: i32 = 2;
 
-/// Both backdrops use a surface compatible with the drawing canvas.
-fn downscaled_blur(
-    target: impl FnOnce(i32, i32) -> Option<skia_safe::Surface>,
-    img: &skia_safe::Image,
-    sigma: f32,
-) -> Option<skia_safe::Image> {
-    let (w, h) = ((img.width() / DOWNSCALE).max(1), (img.height() / DOWNSCALE).max(1));
-    let mut surface = target(w, h)?;
-    let mut p = theme::layer();
+/// The sigma a card's page backdrop is blurred at: [`CARD_BLUR`] at the layout's scale, then at
+/// the drawable's. One rule, so the startup warmup compiles the blur the menu actually draws.
+pub(crate) fn page_sigma(layout_h: u32, drawable_h: u32) -> f32 {
+    CARD_BLUR * super::scale(layout_h) * drawable_h as f32 / layout_h.max(1) as f32
+}
+
+/// Blur `image` at half resolution into an offscreen compatible with `canvas`, so a GPU page
+/// stays on the GPU. The offscreen is not pooled: the snapshot outlives the call by frames, and
+/// drawing into a surface it still references would cost the full copy-on-write this avoids.
+pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) -> Option<skia_safe::Image> {
+    let (w, h) = ((image.width() / DOWNSCALE).max(1), (image.height() / DOWNSCALE).max(1));
+    let mut surface = canvas.new_surface(&canvas.image_info().with_dimensions((w, h)), None)?;
     let sigma = sigma / DOWNSCALE as f32;
+    let mut p = theme::layer();
     p.set_image_filter(skia_safe::image_filters::blur(
         (sigma, sigma),
         skia_safe::TileMode::Clamp,
@@ -41,22 +38,8 @@ fn downscaled_blur(
     )?);
     surface
         .canvas()
-        .draw_image_rect_with_sampling_options(img, None, Rect::from_iwh(w, h), super::linear(), &p);
+        .draw_image_rect_with_sampling_options(image, None, Rect::from_iwh(w, h), super::linear(), &p);
     Some(surface.image_snapshot())
-}
-
-/// The sigma a card's page backdrop is blurred at: [`CARD_BLUR`] at the layout's scale, then at
-/// the drawable's. One rule, so the startup warmup compiles the blur the menu actually draws.
-pub(crate) fn page_sigma(layout_h: u32, drawable_h: u32) -> f32 {
-    CARD_BLUR * super::scale(layout_h) * drawable_h as f32 / layout_h.max(1) as f32
-}
-
-pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) -> Option<skia_safe::Image> {
-    downscaled_blur(
-        |w, h| canvas.new_surface(&canvas.image_info().with_dimensions((w, h)), None),
-        image,
-        sigma,
-    )
 }
 
 fn frosted_face() -> skia_safe::Color4f {
@@ -66,7 +49,7 @@ fn frosted_face() -> skia_safe::Color4f {
     }
 }
 
-fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
+fn draw_card_backdrop(f: &Frame<'_>, page: &skia_safe::Image, rr: RRect) {
     let canvas = f.canvas;
     let p = theme::layer();
     canvas.save();
@@ -81,7 +64,7 @@ fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
         (-m.translate_x() / sx, -m.translate_y() / sy)
     };
     canvas.draw_image_rect_with_sampling_options(
-        bd.page,
+        page,
         None,
         Rect::from_xywh(origin.0, origin.1, f.w, f.h),
         super::linear(),
@@ -91,7 +74,8 @@ fn draw_card_backdrop(f: &Frame<'_>, bd: Backdrop<'_>, rr: RRect) {
 }
 
 /// The rim shader lights the chamfer; this stroke defines the edge.
-fn card_hairline(canvas: &Canvas, rect: Rect, rr: RRect, k: f32) {
+fn card_hairline(canvas: &Canvas, rr: RRect, k: f32) {
+    let rect = rr.rect();
     let mut p = theme::shaded_stroke(k);
     p.set_shader(skia_safe::gradient::shaders::linear_gradient(
         (
@@ -114,21 +98,21 @@ fn card_hairline(canvas: &Canvas, rect: Rect, rr: RRect, k: f32) {
 pub(crate) fn glass_card(f: &Frame<'_>, rect: Rect, corner: f32) {
     let (canvas, k) = (f.canvas, f.k);
     let rr = RRect::new_rect_xy(rect, corner * k, corner * k);
-    let Some(bd) = f.backdrop else {
+    let Some(page) = f.backdrop else {
         canvas.draw_rrect(rr, &theme::fill(surface()));
         theme::panel(canvas, rect, corner, None, PanelStroke::Gradient, k);
         return;
     };
-    draw_card_backdrop(f, bd, rr);
-    draw_face(canvas, rr, rect, corner, k);
+    draw_card_backdrop(f, page, rr);
+    draw_face(canvas, rr, k);
 }
 
 /// The translucent face over whatever backdrop the caller has already laid down.
-fn draw_face(canvas: &Canvas, rr: RRect, rect: Rect, corner: f32, k: f32) {
+fn draw_face(canvas: &Canvas, rr: RRect, k: f32) {
     canvas.draw_rrect(rr, &theme::fill(frosted_face()));
     // theme::panel would re-opacify the translucent face.
-    card_material::draw(canvas, rr, rect, corner, k);
-    card_hairline(canvas, rect, rr, k);
+    card_material::draw(canvas, rr, k);
+    card_hairline(canvas, rr, k);
 }
 
 /// Frost the cover in its original rect to preserve registration during zoom.
@@ -139,7 +123,7 @@ pub(crate) fn frost_over_art(canvas: &Canvas, img: &skia_safe::Image, art: Rect,
     };
     canvas.draw_image_rect_with_sampling_options(&blurred, None, art, super::linear(), &theme::layer());
     // The caller clips the strip to the cover's rounded outer corners.
-    draw_face(canvas, RRect::new_rect(window), window, 0.0, k);
+    draw_face(canvas, RRect::new_rect(window), k);
     true
 }
 
