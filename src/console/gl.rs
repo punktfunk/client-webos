@@ -28,6 +28,7 @@ pub(crate) struct ConsoleGl {
     /// What the window's config actually granted, not what was asked for — Skia must be told
     /// the truth or it clips paths against a buffer that is not there.
     stencil: usize,
+    glass_warmed: bool,
 }
 
 impl ConsoleGl {
@@ -61,6 +62,7 @@ impl ConsoleGl {
             context,
             surface: None,
             stencil,
+            glass_warmed: false,
         })
     }
 
@@ -110,10 +112,34 @@ impl ConsoleGl {
         self.context.flush_and_submit();
     }
 
+    pub(crate) fn warm_glass(
+        &mut self,
+        fonts: &pf_console_ui::theme::Fonts,
+        drawable: (u32, u32),
+        layout: (u32, u32),
+    ) -> Result<()> {
+        if self.glass_warmed {
+            return Ok(());
+        }
+        self.surface(drawable.0, drawable.1)?;
+        let surface = &mut self.surface.as_mut().expect("just wrapped").0;
+        let warmed = crate::app::draw::warmup::draw(surface, fonts, layout.0, layout.1, |target| {
+            self.context.flush_and_submit_surface(target, None);
+        });
+        if warmed.is_some() {
+            self.context.flush_submit_and_sync_cpu();
+            self.glass_warmed = true;
+        } else {
+            tracing::warn!("menu: could not allocate glass warmup surfaces");
+        }
+        Ok(())
+    }
+
     /// Hand the covers and glyph atlases back before a stream takes the GPU. The context and
     /// its compiled shaders stay, so returning to the console costs a re-upload, not the cold
     /// shader warm-up `ctx`'s doc describes.
     pub(crate) fn release_resources(&mut self) {
+        crate::app::draw::glass::clear_cover();
         self.surface = None;
         self.context.free_gpu_resources();
     }

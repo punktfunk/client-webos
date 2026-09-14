@@ -67,8 +67,8 @@ half4 main(float2 coord) {
 }
 "#;
 
-/// Cached per thread because `RuntimeEffect` is not `Send`.
-fn shader(rect: Rect, corner: f32, k: f32) -> Option<skia_safe::Shader> {
+/// Cached per thread because `RuntimeEffect` is not `Send`. `radius` is in device px.
+fn shader(rect: Rect, radius: f32, k: f32) -> Option<skia_safe::Shader> {
     thread_local! {
         static EFFECT: std::cell::OnceCell<Option<skia_safe::RuntimeEffect>> =
             const { std::cell::OnceCell::new() };
@@ -81,7 +81,6 @@ fn shader(rect: Rect, corner: f32, k: f32) -> Option<skia_safe::Shader> {
         })
         .clone()
     })?;
-    let radius = corner * k;
     let mut b = skia_safe::runtime_effect::RuntimeShaderBuilder::new(effect);
     b.set_uniform_float("u_c", &[rect.center_x(), rect.center_y()])
         .and(b.set_uniform_float("u_inner", &[rect.width() / 2.0 - radius, rect.height() / 2.0 - radius]))
@@ -92,17 +91,31 @@ fn shader(rect: Rect, corner: f32, k: f32) -> Option<skia_safe::Shader> {
     b.make_shader(&skia_safe::Matrix::default())
 }
 
-pub(super) fn draw(canvas: &Canvas, rr: RRect, rect: Rect, corner: f32, k: f32) {
+type Cached = (Rect, f32, f32, skia_safe::Shader);
+
+/// Light the face of `rr`. The rounded rect carries both the bounds and the corner radius the
+/// uniforms need, so there is one source for each rather than a rect-plus-corner pair to keep
+/// in step with it.
+pub(super) fn draw(canvas: &Canvas, rr: RRect, k: f32) {
+    let (rect, radius) = (*rr.rect(), rr.simple_radii().x);
+    // Two slots, not one: a card and the card-menu strip are drawn in the same frame, and the
+    // strip's rect animates through its wipe — a single slot had each evicting the other every
+    // frame, rebuilding both shaders. Most-recent first, so the hit is usually slot 0.
     thread_local! {
-        static SHADER: std::cell::RefCell<Option<(Rect, f32, f32, skia_safe::Shader)>> =
-            const { std::cell::RefCell::new(None) };
+        static SHADER: std::cell::RefCell<[Option<Cached>; 2]> =
+            const { std::cell::RefCell::new([None, None]) };
     }
     let shader = SHADER.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !matches!(&*cache, Some((r, c, scale, _)) if *r == rect && *c == corner && *scale == k) {
-            *cache = shader(rect, corner, k).map(|shader| (rect, corner, k, shader));
+        let hit =
+            |s: &Option<Cached>| matches!(s, Some((r, rad, scale, _)) if *r == rect && *rad == radius && *scale == k);
+        if !hit(&cache[0]) {
+            cache.swap(0, 1);
+            if !hit(&cache[0]) {
+                cache[0] = shader(rect, radius, k).map(|shader| (rect, radius, k, shader));
+            }
         }
-        cache.as_ref().map(|(_, _, _, shader)| shader.clone())
+        cache[0].as_ref().map(|(_, _, _, shader)| shader.clone())
     });
     if let Some(shader) = shader {
         let mut p = theme::shaded();
@@ -118,7 +131,7 @@ mod tests {
     #[test]
     fn material_compiles_and_accepts_tv_uniforms() {
         for k in [0.5, 1.0, 2.0] {
-            assert!(shader(Rect::from_xywh(30.0, 40.0, 800.0 * k, 600.0 * k), 20.0, k).is_some());
+            assert!(shader(Rect::from_xywh(30.0, 40.0, 800.0 * k, 600.0 * k), 20.0 * k, k).is_some());
         }
     }
 }

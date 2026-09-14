@@ -32,9 +32,8 @@ pub(crate) struct RenderState {
     pub(crate) grid: grid::GridState,
     pub(crate) focus_anim: Option<Instant>,
     pub(crate) press: ui::animation::Press,
-    /// The kit list widget of the open ported list screen (`app::draw::list`), with the
-    /// screen it was made for — a different screen gets a fresh one.
-    pub(crate) list: Option<(crate::core::screen::Screen, pf_console_ui::widgets::MenuList)>,
+    /// At most two widgets: the current modal and the one fading out.
+    pub(crate) lists: Vec<ListSlot>,
     /// The sidebar rows' and the settings tabs' eased focus (`app::draw::FocusEase`).
     pub(crate) sidebar_focus: crate::app::draw::FocusEase,
     pub(crate) tab_focus: crate::app::draw::FocusEase,
@@ -91,5 +90,59 @@ impl RunningPulse {
         let at = step as f32 / PULSE_STEPS as f32;
         self.breath = 0.5 + 0.5 * (at * std::f32::consts::TAU).cos();
         true
+    }
+}
+
+/// One modal's row widget plus the frame state the widget does not expose.
+pub(crate) struct ListSlot {
+    pub(crate) screen: crate::core::screen::Screen,
+    pub(crate) list: pf_console_ui::widgets::MenuList,
+    /// Mirror of the widget's own eased scroll, in design units. `MenuList` keeps its scroll
+    /// private, so the edge fade used to recompute it from the cursor — i.e. from the target,
+    /// which lands a whole ease ahead of the rows. That snapped the mask on the frame the
+    /// cursor or the row set changed, and rows at either edge blinked in and out. `None` until
+    /// the first render seats it, matching the widget's own snap-on-mount.
+    pub(crate) fade_scroll: Option<f32>,
+}
+
+impl ListSlot {
+    pub(crate) fn new(screen: crate::core::screen::Screen) -> Self {
+        Self {
+            screen,
+            list: pf_console_ui::widgets::MenuList::new(),
+            fade_scroll: None,
+        }
+    }
+}
+
+/// The seat `screen`'s rows live in, `None` before it has drawn once. The one place that knows
+/// how `lists` is keyed. Free rather than a method so a caller can hold `&mut` on another
+/// `RenderState` field at the same time — the settings card borrows its tab strip alongside.
+pub(crate) fn slot_in(lists: &mut [ListSlot], screen: crate::core::screen::Screen) -> Option<&mut ListSlot> {
+    lists.iter_mut().find(|slot| slot.screen == screen)
+}
+
+impl RenderState {
+    /// [`slot_in`] over the seated widgets.
+    pub(crate) fn slot(&mut self, screen: crate::core::screen::Screen) -> Option<&mut ListSlot> {
+        slot_in(&mut self.lists, screen)
+    }
+
+    /// Drop every seat that can no longer draw: the screen on show, the one it came from, and
+    /// the one still fading out are all that a frame can reach.
+    pub(crate) fn retain_visible(
+        &mut self,
+        current: crate::core::screen::Screen,
+        last: crate::core::screen::Screen,
+        closing: Option<crate::core::screen::Screen>,
+    ) {
+        self.lists
+            .retain(|slot| slot.screen == current || slot.screen == last || Some(slot.screen) == closing);
+    }
+
+    /// Unseat the screen being entered so its rows replay their rise. The card being left keeps
+    /// its seat and its row motion for the length of the fade.
+    pub(crate) fn reset_arrival(&mut self, arriving: crate::core::screen::Screen) {
+        self.lists.retain(|slot| slot.screen != arriving);
     }
 }
