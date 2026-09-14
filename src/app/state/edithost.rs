@@ -48,6 +48,7 @@ impl App {
 
         // Drop old record before upsert to avoid stale entry (upsert_known_host keys on (host, port))
         self.hosts.known.retain(|k| !(k.addr == old.addr && k.port == old.port));
+        // A re-key of an existing record: nothing new to seed, so the returned record is dropped.
         store::upsert_known_host(
             &mut self.hosts.known,
             store::KnownHost {

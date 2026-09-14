@@ -359,11 +359,16 @@ pub fn new_host_collections() -> Vec<Collection> {
 /// learned separately (see `App::drain_discovery`). The record's id, its profile bindings,
 /// its pins, `wol_auto`, the exit action and `collections` are *always* kept from the existing
 /// record: only their own screens change them, so no add/edit/re-pair flow may clobber any.
-pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) {
-    let Some(existing) = hosts.iter_mut().find(|h| h.addr == new.addr && h.port == new.port) else {
+///
+/// Returns the inserted record when it was genuinely new, so the caller can seed what a first
+/// sighting gets ([`seed_new_host_profiles`]) without looking it up again. `None` for a merge:
+/// re-adding or re-pairing a host must not re-seed anything.
+pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Option<&mut KnownHost> {
+    let Some(at) = hosts.iter().position(|h| h.addr == new.addr && h.port == new.port) else {
         hosts.push(new);
-        return;
+        return hosts.last_mut();
     };
+    let existing = &mut hosts[at];
     if !new.is_paired() {
         new.fp_hex.clone_from(&existing.fp_hex);
         new.paired = existing.paired;
@@ -382,6 +387,42 @@ pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) {
     new.wol_auto = existing.wol_auto;
     new.exit_action = existing.exit_action;
     *existing = new;
+    None
+}
+
+/// A profile name free in `catalog`, `wanted` itself or the first `wanted N` that is not taken.
+pub fn unique_profile_name(catalog: &[StreamProfile], wanted: &str) -> String {
+    let taken = |name: &str| catalog.iter().any(|p| p.name == name);
+    if !taken(wanted) {
+        return wanted.to_string();
+    }
+    (2..)
+        .map(|n| format!("{wanted} {n}"))
+        .find(|name| !taken(name))
+        .expect("an unbounded counter finds a free name")
+}
+
+/// What the Desktop card's seeded profile is called.
+const DESKTOP_PROFILE_NAME: &str = "Desktop";
+
+/// The rest of what a genuinely new host starts with: the Desktop card's own profile, pinning
+/// the absolute pointer that card wants while the global default stays capture.
+///
+/// A real, editable override rather than a rule inside the resolver — which is the whole point.
+/// A rule can only be obeyed; a pin shows up in Settings under the Desktop card, says what it is
+/// doing, and can be changed to capture by anyone who wants it.
+///
+/// Takes the record [`upsert_known_host`] reports as new, so an existing install keeps exactly
+/// what it had. Idempotent anyway: a host that already binds a Desktop profile is left alone.
+pub fn seed_new_host_profiles(host: &mut KnownHost, profiles: &mut Vec<StreamProfile>) {
+    if host.game_profile(DESKTOP_PIN_ID).is_some() {
+        return;
+    }
+    let mut profile = StreamProfile::new(unique_profile_name(profiles, DESKTOP_PROFILE_NAME));
+    profile.overrides.mouse_mode = Some(pf_client_core::trust::MouseMode::Desktop.as_name().to_string());
+    let id = profile.id.clone();
+    profiles.push(profile);
+    host.bind_game_profile(DESKTOP_PIN_ID, Some(&id));
 }
 
 /// Codec preference selectable in Settings — a *preference*, not a demand. The host

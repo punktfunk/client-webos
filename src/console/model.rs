@@ -588,7 +588,9 @@ impl Service {
                 ..KnownHost::default()
             };
             record.set_fingerprint(fingerprint);
-            store::upsert_known_host(&mut state.known_hosts, record);
+            if let Some(fresh) = store::upsert_known_host(&mut state.known_hosts, record) {
+                store::seed_new_host_profiles(fresh, &mut state.profiles);
+            }
             true
         });
         self.handles.console.set_pair(PairPhase::Paired { key });

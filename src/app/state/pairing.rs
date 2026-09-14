@@ -155,7 +155,9 @@ impl App {
                     ..KnownHost::default()
                 };
                 record.set_fingerprint(fingerprint);
-                store::upsert_known_host(&mut self.hosts.known, record);
+                if let Some(fresh) = store::upsert_known_host(&mut self.hosts.known, record) {
+                    store::seed_new_host_profiles(fresh, &mut self.profiles);
+                }
                 self.persist();
                 self.rebuild_entries();
                 self.nav.screen = Screen::Home;

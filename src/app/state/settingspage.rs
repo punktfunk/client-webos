@@ -207,6 +207,13 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
     })
 }
 
+/// The one overlay field whose *presence* means something beyond the value it carries, so a pin
+/// equal to the global one still has to be kept: `shared::launch_settings` reads it as the Desktop
+/// card's opt-out from the standing capture-off rule. Dropping a pin there because it matched the
+/// global value put the pointer straight back into absolute mode, with the row still reading
+/// "capture". A second such field would make this a slice.
+const LOAD_BEARING_PIN: &str = "mouse_mode";
+
 /// Whether `o` pins the field behind `id`.
 fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
     match id {
@@ -673,15 +680,18 @@ impl App {
                 self.persist();
             }
             Scope::Profile(id) => {
-                let global = self.settings_ui.settings.clone();
+                // `absorb` pins a value even when it equals the global one, but the dot reads as
+                // "differs from Default settings" — so an edit that lands back on the global value
+                // drops its pin instead of keeping a no-op override. Not for a pin the resolver
+                // reads the presence of: this comparison only sees resolved settings, and the
+                // Desktop rule is applied after it.
+                let field = field.filter(|f| *f != LOAD_BEARING_PIN);
+                let global = field.map(|_| self.settings_ui.settings.clone());
                 if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
                     p.overrides.absorb(before, after);
-                    // `absorb` pins a value even when it equals the global one, but the dot
-                    // reads as "differs from Default settings" — so an edit that lands back on
-                    // the global value drops its pin instead of keeping a no-op override.
-                    if let Some(field) = field {
+                    if let (Some(field), Some(global)) = (field, &global) {
                         let mut without = p.overrides.clone();
-                        if without.clear(field) && without.apply(&global) == p.overrides.apply(&global) {
+                        if without.clear(field) && without.apply(global) == p.overrides.apply(global) {
                             p.overrides = without;
                         }
                     }

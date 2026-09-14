@@ -9,26 +9,14 @@ use crate::app::state::settingspage::{Page, Scope};
 use crate::app::state::textfield::TextField;
 use crate::app::App;
 use crate::core::event::MenuEvent;
-use crate::core::model::MAX_COLLECTION_NAME;
+use crate::core::model::{unique_profile_name, MAX_COLLECTION_NAME};
 use crate::core::screen::Screen;
-
-/// A name that is not yet in the catalog: the title itself, or the title with a counter.
-fn unique_name(catalog: &[StreamProfile], wanted: &str) -> String {
-    let taken = |name: &str| catalog.iter().any(|p| p.name == name);
-    if !taken(wanted) {
-        return wanted.to_string();
-    }
-    (2..)
-        .map(|n| format!("{wanted} {n}"))
-        .find(|name| !taken(name))
-        .expect("an unbounded counter finds a free name")
-}
 
 impl App {
     /// Editing ▸ New profile…: an empty overlay under a placeholder name, opened for naming.
     /// Nothing is written until that name is confirmed.
     pub(crate) fn new_profile(&mut self) {
-        let profile = StreamProfile::new(unique_name(&self.profiles, "New profile"));
+        let profile = StreamProfile::new(unique_profile_name(&self.profiles, "New profile"));
         let id = profile.id.clone();
         self.profiles.push(profile);
         self.screens.settings_page.scope = Scope::Profile(id);
@@ -64,7 +52,7 @@ impl App {
         let id = match bound {
             Some(id) => id,
             None => {
-                let profile = StreamProfile::new(unique_name(&self.profiles, title));
+                let profile = StreamProfile::new(unique_profile_name(&self.profiles, title));
                 let id = profile.id.clone();
                 self.profiles.push(profile);
                 if let Some(h) = self.known_host_mut(&host, port) {
@@ -145,7 +133,7 @@ impl App {
         let Some(source) = self.profiles.iter().find(|p| p.id == id).cloned() else {
             return;
         };
-        let mut copy = StreamProfile::new(unique_name(&self.profiles, &format!("{} copy", source.name)));
+        let mut copy = StreamProfile::new(unique_profile_name(&self.profiles, &format!("{} copy", source.name)));
         copy.overrides = source.overrides;
         let new_id = copy.id.clone();
         self.profiles.push(copy);

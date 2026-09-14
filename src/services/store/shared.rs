@@ -223,6 +223,9 @@ pub fn launch_settings(
     let mut settings = profile
         .as_ref()
         .map_or_else(|| global.clone(), |p| p.overrides.apply(global));
+    // The presence of the pin is the opt-out, not its value: a profile that pins "capture" is
+    // saying "capture here" even though the global says the same. Whatever drops no-op pins must
+    // exempt this field (`settingspage::LOAD_BEARING_PIN`) or the opt-out disappears silently.
     if id == DESKTOP_PIN_ID && profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none()) {
         settings.set_cursor_capture(false);
     }
@@ -275,15 +278,20 @@ mod launch_tests {
     use super::*;
     use pf_client_core::profiles::StreamProfile;
 
-    fn state_with(profile: StreamProfile, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
-        let mut host = crate::core::model::KnownHost {
+    /// The one host every test in here uses, at the address they all assert against.
+    fn host_record() -> crate::core::model::KnownHost {
+        crate::core::model::KnownHost {
             shared: trust::KnownHost {
                 addr: "10.0.0.2".into(),
                 port: 47989,
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+    }
+
+    fn state_with(profile: StreamProfile, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
+        let mut host = host_record();
         bind(&mut host);
         let mut state = Persisted::default();
         state.known_hosts.push(host);
