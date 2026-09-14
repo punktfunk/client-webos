@@ -207,6 +207,11 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
     })
 }
 
+/// Presence is semantically significant, not just the value.
+/// `shared::launch_settings` reads it as Desktop's opt-out from capture-off.
+/// Dropping it on value equality broke pointer mode.
+const LOAD_BEARING_PIN: &str = "mouse_mode";
+
 /// Whether `o` pins the field behind `id`.
 fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
     match id {
@@ -673,15 +678,15 @@ impl App {
                 self.persist();
             }
             Scope::Profile(id) => {
-                let global = self.settings_ui.settings.clone();
+                // Normally drop pins matching the global value (no-op override).
+                // But mouse_mode is load-bearing: its presence matters semantically.
+                let field = field.filter(|f| *f != LOAD_BEARING_PIN);
+                let global = field.map(|_| self.settings_ui.settings.clone());
                 if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
                     p.overrides.absorb(before, after);
-                    // `absorb` pins a value even when it equals the global one, but the dot
-                    // reads as "differs from Default settings" — so an edit that lands back on
-                    // the global value drops its pin instead of keeping a no-op override.
-                    if let Some(field) = field {
+                    if let (Some(field), Some(global)) = (field, &global) {
                         let mut without = p.overrides.clone();
-                        if without.clear(field) && without.apply(&global) == p.overrides.apply(&global) {
+                        if without.clear(field) && without.apply(global) == p.overrides.apply(global) {
                             p.overrides = without;
                         }
                     }

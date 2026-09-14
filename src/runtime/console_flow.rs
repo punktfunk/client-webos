@@ -143,7 +143,7 @@ pub(super) fn run(
     // A launch the shell committed: the connect runs while the shell keeps drawing its
     // Connecting card, exactly as the old menus overlap it with the loading screen.
     let mut connect: Option<(
-        std::thread::JoinHandle<Result<session::Connected>>,
+        crate::runtime::PendingConnect,
         crate::app::ConnectTarget,
         store::Settings,
         bool,
@@ -572,7 +572,7 @@ fn start_launch(
     game_controller: &sdl2::GameControllerSubsystem,
     want: Launch,
 ) -> Result<(
-    std::thread::JoinHandle<Result<session::Connected>>,
+    crate::runtime::PendingConnect,
     crate::app::ConnectTarget,
     store::Settings,
     bool,

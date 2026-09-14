@@ -15,6 +15,7 @@
 //! Only one UI is live at a time (that is what the flip means), so this owns the document while
 //! the console is up and [`ConsoleStore::snapshot`] hands it back when the console closes.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pf_client_core::trust;
@@ -29,6 +30,7 @@ const POISONED: &str = "console-store mutex poisoned";
 pub struct ConsoleStore {
     state: Mutex<Persisted>,
     writer: Arc<StateWriter>,
+    revision: AtomicU64,
 }
 
 impl ConsoleStore {
@@ -37,7 +39,13 @@ impl ConsoleStore {
         Self {
             state: Mutex::new(state),
             writer,
+            revision: AtomicU64::new(0),
         }
+    }
+
+    /// Changes affecting the console host rows.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     /// The document as the console leaves it — what the other UI adopts when the flip returns,
@@ -65,6 +73,7 @@ impl ConsoleStore {
             if !edit(&mut state) {
                 return false;
             }
+            self.revision.fetch_add(1, Ordering::Release);
             state.clone()
         };
         self.writer.save(snapshot);
@@ -80,10 +89,14 @@ impl SettingsStore for ConsoleStore {
     fn save(&self, settings: &trust::Settings) {
         let snapshot = {
             let mut state = self.state.lock().expect(POISONED);
-            state.settings = settings.clone();
+            if state.settings != *settings {
+                state.settings = settings.clone();
+                self.revision.fetch_add(1, Ordering::Release);
+            }
             state.clone()
         };
-        // Whole document, one writer — see the module note.
+        // Whole document, one writer - see the module note. Unconditional even when nothing
+        // changed here: the writer owns the dedupe, and only it knows if a previous write failed.
         self.writer.save(snapshot);
     }
 

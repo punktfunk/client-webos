@@ -27,6 +27,6 @@ mod stage;
 mod stats;
 mod timeline;
 
-pub use connect::{connect, ConnectParams, Connected};
+pub use connect::{connect, ConnectAttempt, ConnectParams, Connected};
 pub use pump::{join_audio_feed, spawn_audio_feed};
 pub use stats::StreamStats;

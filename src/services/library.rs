@@ -242,7 +242,15 @@ fn read_art_body(resp: &mut ureq::http::Response<ureq::Body>, what: &str) -> Res
 /// Fetches art from a full external URL with the system's default CA trust (no
 /// client cert) — the host's pinned `agent` would reject this CA.
 fn fetch_external_art(url: &str) -> Result<Vec<u8>, LibraryError> {
-    let agent = ureq::Agent::new_with_defaults();
+    // Public CA trust only: never share the host's pinned identity with a CDN.
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(crate::services::budget::PROBE))
+            .timeout_global(Some(crate::services::budget::REQUEST))
+            .build()
+            .into()
+    });
     match agent.get(url).header("Accept", ART_ACCEPT).call() {
         Ok(mut resp) => read_art_body(&mut resp, url),
         Err(e) => Err(classify(e)),

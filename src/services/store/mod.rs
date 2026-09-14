@@ -18,8 +18,8 @@ use serde_json::Value;
 use crate::core::VERSION;
 
 pub use crate::core::model::{
-    upsert_known_host, AudioRoutePref, CodecPref, ExitAction, GamepadType, KnownHost, LogLevelOverride, Persisted,
-    DESKTOP_PIN_ID,
+    seed_new_host_profiles, upsert_known_host, AudioRoutePref, CodecPref, ExitAction, GamepadType, KnownHost,
+    LogLevelOverride, Persisted, DESKTOP_PIN_ID,
 };
 pub use crate::core::settings::TvSettings;
 pub use crate::services::paths::app_dir;

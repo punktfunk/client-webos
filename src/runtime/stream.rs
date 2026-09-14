@@ -35,7 +35,7 @@ fn redial(
     display: (u32, u32),
     identity: &(String, String),
     dial: (&crate::app::ConnectTarget, &store::Settings),
-) -> Result<std::thread::JoinHandle<Result<session::Connected>>> {
+) -> Result<crate::runtime::PendingConnect> {
     tracing::warn!("connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
     let text = format!("Connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
     overlay::frame(gl, canvas, fonts, display, overlay::TRANSPARENT, |f| {
@@ -48,7 +48,7 @@ fn redial(
 /// Waits for a reconnect's handshake with the toast up, reading input meanwhile: a Back tap,
 /// the EXIT gesture or a quit gives up (`true`). The worker runs to completion and drops what
 /// it built, which is the cancel — nothing joins it.
-fn wait_for_dial(handle: &std::thread::JoinHandle<Result<session::Connected>>, events: &mut sdl2::EventPump) -> bool {
+fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl2::EventPump) -> bool {
     let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
     while !handle.is_finished() {
         for event in events.poll_iter() {
@@ -424,7 +424,8 @@ pub(super) fn run_inner() -> Result<()> {
             let hid = crate::platform::webos::evdev::HidInput::start(true, settings.cursor_capture(), move |report| {
                 use crate::platform::webos::evdev::HidReport;
                 match report {
-                    HidReport::Input(ev) => input.send(ev),
+                    HidReport::Input(source, ev) => input.send(source, ev),
+                    HidReport::Release(source) => input.release(source),
                     HidReport::Rich(rich) => input.send_rich(rich),
                 }
             });
@@ -498,6 +499,7 @@ pub(super) fn run_inner() -> Result<()> {
             let mut client_initiated_disconnect = false;
             // The link died under a session the user did not end: the one end worth dialling again.
             let mut lost = false;
+            let mut input_suspended = false;
             let outcome = 'running: loop {
                 if QUIT_REQUESTED.load(Ordering::Relaxed) {
                     tracing::warn!("SIGTERM/SIGINT received — disconnecting before exit");
@@ -771,6 +773,9 @@ pub(super) fn run_inner() -> Result<()> {
                 // Otherwise: a held OK commits to a drag once `DRAG_HOLD` is up, and a stationary
                 // hold emits no events at all, so this tick is the only thing that can notice.
                 if disconnect.is_open() {
+                    if !input_suspended {
+                        connected.release_input();
+                    }
                     buttons.release_held(|ev| connected.send_input(ev));
                 } else {
                     buttons.tick(|ev| connected.send_input(ev));
@@ -845,10 +850,11 @@ pub(super) fn run_inner() -> Result<()> {
                 if let Some(hid) = &hid {
                     hid.set_active(!disconnect.is_open());
                 }
-                // Wider than `is_open()`: a dismissed dialog still draws (fading out) a few more
-                // ticks, used below to skip the stats overlay for exactly those ticks.
+                input_suspended = disconnect.is_open();
+                // True during fade-out, past `is_open()`; gates the stats overlay below.
+                let dialog_animating = disconnect.tick();
                 let dialog_frame = disconnect.frame();
-                if dialog_frame.is_some() {
+                if dialog_frame.is_some() && disconnect.redraw_due(dialog_animating) {
                     // Own pass over the punch-through video: the dialog alone, on a transparent
                     // clear (NDL video is on a hardware plane below this surface, so no blur).
                     overlay::frame(
@@ -861,7 +867,7 @@ pub(super) fn run_inner() -> Result<()> {
                             disconnect.draw(f);
                         },
                     )?;
-                } else if disconnect.tick() {
+                } else if dialog_frame.is_none() && dialog_animating {
                     // Close-fade just finished. Confirmed Disconnect: break now, nothing to wipe
                     // since the pre-stream UI takes the canvas next.
                     if let Some(outcome) = pending_outcome.take() {
@@ -970,6 +976,7 @@ pub(super) fn run_inner() -> Result<()> {
                 // added latency near zero; the wakeup rate is noise even on this SoC.
                 std::thread::sleep(Duration::from_millis(2));
             };
+            connected.release_input();
             text_input.stop();
 
             // Trigger resistance is firmware state that outlives the session — hand the pad back
