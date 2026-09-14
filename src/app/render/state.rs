@@ -115,11 +115,34 @@ impl ListSlot {
     }
 }
 
+/// The seat `screen`'s rows live in, `None` before it has drawn once. The one place that knows
+/// how `lists` is keyed. Free rather than a method so a caller can hold `&mut` on another
+/// `RenderState` field at the same time — the settings card borrows its tab strip alongside.
+pub(crate) fn slot_in(lists: &mut [ListSlot], screen: crate::core::screen::Screen) -> Option<&mut ListSlot> {
+    lists.iter_mut().find(|slot| slot.screen == screen)
+}
+
 impl RenderState {
-    /// The seat `screen`'s rows live in, `None` before it has drawn once. The one place that
-    /// knows how `lists` is keyed — `App::kit_slot` seats through it, every other caller reads
-    /// through it, so a change of key lands in one function.
+    /// [`slot_in`] over the seated widgets.
     pub(crate) fn slot(&mut self, screen: crate::core::screen::Screen) -> Option<&mut ListSlot> {
-        self.lists.iter_mut().find(|slot| slot.screen == screen)
+        slot_in(&mut self.lists, screen)
+    }
+
+    /// Drop every seat that can no longer draw: the screen on show, the one it came from, and
+    /// the one still fading out are all that a frame can reach.
+    pub(crate) fn retain_visible(
+        &mut self,
+        current: crate::core::screen::Screen,
+        last: crate::core::screen::Screen,
+        closing: Option<crate::core::screen::Screen>,
+    ) {
+        self.lists
+            .retain(|slot| slot.screen == current || slot.screen == last || Some(slot.screen) == closing);
+    }
+
+    /// Unseat the screen being entered so its rows replay their rise. The card being left keeps
+    /// its seat and its row motion for the length of the fade.
+    pub(crate) fn reset_arrival(&mut self, arriving: crate::core::screen::Screen) {
+        self.lists.retain(|slot| slot.screen != arriving);
     }
 }

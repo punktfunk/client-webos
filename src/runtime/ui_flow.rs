@@ -428,19 +428,18 @@ pub(super) fn run_ui_flow(
             // held still for the length of an open or close fade. A refresh is expensive: the
             // modal layer draws into this surface straight after, so `image_snapshot_with_bounds`
             // makes copy-on-write copy the whole framebuffer, and the blur runs on top of that.
-            // `backdrop_changed` is set by the fade's own tick, so rebuilding on it paid that
-            // cost on every frame of the animation, which is what the animation stuttered on.
-            // One blur covers a whole fade; the page cannot move underneath it in ~200ms.
-            // Dropped and rebuilt inside the one frame, so no frame draws a card without a
-            // backdrop.
+            // Page motion that outlives the press which opened the card — the focus pop, the
+            // running-dot pulse, a card pop still settling — kept landing on scattered frames
+            // mid-fade and paying it there. One blur covers a whole fade; the page cannot move
+            // far underneath a card in ~200ms. Dropped and rebuilt inside the one frame, so no
+            // frame draws a card without a backdrop, and released outright once none is up.
             let card_up = app.modal_visible() || quit_dialog_active;
-            if backdrop_dirty && !app.modal_fading() {
+            if !card_up || (backdrop_dirty && !app.modal_fading()) {
                 page = None;
             }
             if card_up && page.is_none() {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
-                let k = crate::app::draw::scale(display_mode.h as u32) * dh as f32 / display_mode.h.max(1) as f32;
-                let sigma = crate::app::draw::glass::page_sigma(k);
+                let sigma = crate::app::draw::glass::page_sigma(display_mode.h as u32, dh);
                 page = snap.and_then(|snap| crate::app::draw::glass::blur_image(surface.canvas(), &snap, sigma));
             }
             let c = surface.canvas();
@@ -465,7 +464,9 @@ pub(super) fn run_ui_flow(
     }
     text_input.stop();
     // Atlases go back before a stream takes the GPU; the context and its compiled shaders
-    // stay, so the next entry is not a cold start.
+    // stay, so the next entry is not a cold start. The page blur first: `free_gpu_resources`
+    // cannot reclaim a texture a live `Image` still holds.
+    drop(page.take());
     gl.release_resources();
     Ok(match connect_handle {
         Some((handle, target, settings, gamepad_auto)) => UiOutcome::Launch(Box::new(ConnectOutcome {

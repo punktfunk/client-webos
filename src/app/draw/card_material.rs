@@ -105,11 +105,11 @@ pub(super) fn draw(canvas: &Canvas, rr: RRect, rect: Rect, corner: f32, k: f32) 
     let shader = SHADER.with(|cache| {
         let mut cache = cache.borrow_mut();
         let hit = |s: &Option<Cached>| matches!(s, Some((r, c, scale, _)) if *r == rect && *c == corner && *scale == k);
-        if hit(&cache[1]) {
+        if !hit(&cache[0]) {
             cache.swap(0, 1);
-        } else if !hit(&cache[0]) {
-            cache[1] = cache[0].take();
-            cache[0] = shader(rect, corner, k).map(|shader| (rect, corner, k, shader));
+            if !hit(&cache[0]) {
+                cache[0] = shader(rect, corner, k).map(|shader| (rect, corner, k, shader));
+            }
         }
         cache[0].as_ref().map(|(_, _, _, shader)| shader.clone())
     });

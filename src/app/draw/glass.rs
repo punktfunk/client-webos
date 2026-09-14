@@ -45,10 +45,10 @@ fn downscaled_blur(
     Some(surface.image_snapshot())
 }
 
-/// The sigma a card's page backdrop is blurred at, where `k` is [`super::scale`] times the
-/// drawable-over-layout ratio. One rule, so the startup warmup compiles the blur the menu draws.
-pub(crate) fn page_sigma(k: f32) -> f32 {
-    CARD_BLUR * k
+/// The sigma a card's page backdrop is blurred at: [`CARD_BLUR`] at the layout's scale, then at
+/// the drawable's. One rule, so the startup warmup compiles the blur the menu actually draws.
+pub(crate) fn page_sigma(layout_h: u32, drawable_h: u32) -> f32 {
+    CARD_BLUR * super::scale(layout_h) * drawable_h as f32 / layout_h.max(1) as f32
 }
 
 pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) -> Option<skia_safe::Image> {

@@ -659,14 +659,19 @@ impl App {
             backdrop_changed = true;
         }
         let closing = self.render.modal.fade.closing_frame().map(|(_, screen)| screen);
-        self.render.lists.retain(|slot| {
-            slot.screen == self.nav.screen || slot.screen == self.nav.last_screen || Some(slot.screen) == closing
-        });
+        self.render
+            .retain_visible(self.nav.screen, self.nav.last_screen, closing);
         if self.render.lists.iter().any(|slot| slot.list.animating()) {
             animating = true;
         }
-        if self.render.sidebar_focus.animating() || self.render.tab_focus.animating() {
+        if self.render.sidebar_focus.animating() {
             backdrop_changed = true;
+        }
+        // The settings card's tab strip is drawn on the card, not on the page behind it, so it
+        // needs frames but must not read as the backdrop having moved — that had every frame of
+        // a tab switch re-snapshot and re-blur the whole page.
+        if self.render.tab_focus.animating() {
+            animating = true;
         }
         // Tick even while hidden to keep pulse state consistent.
         let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
@@ -828,7 +833,7 @@ impl App {
             let left = self.nav.last_screen;
             self.nav.last_screen = self.nav.screen;
             // Preserve the departing rows through their fade; only the arrival starts fresh.
-            self.render.lists.retain(|slot| slot.screen == left);
+            self.render.reset_arrival(self.nav.screen);
             // Modal-to-modal cross-fades: `ui::fade` makes the leaving card the entering
             // one's inverse. Anything involving Home is a plain open or close.
             if !matches!(left, Screen::Home) {

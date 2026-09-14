@@ -35,7 +35,7 @@ pub(crate) fn draw(
         info.width() as f32 / w.max(1) as f32,
         info.height() as f32 / h.max(1) as f32,
     );
-    let backdrop = glass::blur_image(target.canvas(), &source, glass::page_sigma(k * sy))?;
+    let backdrop = glass::blur_image(target.canvas(), &source, glass::page_sigma(h, info.height() as u32))?;
     let mut cover = skia_safe::surfaces::raster_n32_premul((480, 720))?;
     cover.canvas().clear(theme::card_face(0.0));
     cover
