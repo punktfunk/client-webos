@@ -10,7 +10,7 @@
 //! The scope switcher edits either the global document or one profile's overlay; a profile
 //! row that differs from the global wears the dot, and Secondary on it clears the override.
 
-use pf_client_core::profiles::{SettingsOverlay, StreamProfile};
+use pf_client_core::presets::{SettingsOverlay, StreamPreset};
 use pf_client_core::trust;
 use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
 use pf_console_ui::widgets::{Control, RowSpec};
@@ -246,7 +246,7 @@ impl pf_console_ui::SettingsStore for PageStore {
 
     fn save(&self, _settings: &trust::Settings) {}
 
-    fn profiles(&self) -> Vec<(String, String)> {
+    fn presets(&self) -> Vec<(String, String)> {
         self.profiles.clone()
     }
 
@@ -336,7 +336,7 @@ impl App {
         }
     }
 
-    fn scope_profile(&self) -> Option<&StreamProfile> {
+    fn scope_profile(&self) -> Option<&StreamPreset> {
         match &self.screens.settings_page.scope {
             Scope::Global => None,
             Scope::Profile(id) => self.profiles.iter().find(|p| &p.id == id),
@@ -840,7 +840,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::GamepadUi
         | RowId::GamepadUiMode => return None,
         // This page draws its own scope switcher and profile rows.
-        RowId::Profile(_) | RowId::NoProfiles => "the page builds its own profile rows",
+        RowId::Preset(_) | RowId::NoPresets => "the page builds its own profile rows",
         // The client's own screens, not the kit's action rows.
         RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
         // The kit answers `false` for WebOS, so a page entry would draw nothing.

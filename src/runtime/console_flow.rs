@@ -348,7 +348,7 @@ pub(super) fn run(
                     fp_hex,
                     launch,
                     title,
-                    profile,
+                    preset: profile,
                     request_access,
                 } => {
                     if request_access {

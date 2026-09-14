@@ -125,7 +125,7 @@ pub struct App {
     /// The settings-profile catalog ([`store::Persisted::profiles`]). Held rather than re-read
     /// because [`App::persist`] rebuilds the whole document from these fields, so anything not
     /// here is dropped on the next save.
-    pub(crate) profiles: Vec<pf_client_core::profiles::StreamProfile>,
+    pub(crate) profiles: Vec<pf_client_core::presets::StreamPreset>,
     /// Last tick time (for real-time scroll easing, not frame-count based).
     last_tick: Option<Instant>,
     /// The console kit's Geist, for the screens drawn on it (`app::draw`). Owned here
@@ -153,12 +153,12 @@ pub(crate) struct PairingOutcome {
 /// under it (a pin whose profile has left the catalog is skipped, not shown broken).
 fn known_entries(
     known_hosts: &[store::KnownHost],
-    profiles: &[pf_client_core::profiles::StreamProfile],
+    profiles: &[pf_client_core::presets::StreamPreset],
 ) -> Vec<HostEntry> {
     let mut entries = Vec::with_capacity(known_hosts.len());
     for h in known_hosts {
         entries.push(HostEntry::Known(h.clone()));
-        for id in &h.pinned_profiles {
+        for id in &h.pinned_presets {
             if let Some(p) = profiles.iter().find(|p| p.id == *id) {
                 entries.push(HostEntry::Pinned {
                     host: h.clone(),
