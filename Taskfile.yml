@@ -38,10 +38,11 @@ vars:
     sh: |
       if [ -n "${PKG_VERSION:-}" ]; then
         echo "$PKG_VERSION"
-      elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+      elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME:-}" != "beta" ]; then
         echo "${GITHUB_REF_NAME#v}"
       else
-        LATEST=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.1)
+        # Version tags only: the rolling `beta` tag sits on main's tip.
+        LATEST=$(git describe --tags --abbrev=0 --match '[0-9]*' --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || echo 0.0.1)
         SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
         echo "${LATEST}+git.${SHA}"
       fi
