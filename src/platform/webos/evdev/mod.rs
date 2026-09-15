@@ -28,8 +28,9 @@
 //! bounds a wedged thread's blast radius to "no HID input" instead of "no mouse input at all,
 //! TV-wide" — the kernel releases the grab the moment our fd closes (including on panic), and the
 //! surface-manager's own fd stays open throughout, just starved of events while ours holds it.
-//! The Magic Remote never matches the mouse/keyboard filter, so it stays usable via SDL —
-//! which is what [`HidInput::keyboard_busy`] is for (drop HID keyboard echoes, keep remote keys).
+//! The Magic Remote never matches the mouse/keyboard filter: its keys reach the app through SDL.
+//! A scan still opens its own node, ungrabbed, as a [`RemoteNode`] for the caller to read, since
+//! SDL's keys name no device. [`HidInput::keyboard_busy`] drops SDL's echo of a HID keyboard.
 //!
 //! **One flag, two effects.** "Grabbed" and "forwarded to the host" are the same condition by
 //! construction, not two atomics a caller has to keep in sync: [`HidInput::set_active`]`(false)`
@@ -169,6 +170,8 @@ struct Shared {
     /// off leaves a pointer-only node with the compositor, so the TV cursor still aims.
     grab_mouse: bool,
     keys: KeyActivity,
+    /// Remote nodes a scan opened, until the caller takes them ([`HidInput::take_remote_nodes`]).
+    remotes: std::sync::Mutex<Vec<RemoteNode>>,
 }
 
 /// Last keyboard report, shared with the main thread to tell a HID keyboard from the remote —
@@ -223,6 +226,7 @@ impl HidInput {
             gate_epoch: AtomicU32::new(0),
             grab_mouse,
             keys: KeyActivity::new(),
+            remotes: std::sync::Mutex::new(Vec::new()),
         });
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -258,6 +262,16 @@ impl HidInput {
     /// SDL's echo of that keyboard without dropping the Magic Remote.
     pub fn keyboard_busy(&self) -> bool {
         self.shared.keys.recent()
+    }
+
+    /// Remote nodes opened since the last call. The caller reads them itself, on the thread that
+    /// takes SDL's events — see [`RemoteNode`].
+    pub fn take_remote_nodes(&self) -> Vec<RemoteNode> {
+        self.shared
+            .remotes
+            .lock()
+            .map(|mut remotes| std::mem::take(&mut *remotes))
+            .unwrap_or_default()
     }
 }
 
@@ -312,12 +326,19 @@ impl Drop for Device {
 /// What probing a node found — matters for whether a later rescan retries it, see [`scan`].
 enum Probe {
     Hid(Device),
+    /// A TV remote's own node, for the caller rather than this thread's poll.
+    Remote(RawFd),
     Skip,
     Unopenable,
 }
 
 /// Opens every node this reader wants that isn't already in `seen`, appending the paths it takes.
-fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool, stop: &AtomicBool, next_source: &mut u32) -> Vec<Device> {
+fn scan(
+    seen: &mut Vec<PathBuf>,
+    shared: &Shared,
+    remote_gone: &std::sync::mpsc::Sender<PathBuf>,
+    next_source: &mut u32,
+) -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         tracing::warn!("/dev/input unreadable — no HID input support");
         return Vec::new();
@@ -336,10 +357,10 @@ fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool, stop: &AtomicBool, next_sourc
     paths.sort();
     let mut devices = Vec::new();
     for path in paths {
-        if stop.load(Ordering::Relaxed) {
+        if shared.stop.load(Ordering::Relaxed) {
             break;
         }
-        match open_hid(&path, grab_mouse) {
+        match open_hid(&path, shared.grab_mouse) {
             Probe::Hid(mut dev) => {
                 let Some(next) = next_source.checked_add(1) else {
                     tracing::warn!("HID source identifiers exhausted");
@@ -349,6 +370,17 @@ fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool, stop: &AtomicBool, next_sourc
                 *next_source = next;
                 seen.push(path);
                 devices.push(dev);
+            }
+            Probe::Remote(fd) => {
+                seen.push(path.clone());
+                let node = RemoteNode {
+                    fd,
+                    path,
+                    gone: remote_gone.clone(),
+                };
+                if let Ok(mut remotes) = shared.remotes.lock() {
+                    remotes.push(node);
+                }
             }
             // Opened and isn't ours — settled, no rescan will change that.
             Probe::Skip => seen.push(path),
@@ -363,7 +395,8 @@ fn scan(seen: &mut Vec<PathBuf>, grab_mouse: bool, stop: &AtomicBool, next_sourc
 /// A mouse is a relative-pointing device (`EV_REL` on both axes) that isn't also an absolute
 /// pointer, which is what separates a desk mouse from the Magic Remote. A keyboard is a node
 /// carrying `KEY_A`/`KEY_LEFTCTRL` that isn't a TV builtin — those advertise a full QWERTY
-/// keymap, so [`is_tv_builtin`]'s name denylist is load-bearing.
+/// keymap, so [`is_tv_builtin`]'s name denylist is load-bearing. A remote's own node
+/// ([`is_tv_remote_node`]) is opened for the caller instead.
 fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return Probe::Skip;
@@ -376,6 +409,10 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         return Probe::Unopenable;
     }
     let name = device_name(fd).unwrap_or_default();
+    if is_tv_remote_node(&name) {
+        tracing::info!("HID remote: {} ({})", name, path.display());
+        return Probe::Remote(fd);
+    }
     if is_tv_builtin(&name) {
         // SAFETY: `fd` came from `open` above; closing before the Device wrapper exists.
         unsafe { libc::close(fd) };
@@ -495,6 +532,68 @@ fn is_tv_builtin(name: &str) -> bool {
     name.starts_with("LGE") || name.starts_with("Bluetooth-audio") || matches!(name, "CHECK INPUT" | "IoT keypad")
 }
 
+/// The TV's Bluetooth remotes, by the names their nodes carry on-device (`LGE M-RCU - Builtin
+/// [0]`, `LGE TONE+ - Builtin [3]`, `LGE Simple Premium`). Such a node is the only place a remote
+/// key is known to be the remote's: the compositor also types a pad's presses as the same keys.
+/// Never a virtual node (`LGE RCU`, `LGE Network Input`, `Smart Remote RCU Input`): firmware
+/// could inject exactly that echo there.
+fn is_tv_remote_node(name: &str) -> bool {
+    name.starts_with("LGE ") && (name.contains(" - Builtin [") || name == "LGE Simple Premium")
+}
+
+/// A TV remote's own node, opened by a scan and never grabbed, so the TV keeps its remote.
+///
+/// Not polled on the reader thread: the caller reads it right before it takes SDL's events. The
+/// kernel queues an event on every open node at once, and the compositor builds its key from the
+/// same event, so any press behind a key SDL delivers is already readable here.
+///
+/// Dropping it hands its path back to the scanner, so a remote that reconnects on the same node
+/// is opened again.
+pub struct RemoteNode {
+    fd: RawFd,
+    path: PathBuf,
+    gone: std::sync::mpsc::Sender<PathBuf>,
+}
+
+impl RemoteNode {
+    /// Reads every pending event, handing each key press to `pressed`. `false` once the node is
+    /// gone.
+    pub fn drain(&mut self, mut pressed: impl FnMut(u16)) -> bool {
+        let size = std::mem::size_of::<InputEventRaw>();
+        let mut buf = [0u8; 1024];
+        loop {
+            // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                let kind = std::io::Error::last_os_error().kind();
+                return matches!(kind, std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted);
+            }
+            if n == 0 {
+                return false;
+            }
+            let n = n as usize;
+            for chunk in buf[..n].chunks_exact(size) {
+                // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
+                let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+                if ev.kind == EV_KEY && ev.value == 1 {
+                    pressed(ev.code);
+                }
+            }
+            if n < buf.len() {
+                return true;
+            }
+        }
+    }
+}
+
+impl Drop for RemoteNode {
+    fn drop(&mut self) {
+        // SAFETY: `fd` came from `open` in `open_hid` and is owned solely by this struct.
+        unsafe { libc::close(self.fd) };
+        let _ = self.gone.send(std::mem::take(&mut self.path));
+    }
+}
+
 /// The `EVIOCGBIT` bitmap of supported codes for event type `kind`, or all-zero when the
 /// ioctl fails. 128 bytes covers every `REL`/`ABS` code (and `KEY` up to 0x3ff, unused here).
 fn event_bits(fd: RawFd, kind: u16) -> [u8; 128] {
@@ -560,8 +659,9 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
     let (removed_tx, removed_rx) = std::sync::mpsc::channel();
     // Detached scanning never grabs nodes. Unadopted descriptors close on drop.
     let scan_shared = shared.clone();
+    let remote_gone = removed_tx.clone();
     if let Err(e) = std::thread::Builder::new().name("pf-hid-scan".into()).spawn(move || {
-        scan_loop(&scan_shared, &added_tx, &removed_rx);
+        scan_loop(&scan_shared, &added_tx, &removed_rx, &remote_gone);
     }) {
         tracing::warn!("HID scanner unavailable: {e}");
         return;
@@ -636,6 +736,7 @@ fn scan_loop(
     shared: &Shared,
     added: &std::sync::mpsc::SyncSender<Vec<Device>>,
     removed: &std::sync::mpsc::Receiver<PathBuf>,
+    remote_gone: &std::sync::mpsc::Sender<PathBuf>,
 ) {
     let mut seen = Vec::new();
     // Instant underflows shortly after boot; use is_none_or.
@@ -659,7 +760,7 @@ fn scan_loop(
             let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
             if first || mtime != dir_mtime {
                 dir_mtime = mtime;
-                let found = scan(&mut seen, shared.grab_mouse, &shared.stop, &mut next_source);
+                let found = scan(&mut seen, shared, remote_gone, &mut next_source);
                 if first && found.is_empty() {
                     tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
                 }
@@ -813,5 +914,48 @@ fn button_code(code: u16) -> Option<u32> {
         BTN_SIDE => Some(4),
         BTN_EXTRA => Some(5),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_tv_remote_node, RemoteNode};
+
+    #[test]
+    fn a_dropped_remote_node_hands_its_path_back_to_the_scanner() {
+        let (gone, scanner) = std::sync::mpsc::channel();
+        // SAFETY: a plain open of a path with no interior NUL.
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        let path = std::path::PathBuf::from("/dev/input/event3");
+        drop(RemoteNode {
+            fd,
+            path: path.clone(),
+            gone,
+        });
+        assert_eq!(scanner.try_recv().ok(), Some(path));
+    }
+
+    #[test]
+    fn claims_the_bluetooth_remotes_and_no_virtual_node() {
+        // Names as a G5 (webOS 10.3) lists them in /proc/bus/input/devices.
+        for name in [
+            "LGE M-RCU - Builtin [0]",
+            "LGE TONE+ - Builtin [3]",
+            "LGE W-RCU - Builtin [5]",
+            "LGE Simple Premium",
+        ] {
+            assert!(is_tv_remote_node(name), "{name}");
+        }
+        for name in [
+            "LGE RCU",
+            "LGE Network Input",
+            "Smart Remote RCU Input",
+            "LGE Smart Remote - TouchPad",
+            "CHECK INPUT",
+            "DualSense Wireless Controller",
+        ] {
+            assert!(!is_tv_remote_node(name), "{name}");
+        }
     }
 }

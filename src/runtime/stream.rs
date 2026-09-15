@@ -445,6 +445,8 @@ pub(super) fn run_inner() -> Result<()> {
                     HidReport::Rich(rich) => input.send_rich(rich),
                 }
             });
+            // Tells the remote's keys from a pad's echo, off the remote's own nodes.
+            let mut remote_gate = RemoteGate::default();
             // Flips once a HID mouse is found — `HidInput::start` no longer scans before returning
             // (that blocked every stream connect on the node-open cost), so presence is only known
             // once the reader thread's own scan catches up; checked each tick below.
@@ -546,6 +548,15 @@ pub(super) fn run_inner() -> Result<()> {
                     cursor.reassert_hidden();
                     cursor.flush(canvas.window());
                 }
+                // The remote's presses, read before SDL's events so each is there to claim the key it
+                // caused. A key the remote did not press is a pad's echo (webOS 23+), unless the
+                // on-screen keyboard, which has no node of its own, typed it.
+                let now = Instant::now();
+                if let Some(hid) = hid.as_ref() {
+                    remote_gate.adopt(hid.take_remote_nodes());
+                }
+                remote_gate.poll(now);
+                let osk = text_input.is_shown(canvas.window());
                 for event in events.poll_iter() {
                     use sdl2::event::Event;
                     // Never real pointer input, so never the host's — see `mouse::is_touch_emulated`.
@@ -575,7 +586,7 @@ pub(super) fn run_inner() -> Result<()> {
                             break 'running StreamOutcome::Quit;
                         }
                         Event::ControllerDeviceAdded { which, .. } => {
-                            if controller.is_none() {
+                            if controller.is_none() && !gamepad::is_remote_at(&game_controller, which) {
                                 match game_controller.open(which) {
                                     Ok(c) => {
                                         tracing::info!("controller connected: {}", c.name());
@@ -614,33 +625,39 @@ pub(super) fn run_inner() -> Result<()> {
                                 }
                             }
                         }
-                        Event::ControllerDeviceRemoved { .. } => {
+                        // Only the pad we hold: the Magic Remote drops and re-adds constantly.
+                        Event::ControllerDeviceRemoved { which, .. }
+                            if controller.as_ref().is_some_and(|c| c.instance_id() == which) =>
+                        {
                             controller = None;
                             // An unplugged pad sends no releases, so a held chord would stay armed forever.
                             chord.clear();
                             dial.clear();
                         }
-                        // Dialog open: navigate it only, don't forward input to the host.
+                        // Dialog open: navigate it only, don't forward input to the host. A key only if
+                        // the remote pressed it: a pad's echo would move it a second time.
                         _ if disconnect.is_open() => {
-                            match disconnect.handle_event(&event, &overlay_fonts, display.0, display.1) {
-                                Some(ConfirmAction::Confirmed) => {
-                                    tracing::info!("disconnecting to menu");
-                                    client_initiated_disconnect = true;
-                                    connected.disconnect_quit();
-                                    disconnect.dismiss();
-                                    pending_outcome = Some(StreamOutcome::ReturnToMenu);
+                            if remote_gate.admits(&event, now) {
+                                match disconnect.handle_event(&event, &overlay_fonts, display.0, display.1) {
+                                    Some(ConfirmAction::Confirmed) => {
+                                        tracing::info!("disconnecting to menu");
+                                        client_initiated_disconnect = true;
+                                        connected.disconnect_quit();
+                                        disconnect.dismiss();
+                                        pending_outcome = Some(StreamOutcome::ReturnToMenu);
+                                    }
+                                    Some(ConfirmAction::Dismissed) => overlay_last = None,
+                                    Some(ConfirmAction::Navigated) | None => {}
                                 }
-                                Some(ConfirmAction::Dismissed) => overlay_last = None,
-                                Some(ConfirmAction::Navigated) | None => {}
                             }
                         }
                         // Dial open: the remote's keys drive it, and no key or pointer input reaches
-                        // the host.
+                        // the host. The pad drives it through `dial`, so its echo must not.
                         Event::KeyDown {
                             keycode: Some(k),
                             repeat: false,
                             ..
-                        } if ring.open() => {
+                        } if ring.open() && remote_gate.admits(&event, now) => {
                             if let Some(ev) = ring_event_for_key(k) {
                                 ring.menu(ev);
                             }
@@ -652,9 +669,15 @@ pub(super) fn run_inner() -> Result<()> {
                         | Event::MouseButtonDown { .. }
                         | Event::MouseButtonUp { .. }
                         | Event::MouseWheel { .. }
-                            if ring.open() => {}
+                            if ring.open() =>
+                        {
+                            // Still shown to the gate, so a key admitted into the dial releases there.
+                            remote_gate.admits(&event, now);
+                        }
                         // Scancode keys are real game input — forward only, never open the dialog.
-                        Event::KeyDown { scancode: Some(sc), .. } if !hid_keys => {
+                        Event::KeyDown { scancode: Some(sc), .. }
+                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sc, true) {
                                 connected.send_input(&ev);
                             }
@@ -702,7 +725,9 @@ pub(super) fn run_inner() -> Result<()> {
                             scancode: None,
                             repeat: false,
                             ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back) => {
+                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
+                            && remote_gate.admits(&event, now) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, true) {
                                 connected.send_input(&ev);
                             }
@@ -711,12 +736,16 @@ pub(super) fn run_inner() -> Result<()> {
                             keycode: Some(k),
                             scancode: None,
                             ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back) => {
+                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
+                            && remote_gate.admits(&event, now) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, false) {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::KeyUp { scancode: Some(sc), .. } if !hid_keys => {
+                        Event::KeyUp { scancode: Some(sc), .. }
+                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
+                        {
                             if let Some(ev) = keyboard::key_event(sc, false) {
                                 connected.send_input(&ev);
                             }

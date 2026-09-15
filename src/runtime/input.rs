@@ -89,6 +89,148 @@ impl DisconnectChord {
     }
 }
 
+/// The Magic Remote's Back as its own node reports it (`KEY_PREVIOUS`), measured on a G5.
+const REMOTE_BACK: u16 = 0x19c;
+
+/// The remote's evdev code for a key the compositor delivered, when the remote has that key:
+/// the arrows, OK, Back and the digits.
+pub(super) fn remote_code(
+    scancode: Option<sdl2::keyboard::Scancode>,
+    keycode: Option<sdl2::keyboard::Keycode>,
+) -> Option<u16> {
+    use sdl2::keyboard::Scancode as S;
+    if keycode.is_some_and(|k| k.into_i32() == crate::platform::webos::input::WEBOS_BACK_KEYCODE) {
+        return Some(REMOTE_BACK);
+    }
+    Some(match scancode? {
+        S::Up => 103,
+        S::Down => 108,
+        S::Left => 105,
+        S::Right => 106,
+        S::Return | S::KpEnter => 28,
+        S::Num1 => 2,
+        S::Num2 => 3,
+        S::Num3 => 4,
+        S::Num4 => 5,
+        S::Num5 => 6,
+        S::Num6 => 7,
+        S::Num7 => 8,
+        S::Num8 => 9,
+        S::Num9 => 10,
+        S::Num0 => 11,
+        _ => return None,
+    })
+}
+
+/// Which of the compositor's keys the Magic Remote pressed. webOS 23+ also types every pad
+/// press as a remote key, and a Wayland key event names no device, so SDL alone cannot tell
+/// them apart. The remote's own evdev node can (`evdev::RemoteNode`): each press there admits
+/// one compositor key-down of that key, and the key's repeats and release follow it.
+///
+/// The nodes are read on this thread, every tick and again before a key is turned away, so a
+/// press behind a key SDL delivers is never still unread. The compositor still decides what a
+/// press means (a pointer click, the EXIT gesture, a key for the on-screen keyboard); this only
+/// says whose press it was.
+///
+/// Until a node is adopted the gate admits every key: a TV whose remote node the app cannot
+/// open, or names differently, keeps its remote. A node that goes away afterwards does not
+/// disarm it, since a key with no remote to press it is an echo; the reader opens it again
+/// when it comes back.
+#[derive(Default)]
+pub(super) struct RemoteGate {
+    /// The remote's own nodes.
+    nodes: Vec<crate::platform::webos::evdev::RemoteNode>,
+    /// A node was adopted at some point, so a key without a press behind it is an echo.
+    armed: bool,
+    /// Remote presses no compositor key-down has claimed yet, with the tick they were read in.
+    owed: Vec<(u16, Instant)>,
+    /// Keys admitted down, whose repeats and release pass.
+    down: Vec<u16>,
+}
+
+impl RemoteGate {
+    /// How long a remote press waits for its key-down. An OK the pointer turned into a click is
+    /// never claimed and expires.
+    const CLAIM_WINDOW: Duration = Duration::from_millis(250);
+
+    /// Takes over remote nodes the evdev reader opened. The first one arms the gate.
+    pub(super) fn adopt(&mut self, nodes: Vec<crate::platform::webos::evdev::RemoteNode>) {
+        if !self.armed && !nodes.is_empty() {
+            tracing::info!("remote gate armed: a key now needs a press on the remote's own node");
+            self.armed = true;
+        }
+        self.nodes.extend(nodes);
+    }
+
+    /// Reads the remote's nodes; a node that is gone is dropped.
+    pub(super) fn poll(&mut self, now: Instant) {
+        let owed = &mut self.owed;
+        self.nodes.retain_mut(|node| node.drain(|code| owed.push((code, now))));
+    }
+
+    /// A gate with a remote node behind it, as a test stands in for one.
+    #[cfg(test)]
+    fn armed() -> Self {
+        Self {
+            armed: true,
+            ..Self::default()
+        }
+    }
+
+    /// A press off the remote's node, as a test stands in for one.
+    #[cfg(test)]
+    fn pressed(&mut self, code: u16, now: Instant) {
+        self.owed.push((code, now));
+    }
+
+    /// Whether `event` may act: anything but a key does, and a key only if the remote pressed
+    /// it. A pad's echo has no press behind it, so it, its repeats and its release all fail.
+    pub(super) fn admits(&mut self, event: &sdl2::event::Event, now: Instant) -> bool {
+        use sdl2::event::Event;
+        if !self.armed {
+            return true;
+        }
+        let (scancode, keycode, down, repeat) = match *event {
+            Event::KeyDown {
+                scancode,
+                keycode,
+                repeat,
+                ..
+            } => (scancode, keycode, true, repeat),
+            Event::KeyUp { scancode, keycode, .. } => (scancode, keycode, false, false),
+            _ => return true,
+        };
+        let Some(code) = remote_code(scancode, keycode) else {
+            return false;
+        };
+        self.owed.retain(|&(_, at)| now.duration_since(at) < Self::CLAIM_WINDOW);
+        let held = self.down.iter().position(|&c| c == code);
+        match (down, held) {
+            (false, Some(i)) => {
+                self.down.swap_remove(i);
+                true
+            }
+            (true, Some(_)) => true,
+            (false, None) => false,
+            (true, None) if repeat => false,
+            (true, None) => {
+                if !self.owed.iter().any(|&(c, _)| c == code) {
+                    // The press may have landed after this tick's poll: read before turning it away.
+                    self.poll(now);
+                }
+                match self.owed.iter().position(|&(c, _)| c == code) {
+                    Some(i) => {
+                        self.owed.remove(i);
+                        self.down.push(code);
+                        true
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+}
+
 /// Fires once when `down` changes from false to true.
 pub(super) fn rising_edge(down: bool, prev: &mut bool) -> bool {
     let fired = down && !*prev;
@@ -785,4 +927,91 @@ pub(super) fn handle_ui_event(
     // (or a Back that lands one under it) cannot steal the focus back.
     input.nav_focus.claim();
     dispatch_menu_event(app, menu_ev, display_mode)
+}
+
+#[cfg(test)]
+mod remote_gate_tests {
+    use super::*;
+    use sdl2::event::Event;
+    use sdl2::keyboard::{Keycode, Mod, Scancode};
+
+    fn key(scancode: Option<Scancode>, keycode: Option<Keycode>, down: bool, repeat: bool) -> Event {
+        let (timestamp, window_id, keymod) = (0, 0, Mod::NOMOD);
+        if down {
+            Event::KeyDown {
+                timestamp,
+                window_id,
+                keycode,
+                scancode,
+                keymod,
+                repeat,
+            }
+        } else {
+            Event::KeyUp {
+                timestamp,
+                window_id,
+                keycode,
+                scancode,
+                keymod,
+                repeat,
+            }
+        }
+    }
+
+    fn up_key(down: bool, repeat: bool) -> Event {
+        key(Some(Scancode::Up), Some(Keycode::Up), down, repeat)
+    }
+
+    #[test]
+    fn a_remote_press_admits_its_key_its_repeats_and_its_release() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        gate.pressed(103, t);
+        let later = t + Duration::from_millis(20);
+        assert!(gate.admits(&up_key(true, false), later));
+        assert!(gate.admits(&up_key(true, true), later));
+        assert!(gate.admits(&up_key(false, false), later));
+        assert!(
+            !gate.admits(&up_key(true, false), later),
+            "one press admits one key-down"
+        );
+    }
+
+    #[test]
+    fn a_pad_echo_has_no_remote_press_behind_it() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        assert!(!gate.admits(&up_key(true, false), t));
+        assert!(!gate.admits(&up_key(true, true), t));
+        assert!(!gate.admits(&up_key(false, false), t));
+        let back = Keycode::from_i32(crate::platform::webos::input::WEBOS_BACK_KEYCODE);
+        assert!(!gate.admits(&key(None, back, true, false), t));
+        gate.pressed(REMOTE_BACK, t);
+        assert!(gate.admits(&key(None, back, true, false), t));
+    }
+
+    #[test]
+    fn an_unclaimed_press_expires() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        // An OK the pointer turned into a click: no key-down ever claims it.
+        gate.pressed(28, t);
+        let enter = key(Some(Scancode::Return), Some(Keycode::Return), true, false);
+        assert!(!gate.admits(&enter, t + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn keys_the_remote_lacks_never_pass_and_other_events_always_do() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), true, false);
+        assert!(!gate.admits(&esc, t));
+        assert!(gate.admits(&Event::Quit { timestamp: 0 }, t));
+    }
+
+    /// No remote node yet, or none this app can open: the old behaviour, every key passes.
+    #[test]
+    fn a_gate_without_a_remote_node_admits_every_key() {
+        let (mut gate, t) = (RemoteGate::default(), Instant::now());
+        assert!(gate.admits(&up_key(true, false), t));
+        assert!(gate.admits(&up_key(false, false), t));
+        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), true, false);
+        assert!(gate.admits(&esc, t));
+    }
 }
