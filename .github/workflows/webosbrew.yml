@@ -124,19 +124,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           PREV="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases \
             --limit 1 --json tagName --jq '.[].tagName')"
           gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -f tag_name="$GITHUB_SHA" -f target_commitish="$GITHUB_SHA" \
             ${PREV:+-f previous_tag_name="$PREV"} --jq .body > dist/notes.md
           gh api /markdown -f mode=gfm -f context="$GITHUB_REPOSITORY" \
             -F text=@dist/notes.md > dist/description.html
-          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
-            -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1 \
-            || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-                 -f ref="refs/tags/${TAG}" -f sha="$GITHUB_SHA" >/dev/null
-          # Name the release after the package it ships, e.g. 0.21.2+git.99ea4a64.
           jq -r '"PKG_VERSION=" + .version' "dist/${APP_ID}.manifest.json" >> "$GITHUB_ENV"
 
       - name: Publish to the release
