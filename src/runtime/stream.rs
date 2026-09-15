@@ -652,12 +652,12 @@ pub(super) fn run_inner() -> Result<()> {
                             }
                         }
                         // Dial open: the remote's keys drive it, and no key or pointer input reaches
-                        // the host.
+                        // the host. The pad drives it through `dial`, so its echo must not.
                         Event::KeyDown {
                             keycode: Some(k),
                             repeat: false,
                             ..
-                        } if ring.open() => {
+                        } if ring.open() && remote_gate.admits(&event, now) => {
                             if let Some(ev) = ring_event_for_key(k) {
                                 ring.menu(ev);
                             }
