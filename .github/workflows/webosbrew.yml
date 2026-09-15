@@ -35,7 +35,6 @@ jobs:
     env:
       APP_ID: ${{ inputs.artifact }}
       TAG: ${{ inputs.release_tag }}
-      BETA: ${{ inputs.release_tag == 'beta' }}
     steps:
       - uses: actions/download-artifact@v7
         with:
@@ -84,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           IPK="$(ls dist/*.ipk)"
-          if [ "$BETA" = true ]; then
+          if [ "$TAG" = beta ]; then
             mv "$IPK" "dist/${APP_ID}_${TAG}_arm.ipk"
             IPK="dist/${APP_ID}_${TAG}_arm.ipk"
           fi
@@ -114,35 +113,36 @@ jobs:
             --strict=false
 
       - name: Upload manifest artifact
-        if: inputs.release_tag == ''
+        if: env.TAG == ''
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact }}-manifest
           path: dist/*.manifest.json
 
-      # Serves as both the release body and the repo listing's description page,
-      # covering everything since the last stable release.
-      - name: Generate the beta release notes
-        if: env.BETA == 'true'
+      - name: Prepare the beta release
+        if: env.TAG == 'beta'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           PREV="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases \
             --limit 1 --json tagName --jq '.[].tagName')"
           gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -f tag_name="$GITHUB_SHA" -f target_commitish="$GITHUB_SHA" \
             ${PREV:+-f previous_tag_name="$PREV"} --jq .body > dist/notes.md
+          gh api /markdown -f mode=gfm -f context="$GITHUB_REPOSITORY" \
+            -F text=@dist/notes.md > dist/description.html
+          jq -r '"PKG_VERSION=" + .version' "dist/${APP_ID}.manifest.json" >> "$GITHUB_ENV"
 
       - name: Publish to the release
-        if: inputs.release_tag != ''
+        if: env.TAG != ''
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.release_tag }}
-          prerelease: ${{ env.BETA == 'true' }}
-          # Empty on stable releases, which keeps the notes they shipped with.
-          body_path: ${{ env.BETA == 'true' && 'dist/notes.md' || '' }}
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG == 'beta' && format('Beta {0}', env.PKG_VERSION) || '' }}
+          body_path: ${{ env.TAG == 'beta' && 'dist/notes.md' || '' }}
+          prerelease: ${{ env.TAG == 'beta' }}
+          make_latest: ${{ env.TAG == 'beta' && 'false' || 'legacy' }}
           files: |
             dist/*.ipk
             dist/*.manifest.json
-            dist/notes.md
+            dist/*.html
