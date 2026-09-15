@@ -642,7 +642,8 @@ confirmed on (`plane_lead` read 120 on a CX only because it was taken against a 
 the constant is pinned there rather than falling out of how long a TV took to load. Under 80 is the
 known stutter risk; over it is cheap — a silent plane costs no lip sync — so it IS the knob for a
 set still stuttering at high refresh: walk it UP against `plane_lead`. The offload route's *fill*
-still targets `PLANE_LEAD_MS`, which must match what `play_audio` targets or resuming real packets
+still targets `PLANE_LEAD_MS` plus whatever extra lead the Smoothness buffer asked for
+(`set_plane_extra_lead_ms`), which must match what `play_audio` targets or resuming real packets
 floor onto the fill's ceiling.
 
 ⚠ **The prime is what completes the load.** An audio-enabled load does not report `LOADCOMPLETED`
@@ -739,9 +740,13 @@ combination is the "stutters here, looks fine on the host's own monitor" report.
   irregular as it is. Only the transport's contribution is removed.
 - What no client-side work can fix: a stream rate that is not the panel rate or an exact divisor of
   it. 60 on 120 is fine; 50 on 60 is arithmetic.
-- **Optional extra headroom is the Smoothness preference** (`PresentPriority`): it substitutes a
-  fixed cushion of 1-3 source frame periods for the adaptive one, and needs a timestamp clock plus
-  an accepted audio plane (NDL v2) or it falls back to lowest latency with a warning.
+- **Optional extra headroom is the Smoothness preference** (`PresentPriority`): it **adds** 1-3
+  source frame periods **on top of** the adaptive cushion, and needs a timestamp clock plus an
+  accepted audio plane (NDL v2) or it falls back to lowest latency with a warning.
+  ⚠ It used to SUBSTITUTE the fixed budget for the adaptive one, which made the first step a no-op
+  wherever the adaptive figure was already at its ceiling — at 120 Hz that is any link with more
+  than ~4 ms of MAD, i.e. most of them, and it is why the setting read as doing nothing. Additive,
+  every step is worth a whole period. The knob is the only way past core's one-period cap.
 - ⚠ **The cushion's ceiling is the STREAM mode's interval, never the panel's.** The two agree on
   most panels but are different quantities: the cushion bounds how long a frame may be HELD, so it
   must follow the cadence the host produces (core's own test says so). A 120 fps stream on a 60 Hz
@@ -753,8 +758,12 @@ combination is the "stutters here, looks fine on the host's own monitor" report.
   timestamp, as NDL (start-code boundaries, no AU flag) needs.
 - **Folded at arrival**, which is where core wants it, so the estimate sees the arrival process the
   transport actually produced. `snapping()` permanently: re-tuning to `free_running()` needs VRR
-  measured live off on-glass stamps this platform does not have. `note_off_cadence` is wired by no
-  client — nothing on the wire marks a frame off-cadence.
+  measured live off on-glass stamps this platform does not have. `note_off_cadence` IS wired here, though
+  nothing on the wire marks a frame off-cadence: this client infers it from two consecutive AUs
+  carrying the same host PTS (a compositor header stamp, a driver burst), because folding a
+  zero-interval sample would teach the loop an arrival gap the source never had. It returns
+  `ready + cushion`, which is also the only answer that advances — the anchored stamp would repeat
+  the previous picture's, and NDL truncates both to one millisecond.
 - **Re-anchor triggers**: the freeze-until-reanchor hold, via `reset_timeline`. The source interval
   is snapshotted at pipeline build, so if mid-session mode changes ever become a real path here,
   that snapshot is the thing to fix.
@@ -763,6 +772,49 @@ combination is the "stutters here, looks fine on the host's own monitor" report.
   here whose violation costs a session its audio outright.
 - `late_stamps` — frames whose actual stamp was already behind the player clock, i.e. the judder,
   counted — is reported as `pacing:` on the video heartbeat and `Pace` on the overlay.
+- **A/V offset is `plane_lead − cushion`** (`av=` on the heartbeat, `av ±N ms` on the overlay),
+  differenced in the video pump, which already holds both halves. Both planes stamp on NDL's one
+  `elapsed_ns` clock, so the subtraction is legal: audio sits a fixed `PLANE_LEAD_MS` ahead of it,
+  the picture its mapped cushion ahead. Positive is sound behind picture. ⚠ Offered ONLY where real
+  audio rides the plane — on the software route the plane carries the silent metronome, which costs
+  no lip sync, and the figure would be a fiction. ⚠ Stamp domain: NDL's decode and panel transit are
+  not observable from the app and bias the picture later, so the true offset is smaller than this
+  reads. Trend and sign, never calibration. ⚠ The Smoothness buffer does NOT move it: the same budget
+  is handed to the plane (`NdlVideo::set_plane_extra_lead_ms`), so both halves shift together and
+  the figure stays at `PLANE_LEAD_MS − adaptive cushion`. Left unmatched it would have walked
+  straight through zero — Smooth 2 at 60 Hz is already 33 ms against a 40 ms plane lead — and sound
+  ahead of the picture is the more audible direction.
+- ⚠ **No diagnostic may take NDL's FFI lock.** `render_buffer_length` sits behind the same guard as
+  the picture's own `video_play`, so a figure queried for the overlay would stall the next feed on
+  the video thread. The backpressure control path already samples the depth every `BACKLOG_SAMPLE`
+  (500 ms); `backlog=` on the heartbeat and the overlay read **that** sample, never a query of their
+  own. The figure is therefore up to one interval old, and goes stale for the length of a hold
+  (sampling is suspended while holding) — `holding` is published beside it and says so. Every other
+  per-frame figure (`feed_us`, `late_submit`, `min_slack`) is gated on `timed`; the only ungated
+  clock read on the feed path is the pacing input itself.
+- ⚠ **Live counters belong on the stats overlay, not in the log.** A periodic dump of them buries
+  the events worth reading (holds, plane refusals, slow feeds), so the `pacing:`/`video:` lines sit
+  at TRACE — one step below the `TELEMETRY_LEVEL=debug` a deploy usually runs at. Everything they
+  carry is on the overlay live: `pace cushion · jitter · late · slack`, `av stamp`, `plane_lead`,
+  `backlog`. Raise to TRACE only when the screen is not in front of you.
+- **`cushion` is the only overlay figure that moves with the presentation setting.** `jitter` is the
+  measured residual and is independent of the cushion by construction; `late` is cumulative from
+  session start. Watching either to see whether Smoothness is doing anything reports nothing — that
+  is what made the setting look inert.
+- **`min_slack` is the complete-AU deadline margin** (`Pacing::note_submitted`,
+  a minimum rather than a mean, so one bad frame stays visible, taken and re-armed on the line that
+  prints it — the take IS the re-arm, so reading it anywhere else shortens the window). The loop folds an AU's FIRST
+  piece only — deliberately, since re-mapping per piece teaches it the tail arrival — so it never
+  sees when a slice-progressive picture COMPLETED. Persistently negative `min_slack` while `jitter`
+  reads healthy is the signature of a large AU finishing against a deadline its first piece set.
+  Slice-progressive fires above ~25 Mb/s (core emits an early part only past a completed FEC block,
+  ≈22 KB), and keyframes always split, so this is reachable at ordinary settings. Read it against
+  `parts=` on the video line: `parts=0` means the whole lever is inert on that mode. ⚠ Only ever
+  populated while the feed is timed (`report_decode_latency || diagnostics`), so it is a diagnostic,
+  never a steering signal — a control loop built on it would silently run open-loop.
+- ⚠ **The stamp is ceiled to whole ms in BOTH intents**, where the rounding used to live inside the
+  Smoothness branch. NDL truncates either way, so rounding down spent cushion; generalizing it is a
+  (sub-millisecond) behaviour change to Lowest latency that rode in on a Smoothness fix.
 
 **Slice-progressive feed (on, every NDL v2 session).** Without it the decoder sees byte 0 of a frame
 only once that frame's LAST datagram lands; at 200 Mbps a keyframe is many datagrams and the tail of

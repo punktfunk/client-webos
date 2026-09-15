@@ -8,7 +8,9 @@ on:
         required: true
         type: string
       release_tag:
-        description: Release tag to attach the .ipk and manifest to (empty = no release)
+        description: >-
+          Release tag to attach the .ipk and manifest to (empty = no release).
+          The `beta` tag is the rebuilt-in-place channel; anything else is a stable release.
         required: false
         default: ''
         type: string
@@ -30,6 +32,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      APP_ID: ${{ inputs.artifact }}
+      TAG: ${{ inputs.release_tag }}
+      BETA: ${{ inputs.release_tag == 'beta' }}
     steps:
       - uses: actions/download-artifact@v7
         with:
@@ -78,7 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           IPK="$(ls dist/*.ipk)"
-          APP_ID="$(basename "$IPK" | cut -d_ -f1)"
+          if [ "$BETA" = true ]; then
+            mv "$IPK" "dist/${APP_ID}_${TAG}_arm.ipk"
+            IPK="dist/${APP_ID}_${TAG}_arm.ipk"
+          fi
           webosbrew-gen-manifest \
             --pkgfile "$IPK" \
             --icon "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/packaging/icon_large.png" \
@@ -86,7 +95,6 @@ jobs:
             --root false \
             --output "dist/${APP_ID}.manifest.json"
           # gen-manifest only knows the local file name; point ipkUrl at the release asset.
-          TAG='${{ inputs.release_tag }}'
           if [ -n "$TAG" ]; then
             URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$IPK")"
             jq --arg url "$URL" '.ipkUrl = $url' "dist/${APP_ID}.manifest.json" > "$RUNNER_TEMP/m.json"
@@ -106,16 +114,35 @@ jobs:
             --strict=false
 
       - name: Upload manifest artifact
+        if: inputs.release_tag == ''
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact }}-manifest
           path: dist/*.manifest.json
 
-      - name: Attach .ipk and manifest to the release
+      # Serves as both the release body and the repo listing's description page,
+      # covering everything since the last stable release.
+      - name: Generate the beta release notes
+        if: env.BETA == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREV="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[].tagName')"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            ${PREV:+-f previous_tag_name="$PREV"} --jq .body > dist/notes.md
+
+      - name: Publish to the release
         if: inputs.release_tag != ''
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.release_tag }}
+          prerelease: ${{ env.BETA == 'true' }}
+          # Empty on stable releases, which keeps the notes they shipped with.
+          body_path: ${{ env.BETA == 'true' && 'dist/notes.md' || '' }}
           files: |
             dist/*.ipk
             dist/*.manifest.json
+            dist/notes.md

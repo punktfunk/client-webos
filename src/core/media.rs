@@ -169,6 +169,13 @@ pub trait AudioPlane: AudioSink {
     /// once that stops.
     fn run_keepalive(&self, stop: &AtomicBool, yields_to_real: bool);
 
+    /// Hold `ms` of queue depth beyond the plane's own default, so it keeps pace with a picture
+    /// the presentation cushion moved later. No-op on a plane with no lead to move.
+    ///
+    /// Must be a figure that is FIXED for the session: a plane whose stamps are clamped monotonic
+    /// cannot give depth back once it has taken it.
+    fn set_extra_lead_ms(&self, _ms: i64) {}
+
     /// Whether the session's REAL audio may ride this plane, as opposed to only a keepalive.
     ///
     /// A plane can exist without being proven: a backend may accept the request and confirm it

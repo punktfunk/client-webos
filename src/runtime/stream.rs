@@ -1351,9 +1351,10 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
     let layout = connected.audio_layout();
     let audio = if connected.audio_route.on_ndl_plane() {
         format!(
-            "{} {layout} · NDL · lead {} ms",
+            "{} {layout} · NDL · lead {} ms · av stamp {:+} ms",
             connected.audio_route.overlay_tag(),
             stats.audio_plane_lead_ms.load(Ordering::Relaxed),
+            stats.av_offset_ms.load(Ordering::Relaxed),
         )
     } else {
         format!(
@@ -1362,10 +1363,22 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
             connected.audio_buffer_ms()
         )
     };
+    // `cushion` leads: it is the only figure here that answers "is the presentation setting doing
+    // anything". Jitter is the measured residual, independent of the cushion by construction, and
+    // `late` is cumulative — neither moves when the setting does.
+    let slack = stats.pacing_min_slack_us.load(Ordering::Relaxed);
     let pacing = format!(
-        "pace jitter {:.1} ms · late {}",
+        "pace cushion {:.1} ms · jitter {:.1} ms · late {}{}",
+        stats.pacing_cushion_us.load(Ordering::Relaxed) as f32 / 1000.0,
         stats.pacing_jitter_us.load(Ordering::Relaxed) as f32 / 1000.0,
         stats.pacing_late.load(Ordering::Relaxed),
+        // Worst complete-AU margin of the last window. Negative while jitter reads healthy is a
+        // large frame finishing against the deadline its first piece set.
+        if slack == i32::MIN {
+            String::new()
+        } else {
+            format!(" · slack {:+.1} ms", slack as f32 / 1000.0)
+        },
     );
     let mut out = vec![Extra::detail(ndl), Extra::detail(audio), Extra::detail(pacing)];
     // The set's own headroom, in both vocabularies. CPU shows from the second sample on.

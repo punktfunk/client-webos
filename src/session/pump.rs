@@ -2,7 +2,7 @@
 //! packets into the audio stage. Everything wire-shaped lives here and nothing else — what a
 //! delivery MEANS is the stages' business.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +59,10 @@ struct VideoPump {
     /// Whether the host's per-content HDR metadata is worth draining. False on every session
     /// where nothing would apply it: an SDR or non-HEVC stream.
     is_hdr: bool,
+    /// Whether the REAL audio stream rides the NDL plane. False on the software route, where the
+    /// plane carries the silent metronome only: its lead is then a pacing figure that says nothing
+    /// about lip sync, so the A/V offset below would be a fiction.
+    audio_rides_plane: bool,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
     /// Frame-index gaps pre-cover the reassembler's delayed drop accounting.
@@ -69,13 +73,24 @@ struct VideoPump {
 }
 
 impl VideoPump {
-    fn new(client: Arc<NativeClient>, stage: VideoStage, stats: Arc<StreamStats>, is_hdr: bool) -> Self {
+    fn new(
+        client: Arc<NativeClient>,
+        stage: VideoStage,
+        stats: Arc<StreamStats>,
+        is_hdr: bool,
+        audio_rides_plane: bool,
+    ) -> Self {
         let last_dropped_seen = client.frames_dropped();
+        // `StreamStats` derives `Default`, and 0 is a legitimate slack reading — so the sentinel
+        // has to be written before the first heartbeat, or the overlay shows a fabricated
+        // `slack +0.0 ms` for the two seconds it takes one to arrive.
+        stats.pacing_min_slack_us.store(i32::MIN, Ordering::Relaxed);
         Self {
             client,
             stage,
             stats,
             is_hdr,
+            audio_rides_plane,
             last_dropped_seen,
             drop_credit: 0,
             drop_credit_expiry: None,
@@ -166,29 +181,42 @@ impl VideoPump {
     /// Refreshes the overlay's backlog figure, and on a slower cadence logs the pump's state.
     ///
     /// Every figure here is diagnostic, so the whole body is skipped unless one of its two readers
-    /// is actually listening: the overlay, or the DEBUG log below. The NDL render-buffer query is
-    /// the expensive one — an FFI call behind the same lock the feed takes.
+    /// is actually listening: the overlay, or the TRACE log below. Nothing here queries NDL — the
+    /// backlog is the backpressure path's last sample (`VideoStage::backlog_depth`), because that
+    /// query is an FFI call behind the same lock the feed takes.
     fn heartbeat(&mut self) {
         if !self.heartbeat.due() {
             return;
         }
         // Latched for the feed path, so the timing decision there costs a field read rather than
-        // an atomic load per AU piece. A toggle takes effect within one heartbeat. DEBUG latches
+        // an atomic load per AU piece. A toggle takes effect within one heartbeat. TRACE latches
         // it too: the log below reads the same `timed`-gated figures the overlay does
-        // (`late_submit`, the backpressure warning), which would otherwise stay zero forever.
+        // (`late_submit`, `min_slack`), which would otherwise stay zero forever.
         let overlay = self.stats.wants_diagnostics();
-        let debug = tracing::enabled!(tracing::Level::DEBUG);
-        self.stage.set_diagnostics(overlay || debug);
+        // TRACE, matching where the dump below now sits: the latch exists so that line's
+        // `timed`-gated figures are populated when something is going to print them.
+        let tracing_stats = tracing::enabled!(tracing::Level::TRACE);
+        self.stage.set_diagnostics(overlay || tracing_stats);
         // `due()` on its own line, so the tick keeps advancing on a level where nothing listens.
-        // The body stays behind a real reader: the render-buffer query below is an FFI call
-        // behind the feed's own lock, so DEBUG alone must not run it every heartbeat.
-        let log_due = self.video_log.due() && debug;
+        // The body stays behind a real reader: it takes the slack window, which re-arms it, so a
+        // heartbeat nobody reads would silently shorten the next one.
+        let log_due = self.video_log.due() && tracing_stats;
         if !overlay && !log_due {
             return;
         }
         let backlog = self.stage.backlog_depth();
         let pacing = self.stage.pacing_health();
         let plane_lead = self.stage.audio_plane_lead_ms();
+        // The take re-arms the window, so it happens exactly once per heartbeat and the figure the
+        // overlay shows is the worst frame of the last interval — which is the point of a min.
+        let min_slack_us = self.stage.take_pacing_slack_us();
+        // Differenced here rather than in the stage: both halves are already in hand, and they are
+        // one clock apart by construction — NDL stamps audio a fixed lead ahead of its load clock
+        // and the picture its mapped cushion ahead, so the gap between them is the lip sync.
+        let av_offset = self
+            .audio_rides_plane
+            .then(|| plane_lead.map(|lead| lead - pacing.cushion_ns / 1_000_000))
+            .flatten();
         self.stats
             .render_backlog
             .store(backlog.unwrap_or(-1), Ordering::Relaxed);
@@ -197,27 +225,40 @@ impl VideoPump {
             Ordering::Relaxed,
         );
         self.stats.pacing_late.store(pacing.late_stamps, Ordering::Relaxed);
-        if let Some(ms) = plane_lead {
-            self.stats
-                .audio_plane_lead_ms
-                .store(i32::try_from(ms).unwrap_or(i32::MAX), Ordering::Relaxed);
-        }
-        // `backlog` separates "the decoder is behind" from "frames are arriving late" —
-        // indistinguishable before this, since play() decodes and presents in one opaque call.
-        //
-        // DEBUG, so it costs a telemetry listener or `TELEMETRY_LEVEL=debug` to see — the
-        // on-device file sink is INFO-only (`logger::resolved_level`).
+        self.stats.pacing_cushion_us.store(
+            u32::try_from(pacing.cushion_ns.max(0) / 1_000).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
+        self.stats
+            .pacing_min_slack_us
+            .store(min_slack_us.unwrap_or(i32::MIN), Ordering::Relaxed);
+        let publish = |cell: &AtomicI32, ms: Option<i64>| {
+            if let Some(ms) = ms {
+                cell.store(i32::try_from(ms).unwrap_or(i32::MAX), Ordering::Relaxed);
+            }
+        };
+        publish(&self.stats.audio_plane_lead_ms, plane_lead);
+        publish(&self.stats.av_offset_ms, av_offset);
+        // ⚠ **These are the OVERLAY's figures, and the overlay is where they belong.** A periodic
+        // dump of live counters buries the events worth reading — the holds, the refusals, the slow
+        // feeds — so it sits at TRACE, one step below the `TELEMETRY_LEVEL=debug` a deploy usually
+        // runs at. Turn it up only when the screen is not in front of you; everything here is on
+        // the stats overlay live.
         if log_due {
             // Neither counter measures on-glass cadence; final submission includes AU tail and FFI waits.
-            tracing::debug!(
-                "pacing: late_stamp={} late_submit={} jitter={:.1}ms cushion={:.1}ms reanchors={}",
+            tracing::trace!(
+                "pacing: late_stamp={} late_submit={} jitter={:.1}ms cushion={:.1}ms reanchors={} av={} min_slack={}",
                 pacing.late_stamps,
                 pacing.late_submissions,
                 pacing.jitter_ns as f64 / 1e6,
                 pacing.cushion_ns as f64 / 1e6,
                 pacing.reanchors,
+                av_offset.map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms")),
+                // Persistently negative here, while `jitter` stays healthy, is the signature of a
+                // large AU finishing against a deadline its first piece set.
+                min_slack_us.map_or_else(|| "n/a".to_string(), |us| format!("{:.1}ms", f64::from(us) / 1000.0)),
             );
-            tracing::debug!(
+            tracing::trace!(
                 "video: {} frames, parts={}, holding={}, dropped={}, backlog={}, plane_lead={}",
                 self.frames(),
                 // Against `frames`: 0 means slice-progressive delivery never fired on this mode
@@ -250,14 +291,18 @@ impl VideoPump {
         let dropped_now = self.client.frames_dropped();
         let dropped_delta = dropped_now.saturating_sub(self.last_dropped_seen);
         self.last_dropped_seen = dropped_now;
-        let now = Instant::now();
-        if self.drop_credit_expiry.is_some_and(|expiry| now >= expiry) {
-            self.drop_credit = 0;
-            self.drop_credit_expiry = None;
-        }
-        if gap_width > 0 {
-            self.drop_credit = self.drop_credit.saturating_add(u64::from(gap_width));
-            self.drop_credit_expiry = Some(now + DROP_CREDIT_WINDOW);
+        // The clock is read only when a credit window is live or a gap just opened — both are loss
+        // events. On the ordinary path this is the branch, not a `clock_gettime` per frame.
+        if self.drop_credit_expiry.is_some() || gap_width > 0 {
+            let now = Instant::now();
+            if self.drop_credit_expiry.is_some_and(|expiry| now >= expiry) {
+                self.drop_credit = 0;
+                self.drop_credit_expiry = None;
+            }
+            if gap_width > 0 {
+                self.drop_credit = self.drop_credit.saturating_add(u64::from(gap_width));
+                self.drop_credit_expiry = Some(now + DROP_CREDIT_WINDOW);
+            }
         }
         let credited = dropped_delta.min(self.drop_credit);
         self.drop_credit -= credited;
@@ -313,8 +358,9 @@ pub(super) fn video_pump(
     stop: Arc<AtomicBool>,
     stats: Arc<StreamStats>,
     is_hdr: bool,
+    audio_rides_plane: bool,
 ) {
-    VideoPump::new(client, stage, stats, is_hdr).run(&stop);
+    VideoPump::new(client, stage, stats, is_hdr, audio_rides_plane).run(&stop);
 }
 
 /// How long an audio drain parks on an empty plane before re-checking `stop`.

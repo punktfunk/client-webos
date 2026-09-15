@@ -94,12 +94,19 @@ const PRIME_LEAD: i64 = 8;
 /// **The SDL path does the same thing, in its own currency** — `platform::webos::audio` primes and
 /// holds a 25 ms ring ahead of the speaker for exactly this reason: a renderer needs data queued
 /// ahead of it. NDL takes no depth argument, so the only way to ask it for one is a stamp in the
-/// future, which is this. Note what neither path does: correct the resulting lip sync. The A/V
-/// offset is measured and published, never steered on.
+/// future, which is this. Note what neither path does: correct the resulting lip sync.
 ///
-/// The cost is lip sync: sound lands this far behind the picture. The PTS trim already moved the
-/// picture ~36 ms earlier, so it roughly cancels — walk the value down on device against
-/// `plane_lead` in the video heartbeat, which is the only place the depth is observable.
+/// ⚠ **The cost is lip sync.** Sound lands this far behind the player clock while the picture lands
+/// at its mapped cushion (`session::timeline::Pacing`), so the stamp-domain offset is
+/// `PLANE_LEAD_MS − cushion` — worst under Lowest latency, which holds the shallowest cushion. An
+/// earlier comment here claimed a ~36 ms PTS trim roughly cancelled it; that trim went with the
+/// fixed-anchor mapping (docs/NOTES.md § "Cadence pacing").
+///
+/// The **Smoothness buffer is sync-neutral**, because [`NdlVideo::set_plane_extra_lead_ms`] moves this
+/// plane by the same budget it gave the picture. Without that the deeper settings walk the sound
+/// ahead of the picture — at 60 Hz the two-frame default already crosses over, at 30 Hz even one
+/// frame does — and ahead is the more audible direction. `av stamp` on the overlay is where the
+/// residual shows; `plane_lead` is the audio half alone.
 const PLANE_LEAD_MS: i64 = PRIME_LEAD * PRIME_PACKET_MS;
 
 /// Standing depth the silent metronome holds (software route). Preserved measurement from 4K120
@@ -179,6 +186,9 @@ pub struct NdlVideo {
     /// ([`PLANE_LEAD_MS`], or [`METRONOME_LEAD_MS`] where the metronome is the only feed), so the
     /// ceiling can only ever be that one lead ahead of real time and cannot ratchet away from it.
     last_audio_pts_ms: AtomicI64,
+    /// Extra depth the REAL stream's stamps carry on top of [`PLANE_LEAD_MS`], so the plane keeps
+    /// pace with a picture the Smoothness buffer moved later — see [`Self::set_plane_extra_lead_ms`].
+    extra_lead_ms: AtomicI64,
     /// Player-clock ms at the last REAL packet fed by [`Self::play_audio`].
     /// [`Self::run_clock_plane`] reads it to stay off the plane while the real stream carries it.
     ///
@@ -333,6 +343,7 @@ impl NdlVideo {
             load_instant,
             audio: audio.is_some(),
             last_audio_pts_ms: AtomicI64::new(primed_pts_ms),
+            extra_lead_ms: AtomicI64::new(0),
             last_real_feed_ms: AtomicI64::new(load_instant.elapsed().as_millis() as i64),
             feed_unblocked: AtomicBool::new(confirmed),
             plane_check_ms: AtomicI64::new(i64::MAX),
@@ -462,7 +473,7 @@ impl NdlVideo {
             return Ok(());
         }
         let now_ms = (self.elapsed_ns() / 1_000_000) as i64;
-        let target_ms = now_ms + PLANE_LEAD_MS;
+        let target_ms = now_ms + PLANE_LEAD_MS + self.extra_lead_ms();
         {
             let _ffi = lock_ffi();
             // Floor only: `target_ms` is already ahead of anything the clock plane can have fed,
@@ -529,13 +540,14 @@ impl NdlVideo {
             tracing::info!("NDL clock plane: the load has no audio plane — nothing to pace against");
             return;
         }
-        // A fill on the offload route must target exactly what [`Self::play_audio`] targets, or
-        // the real packets that resume are floored onto the fill's higher ceiling and pinned to
-        // one stamp for the length of it. The metronome is the only feed on its route and answers
-        // to nothing else, so it holds the deeper [`METRONOME_LEAD_MS`] cushion. Neither carries a
-        // base of its own — see the `load_instant` field for why one is no longer needed.
+        // A fill on the offload route must target exactly what [`Self::play_audio`] targets, extra
+        // lead included, or the real packets that resume are floored onto the fill's ceiling and
+        // pinned to one stamp for the length of it. The metronome is the only feed on its route and
+        // answers to nothing else, so it holds the deeper [`METRONOME_LEAD_MS`] cushion untouched:
+        // its silence costs no lip sync, so [`METRONOME_LEAD_MS`] stays the measured figure it is.
+        // Neither carries a base of its own — see the `load_instant` field for why.
         let lead_ms = if yields_to_real {
-            PLANE_LEAD_MS
+            PLANE_LEAD_MS + self.extra_lead_ms()
         } else {
             METRONOME_LEAD_MS
         };
@@ -584,15 +596,40 @@ impl NdlVideo {
         );
     }
 
+    fn extra_lead_ms(&self) -> i64 {
+        self.extra_lead_ms.load(Ordering::Relaxed)
+    }
+
+    /// Hold `ms` of depth beyond [`PLANE_LEAD_MS`], matching the lead the Smoothness buffer gave
+    /// the picture.
+    ///
+    /// **Lip sync is the whole point.** Both planes stamp on one clock, so the offset between them
+    /// is `audio_lead − video_lead`. Left alone, a deeper picture cushion walks the sound ahead of
+    /// the picture — at 60 Hz the two-frame default already crosses over, and sound ahead is the
+    /// more audible direction. Moving the plane by the same figure holds the offset wherever it was.
+    ///
+    /// ⚠ **Static, and set once before the plane threads start.** Only the Smoothness budget may
+    /// be passed here — it is fixed for the session. Tracking the ADAPTIVE cushion instead would
+    /// make the lead follow a moving target, and [`Self::last_audio_pts_ms`] is a floor: every rise
+    /// is kept and no fall can ever be paid back. That ratchet is what took a CX session silent
+    /// (see the note on [`Self::play_audio`]).
+    /// Named apart from the trait method that forwards to it: `Self::set_extra_lead_ms` inside
+    /// `impl AudioPlane` would resolve to this only by inherent-first precedence, and losing that
+    /// silently turns the forward into unbounded recursion.
+    pub fn set_plane_extra_lead_ms(&self, ms: i64) {
+        self.extra_lead_ms.store(ms.max(0), Ordering::Relaxed);
+    }
+
     /// How far the audio plane's stamps currently run ahead of the player clock, in ms — the queue
     /// depth NDL paces the picture on, and the only observable proxy for it. Reads the ceiling, so
     /// it reports whichever feed last raised it. Sagging towards zero under real audio is the
     /// stutter signature.
     ///
     /// ⚠ **Which target it should read depends on the route**: [`METRONOME_LEAD_MS`] (80) on the
-    /// software route, where the silent metronome is the only feed, and [`PLANE_LEAD_MS`] (40) on
-    /// offload, where the real stream owns the plane. A software session reading 40 is as wrong as
-    /// an offloaded one reading 80.
+    /// software route, where the silent metronome is the only feed, and `PLANE_LEAD_MS` plus
+    /// whatever [`Self::set_plane_extra_lead_ms`] holds (40 under Lowest latency) on offload, where
+    /// the real stream owns the plane. A software session reading 40 is as wrong as an offloaded
+    /// one reading 80.
     pub fn audio_plane_lead_ms(&self) -> i64 {
         self.last_audio_pts_ms.load(Ordering::Relaxed) - (self.elapsed_ns() / 1_000_000) as i64
     }
@@ -839,6 +876,10 @@ impl AudioPlane for NdlVideo {
 
     fn run_keepalive(&self, stop: &std::sync::atomic::AtomicBool, yields_to_real: bool) {
         self.run_clock_plane(stop, yields_to_real);
+    }
+
+    fn set_extra_lead_ms(&self, ms: i64) {
+        self.set_plane_extra_lead_ms(ms);
     }
 
     fn accepts_stream(&self) -> bool {

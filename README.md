@@ -82,8 +82,9 @@ This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardwar
    `https://raw.githubusercontent.com/punktfunk/client-webos/main/repo.json`
 3. punktfunk now appears in the Homebrew Channel app list.
 
-Only published [GitHub Releases](https://github.com/punktfunk/client-webos/releases) appear this way —
-dev/CI builds don't.
+That repository serves a build of every commit on `main`. Tagged
+[releases](https://github.com/punktfunk/client-webos/releases) reach the TV through the central
+webosbrew repository instead.
 
 **Directly onto a TV** (Developer Mode required): `task deploy TV_HOST=root@<tv-ip>`.
 
