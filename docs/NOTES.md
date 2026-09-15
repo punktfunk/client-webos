@@ -123,6 +123,13 @@ clears transparent so NDL's plane shows through.
 - **Name a hold only once it outlasts a blip** (`HOLD_TOAST_AFTER`, 300 ms, once per hold). An RFI
   recovery lifts one inside a round trip and the startup capacity probe's own loss clears at the
   burst's end, so a rising-edge toast fired at the start of every Wi-Fi session.
+- **Multi-slice is opt-in** (`webos.multi_slice`, Settings ▸ Display ▸ TV). Without
+  `VIDEO_CAP_MULTI_SLICE` the host pins `max_slices = 1` for every client on purpose ("single-slice
+  frames for TV-SoC decoders"), which also keeps `USER_FLAG_SLICE_STREAM` from ever engaging. With
+  it the host can emit a picture's slices as they are encoded, which compounds with the
+  slice-progressive delivery already on every v2 session. Off by default because the risk is a
+  wedged hardware decoder rather than a slow one; broadcast HEVC/H.264 is multi-slice, so the
+  caution is generic and not known to apply to LG. **Unmeasured — the toggle exists to measure it.**
 - HDR mastering metadata can change mid-session — drain `next_hdr_meta` every frame.
 - **`NDL_DirectVideoSetHDRInfo` forces the panel into HDR mode on *any* call** (OLED65CX, webOS 5):
   it ignores an SDR `transfer`/`primaries` triplet and emits an HDR infoframe regardless, so an

@@ -120,6 +120,14 @@ pub struct ConnectParams {
     /// `CLIENT_CAP_PAD_AUDIO`. The per-pad declaration rides the arrival, not the handshake.
     pub pad_audio_caps: u8,
     pub audio_route: crate::services::store::AudioRoutePref,
+    /// Let the host cut a picture into several slices (`webos.multi_slice`, Experimental).
+    ///
+    /// Without the cap the host pins `max_slices = 1` for every client, deliberately — "single-slice
+    /// frames for TV-SoC decoders". A sliced picture is what lets the host emit and this client feed
+    /// the front of a frame while its tail is still being encoded, so it compounds with the
+    /// slice-progressive delivery already on. Off by default until a set is measured, because the
+    /// failure mode it guards against is a wedged hardware decoder, not a slow one.
+    pub multi_slice: bool,
     pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
     pub display_hdr: quic::HdrMeta,
@@ -196,6 +204,11 @@ impl Negotiated {
             video_caps: quic::VIDEO_CAP_CHACHA20
                 | if hdr {
                     quic::VIDEO_CAP_10BIT | quic::VIDEO_CAP_HDR
+                } else {
+                    0
+                }
+                | if params.multi_slice {
+                    quic::VIDEO_CAP_MULTI_SLICE
                 } else {
                     0
                 },

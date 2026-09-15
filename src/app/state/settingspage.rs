@@ -91,6 +91,9 @@ pub(crate) enum Row {
     NewProfile,
     /// `webos.game_mode`, rooted TVs only.
     GameMode,
+    /// `webos.multi_slice` — let the host slice a picture. Experimental: the risk it carries is a
+    /// wedged decoder on some `SoC`, so it stays opt-in until sets are measured.
+    MultiSlice,
     /// The three-step calibration screen.
     CalibrateHdr,
     /// One detected controller, or the "none" placeholder.
@@ -153,6 +156,7 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             push(Row::Kit(K::SmoothBuffer), None);
             if !profile {
                 push(Row::GameMode, Some("TV"));
+                push(Row::MultiSlice, None);
             }
         }
         Page::Input => {
@@ -479,6 +483,8 @@ impl App {
                                 None => spec.locked("Checking whether this TV is rooted…"),
                             }
                         }
+                        Row::MultiSlice => RowSpec::toggle("Sliced frames", core.multi_slice())
+                            .with_note("Sends each picture in pieces, lowering delay. Some TVs cannot decode them"),
                         // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
                         Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
                         Row::Pad => match self.detected_gamepad_type {
@@ -625,6 +631,12 @@ impl App {
         match row {
             Row::Kit(_) | Row::Editing | Row::LogLevel => self.step_row(row, 1, true),
             Row::GameMode => self.toggle_game_mode_row(),
+            Row::MultiSlice => {
+                // Takes effect on the next connect: the cap is a handshake field.
+                let on = !self.settings_ui.settings.multi_slice();
+                self.settings_ui.settings.set_multi_slice(on);
+                self.persist();
+            }
             Row::CalibrateHdr => {
                 if self.settings_ui.settings.hdr_enabled && crate::core::caps::video_caps().hdr {
                     self.open_hdr_calibration();

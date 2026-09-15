@@ -97,6 +97,8 @@ pub trait TvSettings {
     fn set_show_logs(&mut self, on: bool);
     fn game_mode(&self) -> bool;
     fn set_game_mode(&mut self, on: bool);
+    fn multi_slice(&self) -> bool;
+    fn set_multi_slice(&mut self, on: bool);
     fn audio_route(&self) -> AudioRoutePref;
     fn set_audio_route(&mut self, route: AudioRoutePref);
     fn cursor_gestures(&self) -> bool;
@@ -196,6 +198,14 @@ impl TvSettings for Settings {
 
     fn set_game_mode(&mut self, on: bool) {
         put(self, key("game_mode"), &on);
+    }
+
+    fn multi_slice(&self) -> bool {
+        get(self, &key("multi_slice")).unwrap_or(false)
+    }
+
+    fn set_multi_slice(&mut self, on: bool) {
+        put(self, key("multi_slice"), &on);
     }
 
     fn audio_route(&self) -> AudioRoutePref {
