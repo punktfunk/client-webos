@@ -762,6 +762,12 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     let mut frames = [[0i8; 2]; COIL_REPORT_FRAMES];
     let mut coil_sends: u32 = 0;
     loop {
+        // The set has told us it has no HID write path for this address. Nothing this loop can
+        // build will land, so stop writing rather than spend the bus on reports that all fail.
+        if bus.is_some() && ls2::REPLIES.device_unavailable() {
+            tracing::info!("DualSense feedback: set has no HID write path for the pad; lane off");
+            break;
+        }
         let now = Instant::now();
         let send_deadline = pending.deadline(now);
         if closing {
