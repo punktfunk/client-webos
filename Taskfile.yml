@@ -29,7 +29,7 @@ vars:
   APP_ID: io.unom.punktfunk.client-webos
   TV_DEVICE: webos-tv
   SSH_KEY: '{{.SSH_KEY | default "$HOME/.ssh/id_rsa"}}'
-  RELEASE_LTO: '{{.RELEASE_LTO | default "thin"}}'
+  RELEASE_LTO: '{{.RELEASE_LTO | default "fat"}}'
   NDK_DIR: .toolchains/arm-webos-linux-gnueabi_sdk-buildroot
   SYSROOT: '{{.NDK_DIR}}/arm-webos-linux-gnueabi/sysroot'
   TARGET: armv7-unknown-linux-gnueabi
@@ -51,7 +51,7 @@ tasks:
   build:
     desc: >-
       Cross-compile release binary on host (Linux aarch64 with Rust only; CI uses this,
-      `docker:build` for local dev). Thin LTO; override with RELEASE_LTO=fat for optimized.
+      `docker:build` for local dev). Fat LTO; RELEASE_LTO=thin builds faster.
     deps: [toolchain:all]
     env:
       # Bakes package version into binary (core::VERSION) so UI build marker matches .ipk.
@@ -89,7 +89,7 @@ tasks:
 
   package:
     desc: >-
-      Build and package dist/*.ipk (CI only). Thin LTO; RELEASE_LTO=fat for optimized.
+      Build and package dist/*.ipk (CI only). Fat LTO; RELEASE_LTO=thin builds faster.
       PROBES=1 ships pfprobe for on-device SSH diagnostics.
     deps: [build, toolchain:ares-package]
     cmds:
@@ -104,7 +104,7 @@ tasks:
       - cargo fmt
 
   docker:build:
-    desc: Cross-compile release binary in Docker (local dev entry point). Thin LTO; RELEASE_LTO=fat for optimized.
+    desc: Cross-compile release binary in Docker (local dev entry point). Fat LTO; RELEASE_LTO=thin builds faster.
     cmds:
       - task: toolchain:docker-run
         vars:
@@ -132,7 +132,7 @@ tasks:
         vars: {TARGET_TASK: lint}
 
   docker:package:
-    desc: Build and package dist/*.ipk in Docker (local dev entry point). Thin LTO; RELEASE_LTO=fat for optimized.
+    desc: Build and package dist/*.ipk in Docker (local dev entry point). Fat LTO; RELEASE_LTO=thin builds faster.
     cmds:
       - task: toolchain:docker-run
         vars:

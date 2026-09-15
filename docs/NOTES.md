@@ -10,6 +10,12 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 - **glibc shims required** (`src/platform/webos/glibc_compat_shim.c`): webOS glibc ~2.12 predates `getauxval`/`gettid`/`sendmmsg`. Linked via `cargo:rustc-link-arg`, **must land AFTER libstd** (single-pass linker drops `link-lib=static` too early).
 - **SDL2 must be webosbrew fork** (release-2.30.12-webos.5, not generic SDL2). Only fork has Wayland shell-integration (`QT_WAYLAND_SHELL_INTEGRATION=webos`). On-device system copy is 2.0.10 (too old). Bundle own libSDL2 with `$ORIGIN/../lib` RPATH (set in `build.rs`).
 - **cmake/opus**: `punktfunk-core`'s `quic` feature needs CMAKE_POLICY_VERSION_MINIMUM=3.5 (modern CMake refuses vendored libopus's old minimum).
+- **Release builds are fat LTO, one codegen unit** (`Taskfile.yml`/`taskfiles/toolchain.yml`
+  `RELEASE_LTO`). `Cargo.toml`'s profile has said so all along, but the task default was `thin` with
+  16 units, which is what every `docker:build`, `docker:package`, `deploy` and CI package actually
+  shipped — so the cross-crate inlining the hot loops were written for (AEAD decrypt, FEC, QUIC
+  parsing, all in `punktfunk-core`'s dependencies) was never in the binary on the one target whose
+  CPU cannot absorb the difference. `RELEASE_LTO=thin` is still there for a faster local cycle.
 - **libstdc++ is linked statically, never bundled.** A bundled `lib/libstdc++.so.6` is found
   through the binary's `DT_RPATH`, which outranks the jail's `LD_LIBRARY_PATH`, so every library
   the process loads gets the SDK's copy — including the TV's own. webOS 11's
