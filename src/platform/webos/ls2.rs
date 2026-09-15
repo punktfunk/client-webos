@@ -14,7 +14,7 @@
 //! is created, used and dropped on one thread ([`Bus`] is `!Send` by construction). Calls are
 //! asynchronous; [`Bus::pump`] dispatches the replies that have arrived.
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Result};
@@ -107,6 +107,8 @@ impl Call {
 pub struct Replies {
     pub ok: AtomicU32,
     pub failed: AtomicU32,
+    /// Latched by the first "device not available" refusal: see [`on_reply`].
+    unavailable: AtomicBool,
     /// The first failing reply since the counters were last read, for one log line per run.
     first_failure: Mutex<Option<String>>,
 }
@@ -114,10 +116,17 @@ pub struct Replies {
 pub static REPLIES: Replies = Replies {
     ok: AtomicU32::new(0),
     failed: AtomicU32::new(0),
+    unavailable: AtomicBool::new(false),
     first_failure: Mutex::new(None),
 };
 
 impl Replies {
+    /// Whether the hub has answered "device not available" (`106`) for this address. Latched:
+    /// it means the set has no HID write path at all, so every later report would fail too.
+    pub fn device_unavailable(&self) -> bool {
+        self.unavailable.load(Ordering::Relaxed)
+    }
+
     /// Takes the first failure text recorded since the last take, if any.
     pub fn take_failure(&self) -> Option<String> {
         self.first_failure
@@ -133,20 +142,26 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
     // SAFETY: `reply` is the live message the hub delivered for this callback.
     let payload = unsafe { (f.message_payload)(reply) };
     let text = if payload.is_null() {
-        String::from("(no payload)")
+        std::borrow::Cow::Borrowed("(no payload)")
     } else {
         // SAFETY: LS2 payloads are NUL-terminated JSON owned by the message for the callback.
-        unsafe { CStr::from_ptr(payload) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(payload) }.to_string_lossy()
     };
     if text.contains("\"returnValue\":true") {
         REPLIES.ok.fetch_add(1, Ordering::Relaxed);
     } else {
         REPLIES.failed.fetch_add(1, Ordering::Relaxed);
+        // A set with no HID write path answers every single report with `106` ("Device with
+        // supplied address is not available"). Latch it: the sender loop reads this and stops
+        // sending, and the refusals after the first one are noise nobody can act on.
+        if text.contains("\"errorCode\":106") && REPLIES.unavailable.swap(true, Ordering::Relaxed) {
+            return true;
+        }
         let mut first = REPLIES
             .first_failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        first.get_or_insert(format!("{} refused: {text}", Call::name(ctx as usize)));
+        first.get_or_insert_with(|| format!("{} refused: {text}", Call::name(ctx as usize)));
     }
     true
 }
