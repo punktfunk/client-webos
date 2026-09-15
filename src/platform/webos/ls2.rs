@@ -14,7 +14,7 @@
 //! is created, used and dropped on one thread ([`Bus`] is `!Send` by construction). Calls are
 //! asynchronous; [`Bus::pump`] dispatches the replies that have arrived.
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Result};
@@ -107,6 +107,8 @@ impl Call {
 pub struct Replies {
     pub ok: AtomicU32,
     pub failed: AtomicU32,
+    /// Latched by the first "device not available" refusal: see [`on_reply`].
+    unavailable: AtomicBool,
     /// The first failing reply since the counters were last read, for one log line per run.
     first_failure: Mutex<Option<String>>,
 }
@@ -114,6 +116,7 @@ pub struct Replies {
 pub static REPLIES: Replies = Replies {
     ok: AtomicU32::new(0),
     failed: AtomicU32::new(0),
+    unavailable: AtomicBool::new(false),
     first_failure: Mutex::new(None),
 };
 
@@ -142,6 +145,12 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
         REPLIES.ok.fetch_add(1, Ordering::Relaxed);
     } else {
         REPLIES.failed.fetch_add(1, Ordering::Relaxed);
+        // A set with no HID write path for a lane answers every single report with `106`
+        // ("Device with supplied address is not available"). One line explains the missing
+        // feedback; 94 a second explains nothing, so latch it and drop the rest on the floor.
+        if text.contains("\"errorCode\":106") && REPLIES.unavailable.swap(true, Ordering::Relaxed) {
+            return true;
+        }
         let mut first = REPLIES
             .first_failure
             .lock()
