@@ -56,13 +56,25 @@ impl MediaPipeline {
         let plane = player.audio_plane();
         let proven = plane.as_ref().is_some_and(|p| p.accepts_stream());
         let route = resolve_route(params.audio_route, proven);
+        // Before any plane thread starts, so no stamp is ever issued against a lead that then
+        // moves. Only where the REAL stream rides the plane: the metronome's silence has no sync to
+        // hold, and its depth is a measured figure that must not be disturbed. The software route's
+        // own lip sync still moves with the setting — its audio is SDL's ring, which this cannot
+        // reach — so there the buffer buys smoothness at the cost of sound landing that much early.
+        let extra_lead_ms = super::timeline::smooth_cushion_ms(client.mode().refresh_hz, params.present_priority);
+        if route.on_ndl_plane() && extra_lead_ms > 0 {
+            if let Some(p) = plane.as_ref() {
+                tracing::info!("audio plane holds {extra_lead_ms}ms extra to match the smoothness buffer");
+                p.set_extra_lead_ms(extra_lead_ms);
+            }
+        }
         tracing::info!(
             "audio path: {} on {} (host resolved {} channel(s))",
             audio_path_label(params.audio_route, route, plane.is_some(), proven),
             player.name(),
             client.audio_channels,
         );
-        let video_thread = spawn_video_thread(client, player, stop, stats, is_hdr, params.present_priority)?;
+        let video_thread = spawn_video_thread(client, player, stop, stats, is_hdr, params.present_priority, route)?;
         // Failing here after the video thread is already up would otherwise detach it.
         let (audio_thread, clock_thread) = match spawn_plane_threads(client, plane, stop, route) {
             Ok(handles) => handles,
@@ -221,12 +233,14 @@ fn spawn_video_thread(
     stats: &Arc<StreamStats>,
     is_hdr: bool,
     present_priority: pf_client_core::trust::PresentPriority,
+    route: AudioRoutePref,
 ) -> Result<std::thread::JoinHandle<()>> {
     let cfg = SinkConfig {
         stream_hz: client.mode().refresh_hz,
         report_decode_latency: client.wants_decode_latency(),
         present_priority,
     };
+    let audio_rides_plane = route.on_ndl_plane();
     let (client, stop, stats) = (client.clone(), stop.clone(), stats.clone());
     std::thread::Builder::new()
         .name("punktfunk-webos-video".into())
@@ -234,7 +248,7 @@ fn spawn_video_thread(
             // Built here, not on the caller's thread: the sink queries the panel refresh
             // rate through SDL on construction, and that stayed on the video thread before.
             let stage = VideoStage::new(player, stats.clone(), cfg);
-            video_pump(client, stage, stop, stats, is_hdr);
+            video_pump(client, stage, stop, stats, is_hdr, audio_rides_plane);
         })
         .context("spawn video thread")
 }
