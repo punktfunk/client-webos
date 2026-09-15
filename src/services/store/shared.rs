@@ -17,7 +17,7 @@
 
 use pf_client_core::trust;
 
-use pf_client_core::profiles;
+use pf_client_core::presets;
 
 use crate::core::model::{Persisted, DESKTOP_PIN_ID};
 use crate::core::settings::TvSettings;
@@ -201,8 +201,9 @@ mod tests {
 
 /// The settings one launch runs with: the global document with the resolved profile applied
 /// — one-off ?? per-title ?? host default, the shared resolver's own precedence — then the
-/// Desktop card's standing rule that pointer capture is off there (unless the profile sets
-/// the mouse mode), then this set's caps. The single merge point both menu loops call.
+/// Desktop card's standing rule that pointer capture is off there (unless a profile is bound to
+/// that card, or the resolved one pins the mouse mode), then this set's caps. The single merge
+/// point both menu loops call.
 pub fn launch_settings(
     state: &Persisted,
     addr: &str,
@@ -213,17 +214,22 @@ pub fn launch_settings(
     let id = launch.unwrap_or(DESKTOP_PIN_ID);
     let host = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
     let per_title = host.and_then(|h| h.game_profile(id));
-    let bound = host.and_then(|h| h.profile_id.as_deref());
-    let catalog = profiles::ProfilesFile {
-        version: profiles::PROFILES_VERSION,
-        profiles: state.profiles.clone(),
+    let bound = host.and_then(|h| h.preset_id.as_deref());
+    let catalog = presets::PresetsFile {
+        version: presets::PRESETS_VERSION,
+        presets: state.profiles.clone(),
     };
-    let profile = trust::resolve_profile(&catalog, bound, per_title, one_off);
+    let profile = trust::resolve_preset(&catalog, bound, per_title, one_off);
     let global = &state.settings;
     let mut settings = profile
         .as_ref()
         .map_or_else(|| global.clone(), |p| p.overrides.apply(global));
-    if id == DESKTOP_PIN_ID && profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none()) {
+    // Desktop defaults to absolute pointer. Two overrides: profile bound to this card (wins
+    // wholesale, inherited mouse mode included), or resolved profile pinning mouse mode.
+    // Pin presence is read; LOAD_BEARING_PIN must exempt this field.
+    let bound_to_card = per_title.is_some_and(|id| state.profiles.iter().any(|p| p.id == id));
+    let inherits_pointer = profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none());
+    if id == DESKTOP_PIN_ID && !bound_to_card && inherits_pointer {
         settings.set_cursor_capture(false);
     }
     settings.clamp_to_caps();
@@ -244,10 +250,10 @@ pub fn bind_host_profile(state: &mut Persisted, key: &str, profile_id: Option<St
         return false;
     };
     let host = &mut state.known_hosts[i];
-    if host.profile_id == profile_id {
+    if host.preset_id == profile_id {
         return false;
     }
-    host.profile_id = profile_id;
+    host.preset_id = profile_id;
     true
 }
 
@@ -258,7 +264,7 @@ pub fn set_pin(state: &mut Persisted, key: &str, profile_id: String, pin: bool) 
         tracing::warn!(%key, "pin toggle for an unknown host");
         return false;
     };
-    let pins = &mut state.known_hosts[i].pinned_profiles;
+    let pins = &mut state.known_hosts[i].pinned_presets;
     let had = pins.contains(&profile_id);
     if pin && !had {
         pins.push(profile_id);
@@ -273,17 +279,22 @@ pub fn set_pin(state: &mut Persisted, key: &str, profile_id: String, pin: bool) 
 #[cfg(test)]
 mod launch_tests {
     use super::*;
-    use pf_client_core::profiles::StreamProfile;
+    use pf_client_core::presets::StreamPreset;
 
-    fn state_with(profile: StreamProfile, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
-        let mut host = crate::core::model::KnownHost {
+    /// The one host every test in here uses, at the address they all assert against.
+    fn host_record() -> crate::core::model::KnownHost {
+        crate::core::model::KnownHost {
             shared: trust::KnownHost {
                 addr: "10.0.0.2".into(),
                 port: 47989,
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+    }
+
+    fn state_with(profile: StreamPreset, bind: impl FnOnce(&mut crate::core::model::KnownHost)) -> Persisted {
+        let mut host = host_record();
         bind(&mut host);
         let mut state = Persisted::default();
         state.known_hosts.push(host);
@@ -295,19 +306,19 @@ mod launch_tests {
     /// (`host\0profile`) addresses the host; the default bind refuses an unknown profile.
     #[test]
     fn pins_and_host_bindings_write_the_record_once() {
-        let profile = StreamProfile::new("Work");
+        let profile = StreamPreset::new("Work");
         let pid = profile.id.clone();
         let mut state = state_with(profile, |_| {});
         let key = known_host_key(&state.known_hosts[0]);
         assert!(set_pin(&mut state, &key, pid.clone(), true));
         assert!(!set_pin(&mut state, &key, pid.clone(), true), "a repeat is a no-op");
-        assert_eq!(state.known_hosts[0].pinned_profiles, vec![pid.clone()]);
+        assert_eq!(state.known_hosts[0].pinned_presets, vec![pid.clone()]);
         let card_key = format!("{key}\0{pid}");
         assert!(set_pin(&mut state, &card_key, pid.clone(), false));
-        assert!(state.known_hosts[0].pinned_profiles.is_empty());
+        assert!(state.known_hosts[0].pinned_presets.is_empty());
         assert!(!bind_host_profile(&mut state, &key, Some("nothing".into())));
         assert!(bind_host_profile(&mut state, &key, Some(pid.clone())));
-        assert_eq!(state.known_hosts[0].profile_id.as_deref(), Some(pid.as_str()));
+        assert_eq!(state.known_hosts[0].preset_id.as_deref(), Some(pid.as_str()));
         assert!(bind_host_profile(&mut state, &key, None));
         assert!(!set_pin(&mut state, "10.9.9.9:1", pid, true), "unknown host");
     }
@@ -316,17 +327,17 @@ mod launch_tests {
     /// desktop card streams with capture off unless the profile pins the mouse mode.
     #[test]
     fn launch_follows_the_shared_precedence_and_the_desktop_rule() {
-        let mut title_profile = StreamProfile::new("Doom");
+        let mut title_profile = StreamPreset::new("Doom");
         title_profile.overrides.bitrate_kbps = Some(12_000);
         let tid = title_profile.id.clone();
-        let mut host_profile = StreamProfile::new("Work");
+        let mut host_profile = StreamPreset::new("Work");
         host_profile.overrides.bitrate_kbps = Some(34_000);
         let hid = host_profile.id.clone();
         let mut state = state_with(title_profile, |h| {
-            h.bind_game_profile("doom", Some(&tid));
+            h.bind_game_preset("doom", Some(&tid));
         });
         state.profiles.push(host_profile);
-        state.known_hosts[0].profile_id = Some(hid);
+        state.known_hosts[0].preset_id = Some(hid);
         state.settings.set_cursor_capture(true);
 
         let doom = launch_settings(&state, "10.0.0.2", 47989, Some("doom"), None);
@@ -337,7 +348,7 @@ mod launch_tests {
         assert!(!desktop.cursor_capture(), "the desktop card streams with capture off");
         assert!(other.cursor_capture(), "a game keeps the global capture");
 
-        state.known_hosts[0].bind_game_profile("doom", Some("gone"));
+        state.known_hosts[0].bind_game_preset("doom", Some("gone"));
         let dangling = launch_settings(&state, "10.0.0.2", 47989, Some("doom"), None);
         assert_eq!(
             dangling.bitrate_kbps, 34_000,

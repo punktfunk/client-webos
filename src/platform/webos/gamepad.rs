@@ -5,7 +5,7 @@ use sdl2::controller::{Axis, Button};
 
 /// SDL2's `Button` enum (exhaustively matched — all 20 current variants) → punktfunk's
 /// `BTN_*` wire bit.
-fn button_bit(button: Button) -> u32 {
+pub fn button_bit(button: Button) -> u32 {
     match button {
         Button::A => gamepad::BTN_A,
         Button::B => gamepad::BTN_B,
@@ -145,10 +145,15 @@ fn axis_id(axis: Axis) -> u32 {
 /// `pad` is the wire pad index (`flags`) — 0 for the single-controller case this phase
 /// targets (multi-pad indexing is a follow-up once one controller round-trips cleanly).
 pub fn button_event(button: Button, pressed: bool, pad: u8) -> InputEvent {
+    bit_event(button_bit(button), pressed, pad)
+}
+
+/// One `BTN_*` wire bit's edge on pad `pad`.
+pub fn bit_event(bit: u32, pressed: bool, pad: u8) -> InputEvent {
     InputEvent {
         kind: InputKind::GamepadButton,
         _pad: [0; 3],
-        code: button_bit(button),
+        code: bit,
         x: if pressed { 1 } else { 0 },
         y: 0,
         flags: u32::from(pad),

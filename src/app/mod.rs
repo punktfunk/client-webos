@@ -125,7 +125,7 @@ pub struct App {
     /// The settings-profile catalog ([`store::Persisted::profiles`]). Held rather than re-read
     /// because [`App::persist`] rebuilds the whole document from these fields, so anything not
     /// here is dropped on the next save.
-    pub(crate) profiles: Vec<pf_client_core::profiles::StreamProfile>,
+    pub(crate) profiles: Vec<pf_client_core::presets::StreamPreset>,
     /// Last tick time (for real-time scroll easing, not frame-count based).
     last_tick: Option<Instant>,
     /// The console kit's Geist, for the screens drawn on it (`app::draw`). Owned here
@@ -153,12 +153,12 @@ pub(crate) struct PairingOutcome {
 /// under it (a pin whose profile has left the catalog is skipped, not shown broken).
 fn known_entries(
     known_hosts: &[store::KnownHost],
-    profiles: &[pf_client_core::profiles::StreamProfile],
+    profiles: &[pf_client_core::presets::StreamPreset],
 ) -> Vec<HostEntry> {
     let mut entries = Vec::with_capacity(known_hosts.len());
     for h in known_hosts {
         entries.push(HostEntry::Known(h.clone()));
-        for id in &h.pinned_profiles {
+        for id in &h.pinned_presets {
             if let Some(p) = profiles.iter().find(|p| p.id == *id) {
                 entries.push(HostEntry::Pinned {
                     host: h.clone(),
@@ -658,11 +658,20 @@ impl App {
         if self.render.grid.card_pops_running() || self.render.grid.reveal.dissolving() {
             backdrop_changed = true;
         }
-        if self.render.list.as_ref().is_some_and(|(_, l)| l.animating()) {
+        let closing = self.render.modal.fade.closing_frame().map(|(_, screen)| screen);
+        self.render
+            .retain_visible(self.nav.screen, self.nav.last_screen, closing);
+        if self.render.lists.iter().any(|slot| slot.list.animating()) {
             animating = true;
         }
-        if self.render.sidebar_focus.animating() || self.render.tab_focus.animating() {
+        if self.render.sidebar_focus.animating() {
             backdrop_changed = true;
+        }
+        // The settings card's tab strip is drawn on the card, not on the page behind it, so it
+        // needs frames but must not read as the backdrop having moved — that had every frame of
+        // a tab switch re-snapshot and re-blur the whole page.
+        if self.render.tab_focus.animating() {
+            animating = true;
         }
         // Tick even while hidden to keep pulse state consistent.
         let dot_live = self.nav.screen == Screen::Home && !self.library.running.is_empty();
@@ -818,20 +827,13 @@ impl App {
         let columns = view::home::grid_columns(available_w);
         self.render.grid.card_size = view::home::grid_card_size(available_w, columns);
 
-        // Every screen transition triggers close-fade for the left screen and
-        // open-fade for the entered screen, centralized here rather than at each
-        // dispatch site. Every modal exit fades, modal-to-modal included: the leaving
-        // card's pixels go to `tile::MODAL_PREV` (see `snapshot_closing_modal`), so the
-        // entering screen taking over `tile::MODAL` no longer forces the close to be a cut.
+        // One transition hook starts the departing and arriving modal fades.
         let screen_changed = self.nav.screen != self.nav.last_screen;
         if screen_changed {
             let left = self.nav.last_screen;
             self.nav.last_screen = self.nav.screen;
-            // A list screen's rows rise on every arrival, whether it is being opened or
-            // returned to: dropping the widget here is what makes the entrance replay, and
-            // doing it on the one transition hook means a screen reached across a text form
-            // (the address dialog, which seats no list of its own) enters like any other.
-            self.render.list = None;
+            // Preserve the departing rows through their fade; only the arrival starts fresh.
+            self.render.reset_arrival(self.nav.screen);
             // Modal-to-modal cross-fades: `ui::fade` makes the leaving card the entering
             // one's inverse. Anything involving Home is a plain open or close.
             if !matches!(left, Screen::Home) {
@@ -848,6 +850,9 @@ impl App {
                 self.render.modal.fade.cancel_closing(self.nav.screen);
             }
         }
+        // Latched last: every reader this frame must see the same alphas, whatever the clock
+        // does between the page snapshot and the modal layer.
+        self.render.modal.frames = self.sample_modal_frames();
         screen_changed
     }
 }

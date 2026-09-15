@@ -17,11 +17,43 @@ use crate::platform::webos::mouse;
 use crate::services::store;
 use crate::session;
 
+struct PendingConnect {
+    handle: Option<std::thread::JoinHandle<Result<session::Connected>>>,
+    attempt: std::sync::Arc<session::ConnectAttempt>,
+}
+
+impl PendingConnect {
+    fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn join(mut self) -> std::thread::Result<Result<session::Connected>> {
+        self.handle.take().expect("pending connect handle").join()
+    }
+}
+
+impl Drop for PendingConnect {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else { return };
+        let guard = self.attempt.cancel();
+        // Hold the load gate before returning to a menu that can launch another session.
+        std::thread::spawn(move || {
+            if let Ok(Ok(connected)) = handle.join() {
+                connected.disconnect_quit();
+                if connected.shutdown() {
+                    crate::platform::webos::ndl::quit();
+                }
+            }
+            drop(guard);
+        });
+    }
+}
+
 /// A launch handed from the menu to the streaming loop: the connect thread (started early to
 /// overlap the animation), the settings it was started with, and how much of the first-frame
 /// budget the loading screen has already spent.
 struct ConnectOutcome {
-    handle: std::thread::JoinHandle<Result<session::Connected>>,
+    handle: PendingConnect,
     /// What was dialled, kept so a lost link can be dialled again (`stream`'s reconnect).
     target: crate::app::ConnectTarget,
     settings: store::Settings,
@@ -93,42 +125,53 @@ fn spawn_connect(
     identity: (String, String),
     target: crate::app::ConnectTarget,
     settings: store::Settings,
-) -> Result<std::thread::JoinHandle<Result<session::Connected>>> {
+) -> Result<PendingConnect> {
     let (host, port, fp, launch) = (target.host, target.port, target.fingerprint, target.launch);
     CONNECT_FAILED.store(false, Ordering::Relaxed);
+    let attempt = std::sync::Arc::new(session::ConnectAttempt::default());
+    let worker_attempt = attempt.clone();
     std::thread::Builder::new()
         .name("punktfunk-webos-connect".into())
         .spawn(move || {
             let mode = stream_mode(&settings, crate::platform::webos::device::native_mode());
             tracing::info!("requesting {}x{}@{}", mode.width, mode.height, mode.refresh_hz);
-            session::connect(&session::ConnectParams {
-                host,
-                port,
-                mode,
-                bitrate_kbps: settings.bitrate_kbps,
-                hdr_enabled: settings.hdr_enabled,
-                audio_channels: settings.audio_channels,
-                identity,
-                pin: Some(fp),
-                launch,
-                // A pinned host is reachable now or off, so a long budget would only hold the
-                // black launch scrim. Waiting on an operator is the pairing flow's job.
-                timeout: crate::services::budget::PROBE,
-                codec: settings.codec_pref(),
-                gamepad_type: settings.gamepad_type(),
-                cursor_capture: settings.cursor_capture(),
-                // `true` deliberately, whatever is attached right now: this is the SESSION-level
-                // cap, and the host advertises `HOST_CAP_PAD_AUDIO` only in reply to it. A pad
-                // plugged in later re-declares per-pad through `set_pad_audio_caps`, but only
-                // inside a session that claimed the cap up front — probing here would cost hotplug.
-                pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true),
-                audio_route: settings.audio_route(),
-                present_priority: settings.present_priority(),
-                display_hdr: settings.hdr_display().hdr_meta(),
-            })
+            session::connect(
+                &session::ConnectParams {
+                    host,
+                    port,
+                    mode,
+                    bitrate_kbps: settings.bitrate_kbps,
+                    hdr_enabled: settings.hdr_enabled,
+                    audio_channels: settings.audio_channels,
+                    identity,
+                    pin: Some(fp),
+                    launch,
+                    // A pinned host is reachable now or off, so a long budget would only hold the
+                    // black launch scrim. Waiting on an operator is the pairing flow's job.
+                    timeout: crate::services::budget::PROBE,
+                    codec: settings.codec_pref(),
+                    gamepad_type: settings.gamepad_type(),
+                    cursor_capture: settings.cursor_capture(),
+                    // `true` deliberately, whatever is attached right now: this is the SESSION-level
+                    // cap, and the host advertises `HOST_CAP_PAD_AUDIO` only in reply to it. A pad
+                    // plugged in later re-declares per-pad through `set_pad_audio_caps`, but only
+                    // inside a session that claimed the cap up front — probing here would cost hotplug.
+                    pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true),
+                    audio_route: settings.audio_route(),
+                    present_priority: settings.present_priority(),
+                    display_hdr: settings.hdr_display().hdr_meta(),
+                },
+                &worker_attempt,
+            )
             // Flagged before the handle is joined, so the loading screen can stop waiting
             // for a stream that is not coming — the error itself still travels by `Result`.
-            .inspect_err(|_| CONNECT_FAILED.store(true, Ordering::Relaxed))
+            .inspect_err(|_| {
+                worker_attempt.if_active(|| CONNECT_FAILED.store(true, Ordering::Relaxed));
+            })
+        })
+        .map(|handle| PendingConnect {
+            handle: Some(handle),
+            attempt,
         })
         .context("spawn connect thread")
 }

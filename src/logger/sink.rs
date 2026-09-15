@@ -1,8 +1,9 @@
 //! The write destination — a rotating log file, or a TCP stream to a dev machine.
 use crate::core::VERSION;
 use std::io::Write;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -22,7 +23,10 @@ pub(super) enum Sink {
         /// Active log path, so a full file can be rotated (renamed) and reopened.
         path: PathBuf,
     },
-    Tcp(TcpStream),
+    Tcp {
+        stream: Option<TcpStream>,
+        fallback: Box<Self>,
+    },
 }
 
 impl Write for Sink {
@@ -33,7 +37,15 @@ impl Write for Sink {
                 *written += n as u64;
                 Ok(n)
             }
-            Self::Tcp(s) => s.write(buf),
+            Self::Tcp { stream, fallback } => {
+                if let Some(socket) = stream {
+                    match socket.write(buf) {
+                        Ok(n) => return Ok(n),
+                        Err(_) => *stream = None,
+                    }
+                }
+                fallback.write(buf)
+            }
         }
     }
 
@@ -50,19 +62,59 @@ impl Write for Sink {
                 }
                 Ok(())
             }
-            Self::Tcp(s) => s.flush(),
+            Self::Tcp { stream, fallback } => {
+                if let Some(socket) = stream {
+                    if socket.flush().is_ok() {
+                        return Ok(());
+                    }
+                    *stream = None;
+                }
+                fallback.flush()
+            }
         }
     }
 }
 
 /// Open TCP or file sink; fall back to file if unreachable (dev convenience, not critical).
 pub(super) fn open(app_dir: &Path) -> Result<Sink> {
+    let fallback = open_file(app_dir)?;
     if let Some(addr) = launch::telemetry_addr() {
-        if let Ok(stream) = TcpStream::connect(addr) {
-            return Ok(Sink::Tcp(stream));
+        if let Some(stream) = connect_telemetry(addr) {
+            return Ok(Sink::Tcp {
+                stream: Some(stream),
+                fallback: Box::new(fallback),
+            });
         }
     }
-    open_file(app_dir)
+    Ok(fallback)
+}
+
+fn connect_telemetry(addr: &'static str) -> Option<TcpStream> {
+    const BUDGET: Duration = Duration::from_millis(500);
+    let deadline = Instant::now() + BUDGET;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    // DNS has no portable cancellation API; only this worker may wait on it.
+    std::thread::Builder::new()
+        .name("telemetry-connect".into())
+        .spawn(move || {
+            let Ok(addresses) = addr.to_socket_addrs() else { return };
+            for address in addresses {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return;
+                };
+                if remaining.is_zero() {
+                    return;
+                }
+                if let Ok(stream) = TcpStream::connect_timeout(&address, remaining) {
+                    if stream.set_write_timeout(Some(BUDGET)).is_ok() {
+                        let _ = tx.send(stream);
+                    }
+                    return;
+                }
+            }
+        })
+        .ok()?;
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
 }
 
 /// A fresh active log each launch; the previous session rotates to `.1` first, so

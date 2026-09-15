@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use punktfunk_core::client::NativeClient;
 use punktfunk_core::input::InputEvent;
 
 use crate::session::audio::AudioStage;
@@ -15,11 +16,46 @@ use crate::session::{self, Connected, StreamStats};
 
 /// The input path, cloned for a thread that sends off the main loop (the HID-mouse reader).
 #[derive(Clone)]
-pub(crate) struct InputSender(Arc<punktfunk_core::client::NativeClient>);
+pub(crate) struct InputSender {
+    client: Arc<NativeClient>,
+    held: Arc<std::sync::Mutex<crate::core::input::HeldInputs>>,
+}
+
+/// The UI thread's own source id. Every evdev device takes a nonzero one (`evdev::Device::source`),
+/// so a release from one input route never clears what another is holding.
+pub(crate) const SOURCE_UI: u32 = 0;
+
+type Held = std::sync::Mutex<crate::core::input::HeldInputs>;
+
+/// Buttons route through the held-input ledger for 1:1 press/release; other events bypass it.
+fn send_edge(client: &NativeClient, held: &Held, source: u32, ev: &InputEvent) {
+    if crate::core::input::HeldInputs::is_edge(ev) {
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .send(source, ev, |ev| {
+                let _ = client.send_input(ev);
+            });
+    } else {
+        let _ = client.send_input(ev);
+    }
+}
+
+/// Releases everything `source` still holds — the dialog gating input, or the device going away.
+fn release_held(client: &NativeClient, held: &Held, source: u32) {
+    held.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .release(source, |ev| {
+            let _ = client.send_input(ev);
+        });
+}
 
 impl InputSender {
-    pub(crate) fn send(&self, ev: &InputEvent) {
-        let _ = self.0.send_input(ev);
+    pub(crate) fn send(&self, source: u32, ev: &InputEvent) {
+        send_edge(&self.client, &self.held, source, ev);
+    }
+
+    pub(crate) fn release(&self, source: u32) {
+        release_held(&self.client, &self.held, source);
     }
 
     /// One pad touchpad contact or motion sample, on the rich-input plane the host applies to
@@ -27,17 +63,24 @@ impl InputSender {
     /// `InputEvent` shape. Best-effort like every datagram, and a no-op toward a host running a
     /// different gamepad backend.
     pub(crate) fn send_rich(&self, rich: punktfunk_core::quic::RichInput) {
-        let _ = self.0.send_rich_input(rich);
+        let _ = self.client.send_rich_input(rich);
     }
 }
 
 impl Connected {
     pub(crate) fn input(&self) -> InputSender {
-        InputSender(self.client.clone())
+        InputSender {
+            client: self.client.clone(),
+            held: self.input_state.clone(),
+        }
     }
 
     pub(crate) fn send_input(&self, ev: &InputEvent) {
-        let _ = self.client.send_input(ev);
+        send_edge(&self.client, &self.input_state, SOURCE_UI, ev);
+    }
+
+    pub(crate) fn release_input(&self) {
+        release_held(&self.client, &self.input_state, SOURCE_UI);
     }
 
     pub(crate) fn stats(&self) -> &Arc<StreamStats> {
@@ -200,11 +243,8 @@ impl Connected {
                 continue;
             }
             if let Some(pad) = controller.as_deref_mut() {
-                // `backstop_ms` passes straight through, including 0: SDL2 reads a zero duration as
-                // "no expiration" (`rumble_expiration = 0`, run until changed), not "stop now", which
-                // is exactly the semantics wanted here — the policy engine guarantees an explicit
-                // zero-level command at every stop, so a self-expiring effect would only risk
-                // cutting a held rumble short. Don't "fix" this into a floor.
+                // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
+                // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
                 //
                 // Errors here are the common "this pad has no rumble motors" case, not a fault:
                 // logging per command would spam a tick loop, and there is no recovery to attempt.
@@ -231,7 +271,7 @@ impl Connected {
 
         if let (Some(envelope), Some(pad)) = (haptics, controller) {
             if let Some((low, high)) = envelope.take_change() {
-                // 0 = until changed; the envelope itself sends the zero that ends it.
+                // 0 = until changed; envelope sends the stop.
                 let _ = pad.set_rumble(low, high, 0);
             }
         }

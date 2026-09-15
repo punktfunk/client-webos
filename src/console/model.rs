@@ -59,8 +59,8 @@ struct PairOutcome {
 }
 
 /// A catalog profile as the shell's chip.
-fn chip(p: &pf_client_core::profiles::StreamProfile) -> pf_console_ui::ProfileChip {
-    pf_console_ui::ProfileChip {
+fn chip(p: &pf_client_core::presets::StreamPreset) -> pf_console_ui::PresetChip {
+    pf_console_ui::PresetChip {
         id: p.id.clone(),
         name: p.name.clone(),
         accent: p.accent.clone(),
@@ -103,11 +103,13 @@ pub(crate) struct Service {
     last_sweep: Option<Instant>,
     /// When [`Self::tick`] last did its work — see [`SERVICE_EVERY`].
     last_tick: Option<Instant>,
+    rows_revision: Option<u64>,
+    rows_dirty: bool,
     games: Option<Receiver<GamesLoaded>>,
     /// Covers as they arrive, decoded on the fetch thread where possible — see [`spawn_art`].
     /// Deliberately NOT through `services::art`, which decodes to a card-sized pixmap for the
     /// old UI's tiny-skia compositor.
-    art: Option<Receiver<(String, ArtItem)>>,
+    art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
@@ -126,6 +128,8 @@ impl Service {
             sweep: None,
             last_sweep: None,
             last_tick: None,
+            rows_revision: None,
+            rows_dirty: true,
             games: None,
             art: None,
             pair: None,
@@ -139,6 +143,7 @@ impl Service {
         // Commands are the one thing that must not wait for the cadence: they are a button
         // press, and the shell shows nothing until one is served.
         for cmd in self.handles.bus.drain() {
+            self.rows_dirty = true;
             self.handle(cmd);
         }
         if self.last_tick.is_some_and(|t| t.elapsed() < SERVICE_EVERY) {
@@ -147,6 +152,7 @@ impl Service {
         self.last_tick = Some(Instant::now());
         if let Some(discovery) = &mut self.discovery {
             for host in discovery.poll() {
+                self.rows_dirty = true;
                 self.discovered
                     .retain(|d| !(d.addr == host.addr && d.port == host.port));
                 self.discovered.push(host);
@@ -159,9 +165,12 @@ impl Service {
         if self.last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
             self.start_sweep();
         }
-        // `set_hosts` bumps its generation only on a real change, so the shell redraws when the
-        // list moves rather than on this cadence.
-        self.handles.console.set_hosts(self.rows());
+        let revision = self.store.revision();
+        if self.rows_dirty || self.rows_revision != Some(revision) {
+            self.handles.console.set_hosts(self.rows());
+            self.rows_revision = Some(revision);
+            self.rows_dirty = false;
+        }
     }
 
     /// Stop everything this service started. The wake worker is the only one that would
@@ -177,25 +186,27 @@ impl Service {
     /// The home carousel: saved hosts (most recently used first), each followed by its pinned
     /// profile cards, then discovered-but-unsaved ones. A pinned card shares its host's live
     /// state; its key rides the profile id behind a NUL, as the desktop's does.
+    // Inputs: persisted hosts/profiles, adverts, reachability, rights.
+    // Store revision and rows_dirty gate updates; game arrivals affect no row fields.
     fn rows(&self) -> Vec<HostRow> {
         let state = self.store.snapshot();
-        let catalog = pf_client_core::profiles::ProfilesFile {
-            version: pf_client_core::profiles::PROFILES_VERSION,
-            profiles: state.profiles.clone(),
+        let catalog = pf_client_core::presets::PresetsFile {
+            version: pf_client_core::presets::PRESETS_VERSION,
+            presets: state.profiles.clone(),
         };
         let mut hosts: Vec<(HostRow, Vec<HostRow>)> = state
             .known_hosts
             .iter()
             .map(|h| {
                 let mut row = self.saved_row(h);
-                row.bound_profile = h.profile_id.as_deref().and_then(|id| catalog.find_by_id(id)).map(chip);
+                row.bound_preset = h.preset_id.as_deref().and_then(|id| catalog.find_by_id(id)).map(chip);
                 let pins = h
                     .resolved_pins(&catalog)
                     .into_iter()
                     .map(|p| HostRow {
                         key: format!("{}\0{}", row.key, p.id),
                         pin: Some(chip(p)),
-                        bound_profile: None,
+                        bound_preset: None,
                         ..row.clone()
                     })
                     .collect();
@@ -231,8 +242,8 @@ impl Service {
                 // Unpaired: there is nothing it would let this TV do to it.
                 actions: Vec::new(),
                 pin: None,
-                bound_profile: None,
-                game_profiles: Default::default(),
+                bound_preset: None,
+                game_presets: Default::default(),
                 // Needs `/api/v1/status`, which this client does not ask — the same reason
                 // `LibraryGame::running` is false here. Empty renders as no line.
                 running: String::new(),
@@ -291,11 +302,11 @@ impl Service {
                 .map_or_else(|| h.os.clone(), |d| d.os.clone()),
             actions: self.rights.get(&key).copied().map(power_rows).unwrap_or_default(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             // Title id → profile id, straight off the record: the bind screen only compares
             // these against the catalog it was handed, and a dangling one resolves to nothing
             // there exactly as it does at launch.
-            game_profiles: h.game_profiles.clone(),
+            game_presets: h.game_presets.clone(),
             running: String::new(),
             key,
         }
@@ -350,19 +361,19 @@ impl Service {
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
             // rather than stored.
-            ConsoleCmd::BindProfile {
+            ConsoleCmd::BindPreset {
                 key,
                 game: Some(game),
-                profile_id,
-            } => self.bind_game_profile(&key, &game, profile_id.as_deref()),
+                preset_id: profile_id,
+            } => self.bind_game_preset(&key, &game, profile_id.as_deref()),
             // The host's own default binding (`KnownHost::profile_id`); `None` clears it.
-            ConsoleCmd::BindProfile {
+            ConsoleCmd::BindPreset {
                 key,
                 game: None,
-                profile_id,
+                preset_id: profile_id,
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
-            ConsoleCmd::SetPin { key, profile_id, pin } => self.set_pin(&key, profile_id, pin),
+            ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
             // Two commands with nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -376,7 +387,7 @@ impl Service {
     /// Point one title at a catalog profile, or clear it. Refuses an id the catalog does not
     /// hold: the record must never name a profile nothing resolves, and the shell can only
     /// offer ids it was handed, so one that misses means the two went out of step.
-    fn bind_game_profile(&self, key: &str, game: &str, profile_id: Option<&str>) {
+    fn bind_game_preset(&self, key: &str, game: &str, profile_id: Option<&str>) {
         let changed = self.store.edit(|state| {
             if let Some(id) = profile_id {
                 if !state.profiles.iter().any(|p| p.id == id) {
@@ -392,7 +403,7 @@ impl Service {
             if host.game_profile(game) == profile_id {
                 return false;
             }
-            host.bind_game_profile(game, profile_id);
+            host.bind_game_preset(game, profile_id);
             true
         });
         if changed {
@@ -494,7 +505,7 @@ impl Service {
             if started.elapsed() >= ART_DRAIN_BUDGET {
                 return;
             }
-            let Ok((id, item)) = rx.try_recv() else { return };
+            let Some((id, item)) = rx.try_recv() else { return };
             match item {
                 ArtItem::Decoded(poster) => self.handles.library.push_decoded(id, poster),
                 ArtItem::Encoded(bytes) => self.handles.library.push_art(id, bytes),
@@ -577,7 +588,9 @@ impl Service {
                 ..KnownHost::default()
             };
             record.set_fingerprint(fingerprint);
-            store::upsert_known_host(&mut state.known_hosts, record);
+            if let Some(fresh) = store::upsert_known_host(&mut state.known_hosts, record) {
+                store::seed_new_host_profiles(fresh, &mut state.profiles);
+            }
             true
         });
         self.handles.console.set_pair(PairPhase::Paired { key });
@@ -725,6 +738,7 @@ impl Service {
         loop {
             match rx.try_recv() {
                 Ok(s) => {
+                    self.rows_dirty = true;
                     self.reachable.insert(s.key.clone(), s.online);
                     match s.rights {
                         Some(r) => {
@@ -764,6 +778,7 @@ impl Service {
             .iter()
             .find(|h| h.addr == addr && h.port == port)
             .map_or_else(|| shared::host_key("", addr, port), shared::known_host_key);
+        self.rows_dirty = true;
         self.reachable.insert(key, online);
     }
 
@@ -958,8 +973,7 @@ enum ArtItem {
 ///
 /// A full-size PNG cover costs ~90 ms on a CX — five frames — and the shelf used to stop for
 /// each one. This thread is already waiting on the network, so the work lands where nothing is
-/// watching. The shelf publishes the size it caches at; before it has drawn once there is no
-/// size to decode to, and those few covers go over encoded as they always did.
+/// watching. Wait for the shelf's decode scale; bound pending results with `sync_channel`.
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
@@ -971,8 +985,10 @@ fn spawn_art(
     identity: (String, String),
     games: Vec<GameEntry>,
     library: pf_console_ui::LibraryShared,
-) -> Receiver<(String, ArtItem)> {
-    let (tx, rx) = std::sync::mpsc::channel();
+) -> ArtReceiver {
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancel = cancelled.clone();
     std::thread::Builder::new()
         .name("punktfunk-webos-console-art".into())
         .spawn(move || {
@@ -980,14 +996,25 @@ fn spawn_art(
             let Ok(agent) = library::agent(&identity, pin) else {
                 return;
             };
-            // Scale published only on shelf's first frame; fetch thread arrives early. Park to
-            // avoid render-thread decode (~50ms per poster on this `SoC`).
-            let mut sink = ArtSink {
-                tx: &tx,
-                library: &library,
-                parked: Vec::new(),
+            let waited = Instant::now();
+            let scale = loop {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(scale) = library.art_scale() {
+                    break Some(scale);
+                }
+                if waited.elapsed() >= ART_SCALE_WAIT {
+                    tracing::debug!("console: art scale unavailable; delivering encoded covers");
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(16));
             };
+            let mut cache = crate::services::art::CoverCache::new(&addr, port);
             for game in games {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let bytes = crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
                     // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
@@ -995,7 +1022,7 @@ fn spawn_art(
                         .flatten()
                         .find_map(|path| match library::fetch_art(&agent, &addr, mgmt, path) {
                             Ok(bytes) => {
-                                crate::services::art::store_cover(&addr, port, &game.id, &bytes);
+                                cache.store(&game.id, &bytes);
                                 Some(bytes)
                             }
                             Err(e) => {
@@ -1006,63 +1033,42 @@ fn spawn_art(
                 });
                 // A closed channel means the shelf moved on; stop fetching for it.
                 if let Some(bytes) = bytes {
-                    if sink.push(game.id.clone(), bytes).is_err() {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if tx
+                        .send((game.id, decode_at(&bytes, library.art_scale().or(scale))))
+                        .is_err()
+                    {
                         return;
                     }
                 }
             }
-            sink.finish();
         })
         .ok();
-    rx
+    ArtReceiver { rx, cancelled }
 }
 
 /// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
 
-/// Timeout for fetched covers waiting for shelf's decode scale. Bounds the wait if shelf never opens.
+/// Timeout for covers waiting on decode scale. If shelf never publishes, deliver encoded.
 const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
 
-/// Fetched covers: decoded at shelf's scale if published, parked otherwise. Parking avoids
-/// render-thread decode (~50ms per poster on this `SoC`).
-struct ArtSink<'a> {
-    tx: &'a std::sync::mpsc::Sender<(String, ArtItem)>,
-    library: &'a pf_console_ui::LibraryShared,
-    parked: Vec<(String, Vec<u8>)>,
+struct ArtReceiver {
+    rx: Receiver<(String, ArtItem)>,
+    cancelled: Arc<AtomicBool>,
 }
 
-impl ArtSink<'_> {
-    /// Park until scale arrives, maintaining order. Flush any pending first.
-    fn push(&mut self, id: String, bytes: Vec<u8>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
-        let Some(k) = self.library.art_scale() else {
-            self.parked.push((id, bytes));
-            return Ok(());
-        };
-        self.flush(Some(k))?;
-        self.tx.send((id, decode_at(&bytes, Some(k))))
+impl ArtReceiver {
+    fn try_recv(&self) -> Option<(String, ArtItem)> {
+        self.rx.try_recv().ok()
     }
+}
 
-    /// Timeout for scale; fallback to encoded if shelf never opens.
-    fn finish(&mut self) {
-        let waited = Instant::now();
-        while self.library.art_scale().is_none() && !self.parked.is_empty() {
-            if waited.elapsed() >= ART_SCALE_WAIT {
-                tracing::debug!(
-                    "console: art scale never published — {} covers go encoded",
-                    self.parked.len()
-                );
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-        }
-        let _ = self.flush(self.library.art_scale());
-    }
-
-    fn flush(&mut self, k: Option<f64>) -> Result<(), std::sync::mpsc::SendError<(String, ArtItem)>> {
-        for (id, bytes) in std::mem::take(&mut self.parked) {
-            self.tx.send((id, decode_at(&bytes, k)))?;
-        }
-        Ok(())
+impl Drop for ArtReceiver {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1087,6 +1093,7 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             launcher: false,
             icon: g.icon.clone().unwrap_or_default(),
             platform: None,
+            stats: None,
             // Catalog detail the desktop's `GameEntry` carries and this client's does not, so
             // it is reported absent rather than guessed — the same rule as `launcher` above.
             developer: None,

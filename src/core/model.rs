@@ -1,7 +1,7 @@
 //! Plain domain data. No I/O — persistence lives in `crate::services`.
 use serde::{Deserialize, Serialize};
 
-use pf_client_core::profiles::StreamProfile;
+use pf_client_core::presets::StreamPreset;
 
 use crate::core::caps::VideoCaps;
 
@@ -206,9 +206,9 @@ impl KnownHost {
         }
     }
 
-    /// This game's bound profile id, if it has one (the shared `game_profiles`).
+    /// This game's bound profile id, if it has one (the shared `game_presets`).
     pub fn game_profile(&self, id: &str) -> Option<&str> {
-        self.shared.profile_for_game(id)
+        self.shared.preset_for_game(id)
     }
 
     /// Drops per-game state for ids the host no longer lists. `live` must come from a
@@ -216,11 +216,11 @@ impl KnownHost {
     /// everything. [`DESKTOP_PIN_ID`] is always kept: it is never in a library listing.
     /// Returns whether anything was removed.
     pub fn prune_games(&mut self, live: impl Fn(&str) -> bool) -> bool {
-        let before = self.game_profiles.len();
+        let before = self.game_presets.len();
         self.shared
-            .game_profiles
+            .game_presets
             .retain(|id, _| id == DESKTOP_PIN_ID || live(id));
-        let mut dropped = self.game_profiles.len() != before;
+        let mut dropped = self.game_presets.len() != before;
         for entry in &mut self.collections {
             let before = entry.games.len();
             entry.games.retain(|id| id == DESKTOP_PIN_ID || live(id));
@@ -359,11 +359,16 @@ pub fn new_host_collections() -> Vec<Collection> {
 /// learned separately (see `App::drain_discovery`). The record's id, its profile bindings,
 /// its pins, `wol_auto`, the exit action and `collections` are *always* kept from the existing
 /// record: only their own screens change them, so no add/edit/re-pair flow may clobber any.
-pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) {
-    let Some(existing) = hosts.iter_mut().find(|h| h.addr == new.addr && h.port == new.port) else {
+///
+/// Returns the inserted record when it was genuinely new, so the caller can seed what a first
+/// sighting gets ([`seed_new_host_profiles`]) without looking it up again. `None` for a merge:
+/// re-adding or re-pairing a host must not re-seed anything.
+pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Option<&mut KnownHost> {
+    let Some(at) = hosts.iter().position(|h| h.addr == new.addr && h.port == new.port) else {
         hosts.push(new);
-        return;
+        return hosts.last_mut();
     };
+    let existing = &mut hosts[at];
     if !new.is_paired() {
         new.fp_hex.clone_from(&existing.fp_hex);
         new.paired = existing.paired;
@@ -375,13 +380,44 @@ pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) {
         new.os.clone_from(&existing.os);
     }
     new.id.clone_from(&existing.id);
-    new.profile_id.clone_from(&existing.profile_id);
-    new.pinned_profiles.clone_from(&existing.pinned_profiles);
-    new.game_profiles.clone_from(&existing.game_profiles);
+    new.preset_id.clone_from(&existing.preset_id);
+    new.pinned_presets.clone_from(&existing.pinned_presets);
+    new.game_presets.clone_from(&existing.game_presets);
     new.collections.clone_from(&existing.collections);
     new.wol_auto = existing.wol_auto;
     new.exit_action = existing.exit_action;
     *existing = new;
+    None
+}
+
+pub fn unique_profile_name(catalog: &[StreamPreset], wanted: &str) -> String {
+    let taken = |name: &str| catalog.iter().any(|p| p.name == name);
+    if !taken(wanted) {
+        return wanted.to_string();
+    }
+    (2..)
+        .map(|n| format!("{wanted} {n}"))
+        .find(|name| !taken(name))
+        .expect("an unbounded counter finds a free name")
+}
+
+const DESKTOP_PROFILE_NAME: &str = "Desktop";
+
+/// Seeds a new host with a Desktop profile pinning absolute pointer mode (while the global
+/// default stays capture). Unlike a resolver rule, this pin is visible in Settings and mutable,
+/// so users see what's overriding the default and can adjust it.
+///
+/// Takes the record [`upsert_known_host`] reports as new, so existing installs keep their state.
+/// Idempotent: a host with an existing Desktop binding is left alone.
+pub fn seed_new_host_profiles(host: &mut KnownHost, profiles: &mut Vec<StreamPreset>) {
+    if host.game_profile(DESKTOP_PIN_ID).is_some() {
+        return;
+    }
+    let mut profile = StreamPreset::new(unique_profile_name(profiles, DESKTOP_PROFILE_NAME));
+    profile.overrides.mouse_mode = Some(pf_client_core::trust::MouseMode::Desktop.as_name().to_string());
+    let id = profile.id.clone();
+    profiles.push(profile);
+    host.bind_game_preset(DESKTOP_PIN_ID, Some(&id));
 }
 
 /// Codec preference selectable in Settings — a *preference*, not a demand. The host
@@ -728,11 +764,11 @@ pub struct Persisted {
     /// other clients keep in `client-profiles.json`. Here it rides the one document this client
     /// writes, for the reason everything else does — one file, one writer, no merge.
     ///
-    /// A game's settings ARE a profile (the shared `game_profiles`), which is what lets the
+    /// A game's settings ARE a profile (the shared `game_presets`), which is what lets the
     /// shared shell list them and bind one to a title. A TV with no desktop app beside it can still
     /// fill this: opening a game's settings and changing a row creates the profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub profiles: Vec<StreamProfile>,
+    pub profiles: Vec<StreamPreset>,
 }
 
 /// Cover-art paths for a title (host-relative, fetched via mTLS). Cards prefer
@@ -777,12 +813,12 @@ mod tests {
             ..Default::default()
         };
         h.set_fingerprint([0x5a; 32]);
-        h.bind_game_profile("doom", Some("p1"));
+        h.bind_game_preset("doom", Some("p1"));
         let json = serde_json::to_value(&h).unwrap();
         assert_eq!(json["addr"], "10.0.0.2");
         assert_eq!(json["fp_hex"], "5a".repeat(32));
         assert_eq!(json["wol_auto"], true);
-        assert_eq!(json["game_profiles"]["doom"], "p1");
+        assert_eq!(json["game_presets"]["doom"], "p1");
         assert!(json.get("shared").is_none(), "flattened, not nested");
         let back: KnownHost = serde_json::from_value(json).unwrap();
         assert_eq!(back, h);

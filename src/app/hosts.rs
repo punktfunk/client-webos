@@ -15,7 +15,7 @@ use crate::services::store::KnownHost;
 pub enum HostEntry {
     Known(KnownHost),
     Discovered(DiscoveredHost),
-    /// A pinned host+profile card (`KnownHost::pinned_profiles`): under its host, and OK
+    /// A pinned host+profile card (`KnownHost::pinned_presets`): under its host, and OK
     /// streams the host's desktop with that profile.
     Pinned {
         host: KnownHost,

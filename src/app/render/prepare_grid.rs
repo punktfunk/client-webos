@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use crate::app::draw::home::cover_image;
-use crate::app::grid::{GridLayout, CARD_KEEP_ROWS, CARD_PREFETCH_ROWS};
+use crate::app::grid::GridLayout;
 use crate::app::library::Library;
 use crate::app::spinner::PageReady;
 use crate::app::{view, App, HomeFocus, Screen};
@@ -36,7 +36,6 @@ impl App {
     pub(super) fn prepare_grid(&mut self, screen: Size) {
         let available_w = screen.w.saturating_sub(ui::widgets::SIDEBAR_W);
         let columns = view::home::grid_columns(available_w);
-        let (_, card_h) = view::home::grid_card_size(available_w, columns);
         if self.library.selected_host.is_none() {
             self.render.grid.reveal.reveal();
             return;
@@ -44,28 +43,13 @@ impl App {
         if self.grid_window_frozen() {
             return;
         }
-        let count = self.grid_len(columns);
         self.release_stale_cards();
 
-        let row_h = card_h as i32 + view::home::GRID_GAP;
-        let visible_rows = (screen.h as i32 - view::home::GRID_TOP_Y).max(row_h) / row_h + 1;
-        let first_visible_row = (self.render.grid.scroll / row_h).max(0);
-        let rows = count.div_ceil(columns.max(1)) as i32;
-        // Row band -> index range, clamped to the library. Ignores the section headings'
-        // offsets: a row of slack either way is what the prefetch/keep rows absorb.
-        let window = |lo: i32, hi: i32| {
-            let lo = lo.clamp(0, rows) as usize * columns.max(1);
-            let hi = (hi + 1).clamp(0, rows) as usize * columns.max(1);
-            lo.min(count)..hi.min(count)
-        };
-        let build_window = window(
-            first_visible_row - CARD_PREFETCH_ROWS,
-            first_visible_row + visible_rows + CARD_PREFETCH_ROWS,
-        );
-        let page_window = window(first_visible_row, first_visible_row + visible_rows);
-        let keep_window = window(
-            first_visible_row - CARD_KEEP_ROWS,
-            first_visible_row + visible_rows + CARD_KEEP_ROWS,
+        let [page_window, build_window, keep_window] = view::home::cover_windows(
+            available_w,
+            self.library.layout(columns),
+            self.render.grid.scroll,
+            screen.h as i32,
         );
 
         self.evict_cards_outside(keep_window, columns);
@@ -92,31 +76,28 @@ impl App {
         }
     }
 
-    /// Free covers and decoded art outside the keep window. Only when the window moved: the
-    /// resident set is small but mapping each id back to its index walks the library.
+    /// Free covers outside the keep window without scanning the library.
     fn evict_cards_outside(&mut self, keep_window: Range<usize>, columns: usize) {
         if keep_window == self.render.grid.kept {
             return;
         }
         self.render.grid.kept = keep_window.clone();
         let layout = self.library.layout(columns);
+        let kept: std::collections::HashSet<&str> = keep_window
+            .filter_map(|idx| layout.pin_id_at(&self.library.games, idx))
+            .collect();
         let dropped: Vec<String> = self
             .render
             .grid
             .arrivals
             .ids()
-            .filter(|id| {
-                !layout
-                    .idx_for_pin_id(&self.library.games, id)
-                    .is_some_and(|idx| keep_window.contains(&idx))
-            })
+            .filter(|id| !kept.contains(id))
             .map(str::to_string)
             .collect();
         for id in dropped {
             self.render.grid.arrivals.release(&id);
             self.render.covers.remove(&id);
-            // Drop the decoded cover too (several × card size); the disk cache answers a
-            // scroll back.
+            // Drop decoded cover; cache covers scrollback.
             self.library.art.remove(&id);
             if let Some(loader) = &mut self.jobs.art {
                 loader.forget(&id);
@@ -136,8 +117,7 @@ impl App {
             if let Some(loader) = &mut self.jobs.art {
                 loader.request(game);
             }
-            // A card first seen on a settled grid arrives with a pop; an art refresh swaps in
-            // place; the grid's first fill is the reveal wave's job.
+            // Pop new cards on settled grid; refresh swaps art; reveal fills initial page.
             if self.render.grid.arrivals.note(&game.id) && settled {
                 self.render.grid.arm_card_pop(&game.id, now);
             }

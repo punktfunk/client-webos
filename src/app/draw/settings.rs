@@ -5,10 +5,11 @@
 
 use pf_console_ui::icons::{by_name, draw_icon};
 use pf_console_ui::theme::{self, W};
-use pf_console_ui::widgets::{MenuList, RowSpec};
+use pf_console_ui::widgets::RowSpec;
 use skia_safe::{Contains, Point, Rect};
 
 use super::{alpha_layer, focus_face, glass_card, with_pop, FocusEase, Frame};
+use crate::app::render::state::ListSlot;
 use crate::app::state::settingspage::Page;
 
 /// The card as a share of the screen, both axes.
@@ -92,7 +93,7 @@ pub(crate) fn layout(fw: f32, fh: f32, k: f32) -> Layout {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     f: &Frame<'_>,
-    list: &mut MenuList,
+    slot: &mut ListSlot,
     tabs: &mut FocusEase,
     l: &Layout,
     page: Page,
@@ -150,7 +151,7 @@ pub(crate) fn draw(
             );
         });
     }
-    super::list::render_faded(c, list, l.rows, rows, f.fonts, k, dt, active && !column);
+    super::list::render_faded(c, slot, l.rows, rows, f.fonts, k, dt, active && !column);
     c.restore();
     c.restore();
 }
@@ -182,7 +183,7 @@ mod tests {
         ];
         let l = layout(w as f32, h as f32, k);
         let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
-        let mut list = MenuList::new();
+        let mut list = ListSlot::new(crate::core::screen::Screen::SettingsPage);
         let mut tabs = FocusEase::default();
         // Rows focused first, then the page column: both faces settle within the frames.
         for (column, name) in [(false, "settings-display"), (true, "settings-column")] {

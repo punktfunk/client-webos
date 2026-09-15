@@ -16,6 +16,7 @@ pub(crate) mod glass;
 pub(crate) mod home;
 pub(crate) mod list;
 pub(crate) mod settings;
+pub(crate) mod warmup;
 
 use std::sync::OnceLock;
 
@@ -28,7 +29,7 @@ use crate::app::App;
 use crate::core::screen::Screen;
 use crate::platform::webos::device;
 use crate::ui;
-pub(crate) use glass::{glass_card, Backdrop};
+pub(crate) use glass::glass_card;
 
 /// Which screens draw here rather than as tiles. Every prepare, compose and hit-test path
 /// asks this, so a screen moves over by being added to this list and nowhere else.
@@ -84,7 +85,7 @@ pub(crate) struct Frame<'a> {
     /// hardware plane, composited outside our GL context, so a grab of our own framebuffer
     /// reads punch-through alpha and the card would frost a smear of the graphics plane.
     /// Frosting over video is unrepresentable rather than merely discouraged.
-    pub backdrop: Option<Backdrop<'a>>,
+    pub backdrop: Option<&'a skia_safe::Image>,
 }
 
 impl<'a> Frame<'a> {
@@ -102,10 +103,7 @@ impl<'a> Frame<'a> {
     /// The same frame with a page for its cards to frost. The borrow is what keeps a snapshot
     /// from outliving the frame it was taken in.
     pub fn with_backdrop(self, page: Option<&'a skia_safe::Image>) -> Self {
-        Self {
-            backdrop: page.map(|page| Backdrop { page }),
-            ..self
-        }
+        Self { backdrop: page, ..self }
     }
 }
 
@@ -333,22 +331,28 @@ pub(crate) fn with_pop(c: &Canvas, r: Rect, f: f32, paint: impl FnOnce(&Canvas))
 }
 
 impl App {
-    /// The modal cards this frame: the open one's alpha, and the one being left, already
-    /// filtered to the ported screens. Both `draw_modals` and [`App::modal_visible`] read it,
-    /// so the snapshot can never disagree with what actually draws.
-    fn modal_frames(&self) -> (f32, Option<(f32, Screen)>) {
-        let m = if matches!(self.nav.screen, Screen::Home) {
+    /// Samples the fades once for the frame. Called by `App::advance_frame`; every reader
+    /// takes the latch, so nothing derived from a fade can disagree with what actually draws.
+    pub(crate) fn sample_modal_frames(&self) -> crate::app::modal::ModalFrames {
+        let fade = &self.render.modal.fade;
+        let open = if matches!(self.nav.screen, Screen::Home) {
             0.0
         } else {
-            self.render.modal.fade.open_alpha()
+            fade.open_alpha()
         };
-        let leaving = self
-            .render
-            .modal
-            .fade
-            .closing_frame_against(m)
-            .filter(|(_, left)| ported(*left));
-        (m, leaving)
+        crate::app::modal::ModalFrames {
+            open,
+            leaving: fade.closing_frame_against(open).filter(|(_, left)| ported(*left)),
+            fading: fade.is_animating(),
+        }
+    }
+
+    /// Whether a card is mid open- or close-fade. The runtime holds the page blur still for
+    /// the length of one: a rebuild copies the whole framebuffer and re-blurs it, and paying
+    /// that on frames of a ~200ms fade is what the fade stutters on. Outside a fade the blur
+    /// still refreshes whenever the page behind it moves.
+    pub(crate) fn modal_fading(&self) -> bool {
+        self.render.modal.frames.fading
     }
 
     /// Whether a modal card will be drawn this frame — i.e. whether the page behind it is
@@ -359,8 +363,9 @@ impl App {
         // it is not worth a snapshot — and on that screen the surface holds punch-through alpha
         // rather than a page.
         let frosts = |screen| !crate::app::screens::over_video(screen);
-        let (m, leaving) = self.modal_frames();
-        leaving.is_some_and(|(_, left)| frosts(left)) || (ported(self.nav.screen) && m > 0.0 && frosts(self.nav.screen))
+        let f = self.render.modal.frames;
+        f.leaving.is_some_and(|(_, left)| frosts(left))
+            || (ported(self.nav.screen) && f.open > 0.0 && frosts(self.nav.screen))
     }
 
     /// The ported modal layer, drawn after the tiles: the open card at its open alpha and
@@ -368,13 +373,13 @@ impl App {
     /// `render::compose` plays for tiles, from state instead of from a snapshot. `dt` is
     /// the frame's step, for the kit widgets' own motion.
     pub(crate) fn draw_modals(&mut self, f: &Frame<'_>, dt: f64) {
-        let (m, leaving) = self.modal_frames();
-        if let Some((alpha, left)) = leaving {
+        let frames = self.render.modal.frames;
+        if let Some((alpha, left)) = frames.leaving {
             self.draw_modal_screen(f, left, alpha, false, dt);
         }
         let screen = self.nav.screen;
-        if ported(screen) && m > 0.0 {
-            self.draw_modal_screen(f, screen, m, true, dt);
+        if ported(screen) && frames.open > 0.0 {
+            self.draw_modal_screen(f, screen, frames.open, true, dt);
         }
     }
 
@@ -454,11 +459,12 @@ impl App {
             let l = settings::layout(f.w, f.h, f.k);
             let hover_close = live && self.render.hover_close;
             let (page, column) = (self.screens.settings_page.page, self.screens.settings_page.column);
-            self.kit_list(screen).cursor = focus;
+            self.kit_slot(screen).list.cursor = focus;
+            // Split so the rows and the tab strip borrow disjointly.
             let render = &mut self.render;
-            let list = &mut render.list.as_mut().expect("kit_list seats it").1;
             let tabs = &mut render.tab_focus;
-            settings::draw(f, list, tabs, &l, page, column, &rows, hover_close, alpha, dy, dt, live);
+            let slot = crate::app::render::state::slot_in(&mut render.lists, screen).expect("just seated");
+            settings::draw(f, slot, tabs, &l, page, column, &rows, hover_close, alpha, dy, dt, live);
             return;
         }
         if is_list(screen) {
@@ -467,10 +473,10 @@ impl App {
             };
             let l = self.list_layout(screen, &card, f.w, f.h, f.k);
             let hover_close = live && self.render.hover_close;
-            let list = self.kit_list(screen);
+            let slot = self.kit_slot(screen);
             // The App's cursor is the one the handlers read; the widget's follows it.
-            list.cursor = focus;
-            list::draw(f, list, &l, &card.title, &card.rows, hover_close, alpha, dy, dt, live);
+            slot.list.cursor = focus;
+            list::draw(f, slot, &l, &card.title, &card.rows, hover_close, alpha, dy, dt, live);
             return;
         }
         let Some(title) = dialog::title_of(screen) else {
@@ -491,18 +497,20 @@ impl App {
         dialog::draw(f, title, &confirm, focus, motion.as_ref(), alpha, dy);
     }
 
-    /// The kit list for `screen`, seated fresh when the seat is empty or holds another
-    /// screen's — so a card enters with its own rise and no scroll carried over. `advance_frame`
-    /// empties the seat on every screen change; the screen it is tagged with is what keeps the
-    /// two cards of a cross-fade from sharing one widget, since the leaving one is drawn too.
-    pub(crate) fn kit_list(&mut self, screen: Screen) -> &mut pf_console_ui::widgets::MenuList {
-        let cursor = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
-        if !matches!(&self.render.list, Some((s, _)) if *s == screen) {
-            let mut list = pf_console_ui::widgets::MenuList::new();
-            list.jump_to(cursor);
-            self.render.list = Some((screen, list));
+    /// Each visible modal owns its row animations, including while fading out.
+    pub(crate) fn kit_slot(&mut self, screen: Screen) -> &mut crate::app::render::state::ListSlot {
+        if self.render.slot(screen).is_none() {
+            let cursor = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
+            let mut slot = crate::app::render::state::ListSlot::new(screen);
+            slot.list.jump_to(cursor);
+            self.render.lists.push(slot);
         }
-        &mut self.render.list.as_mut().expect("just seated").1
+        self.render.slot(screen).expect("just seated")
+    }
+
+    /// [`App::kit_slot`]'s widget, for the callers that only measure or nudge it.
+    pub(crate) fn kit_list(&mut self, screen: Screen) -> &mut pf_console_ui::widgets::MenuList {
+        &mut self.kit_slot(screen).list
     }
 
     /// `None` on any other screen.

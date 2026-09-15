@@ -146,6 +146,120 @@ fn rr(r: Rect) -> RRect {
     RRect::new_rect_xy(r, CARD_RADIUS, CARD_RADIUS)
 }
 
+#[derive(Clone, Copy)]
+struct StripMenu<'a> {
+    kinds: &'a [CardMenuRow],
+    cover: Option<&'a Image>,
+    held: bool,
+    focus: Option<(usize, f32)>,
+}
+
+fn paint_card_strip(f: &Frame<'_>, title: &str, r: Rect, pop: f32, shown: f32, menu: Option<StripMenu<'_>>) {
+    let c = f.canvas;
+    let title_h = strip_h(f.h, r.height());
+    let window = Rect::from_xywh(r.left, r.bottom - shown, r.width(), shown);
+    c.save();
+    c.clip_rrect(rr(r), ClipOp::Intersect, true);
+    c.clip_rect(window, ClipOp::Intersect, true);
+    // Frosted over the cover it sits on, opaque where there is no cover to blur. Only the
+    // menu panel earns it: the bare title strip is drawn for the focused card on every
+    // frame, and a per-frame blur of a full cover is what made scrolling the grid lag.
+    let frosted = menu
+        .and_then(|m| m.cover)
+        .is_some_and(|img| glass::frost_over_art(c, img, r, window, f.k));
+    if !frosted {
+        c.draw_rect(window, &theme::fill(super::surface()));
+    }
+    let size = px(f, VALUE);
+    let title_top = window.top;
+    f.fonts.draw_clipped(
+        c,
+        title,
+        f64::from(r.left + STRIP_INSET),
+        f64::from(title_top + title_h / 2.0) + size * 0.36,
+        W::Regular,
+        size,
+        theme::fg(pop),
+        f64::from(r.width() - 2.0 * STRIP_INSET),
+    );
+    if let Some(m) = menu {
+        let rows_top = title_top + title_h;
+        let band_x = r.left + MENU_BAND_INSET;
+        let band_w = r.width() - 2.0 * MENU_BAND_INSET;
+        for (i, kind) in m.kinds.iter().enumerate() {
+            let row = Rect::from_xywh(
+                band_x,
+                rows_top + MENU_ROWS_PAD + i as f32 * MENU_ROW_H,
+                band_w,
+                MENU_ROW_H,
+            );
+            let lit = m.focus.is_some_and(|(focused, _)| focused == i);
+            if lit {
+                let popped = zoom_rect(
+                    super::ui_rect(row),
+                    m.focus.map_or(1.0, |(_, progress)| progress),
+                    ui::animation::FOCUS_GROWTH,
+                );
+                c.draw_rrect(rr(sk(popped)), &theme::fill(theme::accent(0.9 * pop)));
+            }
+            let tone = if lit { theme::on_accent() } else { theme::fg(0.6 * pop) };
+            let (mark, label) = match kind {
+                CardMenuRow::MoveTo => ("pin", view::collections::menu_row_label(m.held)),
+                CardMenuRow::Remove => ("trash-2", "Remove"),
+                CardMenuRow::Profile => ("wrench", "Profile"),
+                CardMenuRow::Settings => ("settings", "Settings"),
+            };
+            let icon_x = row.left + MENU_ICON_INSET;
+            if let Some(mk) = by_name(mark) {
+                draw_icon(c, mk, icon_x + 11.0, row.center_y(), 22.0, tone);
+            }
+            let text_x = icon_x + 22.0 + 10.0;
+            f.fonts.draw_clipped(
+                c,
+                label,
+                f64::from(text_x),
+                f64::from(row.center_y()) + size * 0.36,
+                W::Regular,
+                size,
+                tone,
+                f64::from(row.right - STRIP_INSET - text_x),
+            );
+        }
+    }
+    c.restore();
+}
+
+pub(super) fn warm_card_strip(f: &Frame<'_>, cover: &Image, progress: f32) {
+    let r = Rect::from_xywh(
+        (30.0 * f.k).round(),
+        (30.0 * f.k).round(),
+        (220.0 * f.k).round(),
+        (330.0 * f.k).round(),
+    );
+    let kinds = [
+        CardMenuRow::MoveTo,
+        CardMenuRow::Remove,
+        CardMenuRow::Profile,
+        CardMenuRow::Settings,
+    ];
+    let title_h = strip_h(f.h, r.height());
+    let panel_h = (title_h + menu_rows_h(kinds.len())).min(r.height());
+    let shown = title_h + (panel_h - title_h) * progress;
+    paint_card_strip(
+        f,
+        "Game",
+        r,
+        1.0,
+        shown,
+        Some(StripMenu {
+            kinds: &kinds,
+            cover: Some(cover),
+            held: false,
+            focus: (progress >= 1.0).then_some((0, 1.0)),
+        }),
+    );
+}
+
 /// A raw upload's pixel layout: the hero's decoded art, the dissolve masks, the app icon.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RawFormat {
@@ -617,7 +731,6 @@ impl App {
     /// it. Everything is placed in the card's own (already zoomed) rect, so the frost stays
     /// registered with the art beneath it.
     fn draw_card_strip(&self, f: &Frame<'_>, game: &GameEntry, r: Rect, pop: f32) {
-        let c = f.canvas;
         let title_h = strip_h(f.h, r.height());
         let pin_id = game.id.as_str();
         // Collapsed to the bare strip while the card is being reordered: Confirm then means
@@ -635,77 +748,13 @@ impl App {
         if shown <= 0.0 {
             return;
         }
-        let window = Rect::from_xywh(r.left, r.bottom - shown, r.width(), shown);
-        c.save();
-        c.clip_rrect(rr(r), ClipOp::Intersect, true);
-        c.clip_rect(window, ClipOp::Intersect, true);
-        // Frosted over the cover it sits on, opaque where there is no cover to blur. Only the
-        // menu panel earns it: the bare title strip is drawn for the focused card on every
-        // frame, and a per-frame blur of a full cover is what made scrolling the grid lag.
-        let frosted = menu.is_some()
-            && (self.render.covers)
-                .get(&game.id)
-                .is_some_and(|img| glass::frost_over_art(c, img, r, window, f.k));
-        if !frosted {
-            c.draw_rect(window, &theme::fill(super::surface()));
-        }
-        let size = px(f, VALUE);
-        let title_top = window.top;
-        f.fonts.draw_clipped(
-            c,
-            &game.title,
-            f64::from(r.left + STRIP_INSET),
-            f64::from(title_top + title_h / 2.0) + size * 0.36,
-            W::Regular,
-            size,
-            theme::fg(pop),
-            f64::from(r.width() - 2.0 * STRIP_INSET),
-        );
-        if let Some(m) = menu {
-            let rows_top = title_top + title_h;
-            let band_x = r.left + MENU_BAND_INSET;
-            let band_w = r.width() - 2.0 * MENU_BAND_INSET;
-            for (i, kind) in kinds.iter().enumerate() {
-                let row = Rect::from_xywh(
-                    band_x,
-                    rows_top + MENU_ROWS_PAD + i as f32 * MENU_ROW_H,
-                    band_w,
-                    MENU_ROW_H,
-                );
-                let lit = i == m.focused && wipe >= 1.0;
-                if lit {
-                    let popped = zoom_rect(
-                        super::ui_rect(row),
-                        anim_frac(m.focus_anim, ui::animation::FOCUS_POP),
-                        ui::animation::FOCUS_GROWTH,
-                    );
-                    c.draw_rrect(rr(sk(popped)), &theme::fill(theme::accent(0.9 * pop)));
-                }
-                let tone = if lit { theme::on_accent() } else { theme::fg(0.6 * pop) };
-                let (mark, label) = match kind {
-                    CardMenuRow::MoveTo => ("pin", view::collections::menu_row_label(self.card_is_held(pin_id))),
-                    CardMenuRow::Remove => ("trash-2", "Remove"),
-                    CardMenuRow::Profile => ("wrench", "Profile"),
-                    CardMenuRow::Settings => ("settings", "Settings"),
-                };
-                let icon_x = row.left + MENU_ICON_INSET;
-                if let Some(mk) = by_name(mark) {
-                    draw_icon(c, mk, icon_x + 11.0, row.center_y(), 22.0, tone);
-                }
-                let text_x = icon_x + 22.0 + 10.0;
-                f.fonts.draw_clipped(
-                    c,
-                    label,
-                    f64::from(text_x),
-                    f64::from(row.center_y()) + size * 0.36,
-                    W::Regular,
-                    size,
-                    tone,
-                    f64::from(row.right - STRIP_INSET - text_x),
-                );
-            }
-        }
-        c.restore();
+        let menu = menu.map(|m| StripMenu {
+            kinds,
+            cover: self.render.covers.get(pin_id),
+            held: self.card_is_held(pin_id),
+            focus: (wipe >= 1.0).then(|| (m.focused, anim_frac(m.focus_anim, ui::animation::FOCUS_POP))),
+        });
+        paint_card_strip(f, &game.title, r, pop, shown, menu);
     }
 
     /// The launch transition, over everything else: the confirmed card zooming in under a
