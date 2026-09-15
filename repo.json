@@ -4,7 +4,7 @@
       "id": "io.unom.punktfunk.client-webos",
       "title": "Punktfunk (beta)",
       "shortDescription": "Low-latency desktop and game streaming client for punktfunk hosts. Built from every commit on main",
-      "fullDescriptionUrl": "https://github.com/punktfunk/client-webos/releases/download/beta/notes.md",
+      "fullDescriptionUrl": "https://github.com/punktfunk/client-webos/releases/download/beta/description.html",
       "iconUri": "https://raw.githubusercontent.com/punktfunk/client-webos/main/packaging/icon_large.png",
       "manifestUrl": "https://github.com/punktfunk/client-webos/releases/download/beta/io.unom.punktfunk.client-webos.manifest.json"
     }
