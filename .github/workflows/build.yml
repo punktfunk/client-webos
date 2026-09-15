@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
   package:
@@ -94,4 +94,4 @@ jobs:
     uses: ./.github/workflows/webosbrew.yml
     with:
       artifact: io.unom.punktfunk.client-webos
-      release_tag: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+      release_tag: ${{ github.event_name == 'push' && 'beta' || github.event.release.tag_name }}

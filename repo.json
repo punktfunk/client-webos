@@ -2,11 +2,11 @@
   "packages": [
     {
       "id": "io.unom.punktfunk.client-webos",
-      "title": "Punktfunk",
-      "shortDescription": "<p>Low-latency desktop and game streaming client for punktfunk hosts.</p>",
-      "fullDescriptionUrl": "https://raw.githubusercontent.com/punktfunk/client-webos/main/packaging/description.html",
+      "title": "Punktfunk (beta)",
+      "shortDescription": "Low-latency desktop and game streaming client for punktfunk hosts. Built from every commit on main",
+      "fullDescriptionUrl": "https://github.com/punktfunk/client-webos/releases/download/beta/notes.md",
       "iconUri": "https://raw.githubusercontent.com/punktfunk/client-webos/main/packaging/icon_large.png",
-      "manifestUrl": "https://github.com/punktfunk/client-webos/releases/latest/download/io.unom.punktfunk.client-webos.manifest.json"
+      "manifestUrl": "https://github.com/punktfunk/client-webos/releases/download/beta/io.unom.punktfunk.client-webos.manifest.json"
     }
   ]
 }

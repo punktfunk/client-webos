@@ -97,11 +97,10 @@ tasks:
   stage-and-package:
     internal: true
     requires:
-      vars: [PKG_VERSION, APP_ID, TARGET, NDK_DIR, SYSROOT]
+      vars: [PKG_VERSION, TARGET, NDK_DIR, SYSROOT]
     cmds:
       - |
         set -eu
-        APP_ID={{.APP_ID}}
         STAGE_DIR="$(mktemp -d)"
         trap 'rm -rf "$STAGE_DIR"' EXIT
         mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib"
@@ -121,19 +120,14 @@ tasks:
         cp packaging/appinfo.json packaging/icon.png packaging/icon_large.png packaging/splash.png "$STAGE_DIR/"
 
         PKG_VERSION="{{.PKG_VERSION}}"
-        APP_VERSION="${PKG_VERSION%%+git.*}"
-        case "$APP_VERSION" in
-          *+*|*[^0-9.]*) echo "error: APP_VERSION '${APP_VERSION}' is not x.x.x" >&2; exit 1 ;;
+        case "$PKG_VERSION" in
+          [0-9]*.[0-9]*.[0-9]*) ;;
+          *) echo "error: PKG_VERSION '${PKG_VERSION}' is not x.x.x[+git.sha]" >&2; exit 1 ;;
         esac
-        sed -i.bak "s/\"version\": \"0.0.1\"/\"version\": \"${APP_VERSION}\"/" "$STAGE_DIR/appinfo.json"
+        sed -i.bak "s/\"version\": \"0.0.1\"/\"version\": \"${PKG_VERSION}\"/" "$STAGE_DIR/appinfo.json"
         rm -f "$STAGE_DIR/appinfo.json.bak"
         mkdir -p dist
         ares-package "$STAGE_DIR" -o dist --force-arch arm
-
-        # Homebrew manifest generated in CI (webosbrew-toolbox-gen-manifest).
-        if [ "$PKG_VERSION" != "$APP_VERSION" ]; then
-          mv "dist/${APP_ID}_${APP_VERSION}_arm.ipk" "dist/${APP_ID}_${PKG_VERSION}_arm.ipk"
-        fi
 
   docker-run:
     internal: true
