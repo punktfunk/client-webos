@@ -327,13 +327,18 @@ impl Drop for Device {
 enum Probe {
     Hid(Device),
     /// A TV remote's own node, for the caller rather than this thread's poll.
-    Remote(RemoteNode),
+    Remote(RawFd),
     Skip,
     Unopenable,
 }
 
 /// Opens every node this reader wants that isn't already in `seen`, appending the paths it takes.
-fn scan(seen: &mut Vec<PathBuf>, shared: &Shared, next_source: &mut u32) -> Vec<Device> {
+fn scan(
+    seen: &mut Vec<PathBuf>,
+    shared: &Shared,
+    remote_gone: &std::sync::mpsc::Sender<PathBuf>,
+    next_source: &mut u32,
+) -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         tracing::warn!("/dev/input unreadable — no HID input support");
         return Vec::new();
@@ -366,8 +371,13 @@ fn scan(seen: &mut Vec<PathBuf>, shared: &Shared, next_source: &mut u32) -> Vec<
                 seen.push(path);
                 devices.push(dev);
             }
-            Probe::Remote(node) => {
-                seen.push(path);
+            Probe::Remote(fd) => {
+                seen.push(path.clone());
+                let node = RemoteNode {
+                    fd,
+                    path,
+                    gone: remote_gone.clone(),
+                };
                 if let Ok(mut remotes) = shared.remotes.lock() {
                     remotes.push(node);
                 }
@@ -401,7 +411,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
     let name = device_name(fd).unwrap_or_default();
     if is_tv_remote_node(&name) {
         tracing::info!("HID remote: {} ({})", name, path.display());
-        return Probe::Remote(RemoteNode { fd });
+        return Probe::Remote(fd);
     }
     if is_tv_builtin(&name) {
         // SAFETY: `fd` came from `open` above; closing before the Device wrapper exists.
@@ -536,8 +546,13 @@ fn is_tv_remote_node(name: &str) -> bool {
 /// Not polled on the reader thread: the caller reads it right before it takes SDL's events. The
 /// kernel queues an event on every open node at once, and the compositor builds its key from the
 /// same event, so any press behind a key SDL delivers is already readable here.
+///
+/// Dropping it hands its path back to the scanner, so a remote that reconnects on the same node
+/// is opened again.
 pub struct RemoteNode {
     fd: RawFd,
+    path: PathBuf,
+    gone: std::sync::mpsc::Sender<PathBuf>,
 }
 
 impl RemoteNode {
@@ -575,6 +590,7 @@ impl Drop for RemoteNode {
     fn drop(&mut self) {
         // SAFETY: `fd` came from `open` in `open_hid` and is owned solely by this struct.
         unsafe { libc::close(self.fd) };
+        let _ = self.gone.send(std::mem::take(&mut self.path));
     }
 }
 
@@ -643,8 +659,9 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
     let (removed_tx, removed_rx) = std::sync::mpsc::channel();
     // Detached scanning never grabs nodes. Unadopted descriptors close on drop.
     let scan_shared = shared.clone();
+    let remote_gone = removed_tx.clone();
     if let Err(e) = std::thread::Builder::new().name("pf-hid-scan".into()).spawn(move || {
-        scan_loop(&scan_shared, &added_tx, &removed_rx);
+        scan_loop(&scan_shared, &added_tx, &removed_rx, &remote_gone);
     }) {
         tracing::warn!("HID scanner unavailable: {e}");
         return;
@@ -719,6 +736,7 @@ fn scan_loop(
     shared: &Shared,
     added: &std::sync::mpsc::SyncSender<Vec<Device>>,
     removed: &std::sync::mpsc::Receiver<PathBuf>,
+    remote_gone: &std::sync::mpsc::Sender<PathBuf>,
 ) {
     let mut seen = Vec::new();
     // Instant underflows shortly after boot; use is_none_or.
@@ -742,7 +760,7 @@ fn scan_loop(
             let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
             if first || mtime != dir_mtime {
                 dir_mtime = mtime;
-                let found = scan(&mut seen, shared, &mut next_source);
+                let found = scan(&mut seen, shared, remote_gone, &mut next_source);
                 if first && found.is_empty() {
                     tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
                 }
@@ -901,7 +919,22 @@ fn button_code(code: u16) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_tv_remote_node;
+    use super::{is_tv_remote_node, RemoteNode};
+
+    #[test]
+    fn a_dropped_remote_node_hands_its_path_back_to_the_scanner() {
+        let (gone, scanner) = std::sync::mpsc::channel();
+        // SAFETY: a plain open of a path with no interior NUL.
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        let path = std::path::PathBuf::from("/dev/input/event3");
+        drop(RemoteNode {
+            fd,
+            path: path.clone(),
+            gone,
+        });
+        assert_eq!(scanner.try_recv().ok(), Some(path));
+    }
 
     #[test]
     fn claims_the_bluetooth_remotes_and_no_virtual_node() {

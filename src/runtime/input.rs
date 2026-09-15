@@ -134,7 +134,8 @@ pub(super) fn remote_code(
 ///
 /// Until a node is adopted the gate admits every key: a TV whose remote node the app cannot
 /// open, or names differently, keeps its remote. A node that goes away afterwards does not
-/// disarm it, since a key with no remote to press it is an echo.
+/// disarm it, since a key with no remote to press it is an echo; the reader opens it again
+/// when it comes back.
 #[derive(Default)]
 pub(super) struct RemoteGate {
     /// The remote's own nodes.
