@@ -669,7 +669,11 @@ pub(super) fn run_inner() -> Result<()> {
                         | Event::MouseButtonDown { .. }
                         | Event::MouseButtonUp { .. }
                         | Event::MouseWheel { .. }
-                            if ring.open() => {}
+                            if ring.open() =>
+                        {
+                            // Still shown to the gate, so a key admitted into the dial releases there.
+                            remote_gate.admits(&event, now);
+                        }
                         // Scancode keys are real game input — forward only, never open the dialog.
                         Event::KeyDown { scancode: Some(sc), .. }
                             if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
