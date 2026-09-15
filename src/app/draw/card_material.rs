@@ -20,8 +20,9 @@ const float EDGE = 0.016;
 const float DARK = 0.010;
 const float SHEEN = 0.028;
 const float FLOOR = 0.030;
-// Dither masks banding in the upscaled 8-bit backdrop and face gradient.
-const float GRAIN = 0.024;
+// Dither masks banding in the upscaled 8-bit backdrop and face gradient. Roughly three
+// 8-bit levels peak-to-peak: enough to break a step, below where it reads as texture.
+const float GRAIN = 0.012;
 
 // White noise avoids the diagonal patterns of interleaved gradient noise.
 float hash(float2 c) {
