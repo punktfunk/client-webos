@@ -321,6 +321,12 @@ is mounted rw** and the app's uid is in `audio`, and PulseAudio (`/var/run/pulse
   - **SDL echo suppression differs by mode.** Capture on + HID mouse drops **all** SDL pointer
     events; Capture off drops only motion, and only within the keyboard's recency window, since its
     clicks are the real ones.
+  - **webOS 23+ types every pad press as a remote key too** (arrows, OK, Back), and a Wayland key
+    names no device, so SDL cannot tell the echo from the Magic Remote. Measured on a G5 (10.3.1):
+    the pad's presses appear only on its own node, the remote's only on `LGE M-RCU - Builtin [0]`
+    (Back = `KEY_PREVIOUS`), so the stream reads that node ungrabbed and admits a key only when the
+    remote pressed it within 250 ms (`RemoteGate`). Until such a node is opened every key passes.
+    Re-arming SDL's `cloudgame_active` on focus changes did nothing in four A/B runs.
   - **SDL relative mode must be off** — the fork warps its pointer per motion event, a thousand
     pointless compositor round-trips a second.
   - **Device filter is `EV_REL` with `REL_X`/`REL_Y` and *not* an absolute pointer** — test `ABS_X`/
