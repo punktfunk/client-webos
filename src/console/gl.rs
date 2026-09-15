@@ -29,6 +29,9 @@ pub(crate) struct ConsoleGl {
     /// the truth or it clips paths against a buffer that is not there.
     stencil: usize,
     glass_warmed: bool,
+    /// Last interval handed to the driver, so only a CHANGE is logged — see
+    /// [`Self::set_swap_interval`].
+    swap_vsync: Option<bool>,
 }
 
 impl ConsoleGl {
@@ -36,11 +39,9 @@ impl ConsoleGl {
         let ctx = window
             .gl_create_context()
             .map_err(|e| anyhow!("console GL context: {e}"))?;
-        // Paces the console on the panel rather than spinning: `gl_swap_window` is this loop's
-        // only sleep. Best-effort — a driver that refuses just leaves the frame budget below.
-        if let Err(e) = video.gl_set_swap_interval(sdl2::video::SwapInterval::VSync) {
-            tracing::debug!("console: no vsync swap interval ({e}) — pacing on the frame budget");
-        }
+        // The interval is not set here: `console_flow::bring_up` pushes it after every
+        // `make_current`, because it belongs to the window SURFACE this context shares with SDL's
+        // renderer and whichever of the two set it last owns it.
         let attr = video.gl_attr();
         let stencil = attr.stencil_size() as usize;
         tracing::info!(
@@ -63,6 +64,7 @@ impl ConsoleGl {
             surface: None,
             stencil,
             glass_warmed: false,
+            swap_vsync: None,
         })
     }
 
@@ -72,6 +74,34 @@ impl ConsoleGl {
         window
             .gl_make_current(&self.ctx)
             .map_err(|e| anyhow!("console: gl_make_current: {e}"))
+    }
+
+    /// Block the swap on the panel, or let it return immediately.
+    ///
+    /// The menus want the block — `gl_swap_window` is that loop's only sleep. **A stream overlay
+    /// must not have it**: that swap runs on the thread forwarding input, so every toast, dial and
+    /// stats card would cost up to a refresh of input latency, and the overlay already paces
+    /// itself (33 ms while animating, 500 ms steady). The interval lives on the window surface,
+    /// which SDL's renderer context shares, so it is pushed after every `make_current` rather than
+    /// once at construction. Best-effort: a driver that refuses leaves the caller's cadence in
+    /// charge.
+    pub(crate) fn set_swap_interval(&mut self, video: &sdl2::VideoSubsystem, vsync: bool) {
+        let interval = if vsync {
+            sdl2::video::SwapInterval::VSync
+        } else {
+            sdl2::video::SwapInterval::Immediate
+        };
+        let result = video.gl_set_swap_interval(interval);
+        if self.swap_vsync != Some(vsync) {
+            match &result {
+                Ok(()) => tracing::debug!("console: swap interval {}", if vsync { "vsync" } else { "immediate" }),
+                Err(e) => tracing::debug!(
+                    "console: no {} swap interval ({e}) — pacing on the frame budget",
+                    if vsync { "vsync" } else { "immediate" },
+                ),
+            }
+            self.swap_vsync = Some(vsync);
+        }
     }
 
     /// Re-wraps on drawable size change to keep Skia from clipping against a stale buffer.

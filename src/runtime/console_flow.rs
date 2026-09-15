@@ -65,7 +65,7 @@ pub(super) fn run(
     // A preview UI must not be able to take the app down with it: if GL or Skia will not come
     // up on this set, say so, turn the shell back off in the document and let the classic menus
     // have the screen. Returning `Err` here would propagate out of the whole menu loop.
-    let console_gl = match bring_up(gl, canvas) {
+    let console_gl = match bring_up(gl, canvas, true) {
         Ok(gl) => gl,
         Err(e) => {
             tracing::error!("console: no GL host on this TV ({e:#}) — falling back to the classic menus");
@@ -526,9 +526,12 @@ fn art_snapshot() -> ArtSnapshot {
 
 /// Bring up (or reuse) the shell's GL context and make it current. Split out so the caller can
 /// answer a failure by handing the screen back rather than by failing the app.
+/// `vsync` blocks the swap on the panel: true for a menu, whose loop has nothing else to do,
+/// false over live video — see [`ConsoleGl::set_swap_interval`].
 pub(super) fn bring_up<'a>(
     gl: &'a mut Option<ConsoleGl>,
     canvas: &sdl2::render::Canvas<sdl2::video::Window>,
+    vsync: bool,
 ) -> Result<&'a mut ConsoleGl> {
     if gl.is_none() {
         // The first entry of the process pays for the context and the shader warm-up; every
@@ -538,6 +541,8 @@ pub(super) fn bring_up<'a>(
     let gl = gl.as_mut().expect("just built");
     // The classic menus and the stream have both made their own context current in between.
     gl.make_current(canvas.window())?;
+    // After `make_current`, since the interval belongs to the shared window surface.
+    gl.set_swap_interval(canvas.window().subsystem(), vsync);
     Ok(gl)
 }
 

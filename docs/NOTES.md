@@ -87,6 +87,14 @@ clears transparent so NDL's plane shows through.
 - ⚠ **The `ui_scale` launch param is deliberately untyped.** It is a launch param rather than a
   settings row so an unowned panel can be tuned on glass — and a field that rejects the string
   `ares-launch` sends fails the whole struct, silently costing every other param.
+- ⚠ **The swap interval is vsync in menus and immediate over a stream** (`ConsoleGl::set_swap_interval`,
+  chosen by `console_flow::bring_up`'s `vsync` argument). `gl_swap_window` blocks on the panel, and
+  the menu loop wants that — it is its only sleep. The stream loop must not have it: **the same
+  thread forwards input**, so with vsync on, every toast, dial, stats card and dialog put up to a
+  refresh between a button press and the wire — including the "Connection issues" toast, which by
+  construction appears when latency is already the complaint. It is pushed after every
+  `make_current` rather than once at construction, because the interval belongs to the window
+  SURFACE, which SDL's renderer context shares.
 
 ## Video decode (NDL DirectMedia)
 

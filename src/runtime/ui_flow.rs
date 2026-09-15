@@ -34,7 +34,7 @@ pub(super) fn run_ui_flow(
     // every 40ms spinner frame.
     const TICK_BUDGET: Duration = Duration::from_millis(16);
     canvas.window_mut().show();
-    let gl = console_flow::bring_up(gl, canvas).context("menu: GL host")?;
+    let gl = console_flow::bring_up(gl, canvas, true).context("menu: GL host")?;
     let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
     gl.warm_glass(
         &kit_fonts,
