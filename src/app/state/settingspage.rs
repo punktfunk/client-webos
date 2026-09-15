@@ -460,6 +460,11 @@ impl App {
                                         "Buffers to smooth the stream, adds latency"
                                     }
                                 });
+                            } else if id == RowId::SmoothBuffer {
+                                // The kit's own help calls this a TOTAL hold; on NDL it is extra on
+                                // top of the automatic cushion (`session::timeline::Pacing`), and
+                                // the kit's help text is not rendered on this front anyway.
+                                spec = spec.with_note("Held on top of the automatic cushion, a frame of delay each");
                             }
                             spec.dot = overlay.as_ref().is_some_and(|o| overridden(o, id));
                             spec

@@ -17,10 +17,27 @@ pub struct StreamStats {
     /// whichever one produced it.
     pub pacing_jitter_us: AtomicU32,
     pub pacing_late: AtomicU64,
+    /// Effective presentation cushion in µs: core's adaptive figure plus the Smoothness budget.
+    /// The one counter that MOVES when the presentation setting does — jitter is the measured
+    /// residual and is independent of it by construction, and `pacing_late` is cumulative, so
+    /// without this the overlay cannot show the setting doing anything.
+    pub pacing_cushion_us: AtomicU32,
+    /// Tightest complete-AU deadline margin of the last window, in µs — see
+    /// `Pacing::note_submitted`. Legitimately negative (that is the whole point), so it carries no
+    /// sentinel; `i32::MIN` is "not sampled this window".
+    pub pacing_min_slack_us: AtomicI32,
     /// Audio-plane queue depth in ms (`NdlVideo::audio_plane_lead_ms`). A video figure as much as
     /// an audio one — NDL paces the picture on this — and can legitimately be negative, so there
     /// is no sentinel: the overlay prints it only on a route that has a plane.
     pub audio_plane_lead_ms: AtomicI32,
+    /// How far sound trails the picture, in ms: the plane's lead less the picture's cushion.
+    /// Positive is sound behind picture, negative is sound ahead. Like the lead above it carries no
+    /// sentinel, and it is only written on a route where real audio rides the plane.
+    ///
+    /// ⚠ **Stamp domain, not on-glass.** NDL's decode and panel transit are not observable from the
+    /// app and bias the picture later, so the true offset is smaller than this reads. A trend and a
+    /// sign, never a calibration.
+    pub av_offset_ms: AtomicI32,
     /// Whether anything is going to READ the figures above — today that is the stats overlay, and
     /// the flag is named for the demand rather than for the widget so a second consumer can set it
     /// without every producer re-deriving what "listening" means. Private: it is the session's own

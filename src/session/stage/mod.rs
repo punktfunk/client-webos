@@ -137,6 +137,10 @@ pub struct VideoStage {
     /// Backpressure sampling (`backpressure`): when the depth was last read, and how many reads
     /// in a row found it past [`BACKLOG_HOLD_FRAMES`].
     backlog_sampled: Option<Instant>,
+    /// The depth that sampling last saw, so the heartbeat's diagnostic can read a figure the
+    /// control path already paid for instead of taking NDL's lock again — see
+    /// [`Self::backlog_depth`].
+    last_backlog: Option<u32>,
     deep_samples: u8,
     /// Completed access units fed this session. A plain counter, mirrored into the overlay's cell
     /// by the pump — nothing else writes it.
@@ -153,8 +157,7 @@ impl VideoStage {
         let caps = sink.caps();
         let paced = sink.clock().is_some() && audio_plane.is_some();
         let priority = match cfg.present_priority {
-            p if paced => p,
-            PresentPriority::Smooth { .. } => {
+            PresentPriority::Smooth { .. } if !paced => {
                 tracing::warn!("smoothness unavailable: decoder has no paced audio/video timeline");
                 PresentPriority::Latency
             }
@@ -174,6 +177,7 @@ impl VideoStage {
             last_keyframe_request: None,
             hold_started: None,
             backlog_sampled: None,
+            last_backlog: None,
             deep_samples: 0,
             au_feed_us: 0,
             parts_fed: 0,
@@ -243,6 +247,13 @@ impl VideoStage {
         self.pacing.health()
     }
 
+    /// The window's tightest complete-AU deadline margin — see [`Pacing::note_submitted`]. Only
+    /// ever `Some` while the feed is timed (`report_decode_latency || diagnostics`), since that is
+    /// what gates the submission clock read.
+    pub fn take_pacing_slack_us(&mut self) -> Option<i32> {
+        self.pacing.take_min_slack_us()
+    }
+
     /// Audio-plane queue depth in ms, or `None` on a session with no plane — see
     /// `NdlVideo::audio_plane_lead_ms`. Here because it is a *video* symptom: the plane's depth is
     /// what NDL paces the picture on, so it belongs next to the backlog in the video heartbeat.
@@ -270,13 +281,17 @@ impl VideoStage {
         self.hold_started.is_some()
     }
 
-    /// Decoder backlog depth for the heartbeat/overlay, or `None` if the backend has no queue to
-    /// read (or the query failed — which must not read as an empty one).
+    /// Decoder backlog depth for the heartbeat/overlay, or `None` before the first sample (or on a
+    /// backend with no queue to read — which must not be reported as an empty one).
     ///
-    /// Diagnostics only: nothing steers on it, so the caller asks only when something is going to
-    /// read the answer, and the FFI call rides that cadence rather than one of its own.
+    /// **Reads [`Self::backpressure`]'s last sample rather than querying NDL.** The query is an FFI
+    /// call behind the lock the picture's own feed needs, and the control path already makes it
+    /// every [`BACKLOG_SAMPLE`]; a diagnostic must not take that lock a second time on the video
+    /// thread. The figure is therefore up to one sample interval old, which is well inside the
+    /// heartbeat's own cadence. A hold suspends sampling, so it also goes stale for the length of
+    /// one — `holding` is published beside it and says so.
     pub fn backlog_depth(&self) -> Option<i32> {
-        self.sink.queue_depth().map(|d| i32::try_from(d).unwrap_or(i32::MAX))
+        self.last_backlog.map(|d| i32::try_from(d).unwrap_or(i32::MAX))
     }
 
     /// Backpressure, sampled on the feed path. A render buffer that stays deep means the decoder
@@ -288,7 +303,9 @@ impl VideoStage {
             return false;
         }
         self.backlog_sampled = Some(Instant::now());
-        let Some(depth) = self.sink.queue_depth() else {
+        let depth = self.sink.queue_depth();
+        self.last_backlog = depth;
+        let Some(depth) = depth else {
             return false;
         };
         if depth < BACKLOG_HOLD_FRAMES {
@@ -313,11 +330,7 @@ impl VideoStage {
         // truncated input and only a re-anchor clears it. `Discard` says so; `Feed` carries whether
         // the pieces so far leave this AU decodable.
         let PartStep::Feed { partial, lost_parts } = self.parts.step(frame, self.caps.partial_au) else {
-            // Same reason as the `drop_open` below: the AU this was accumulating submission time
-            // for is abandoned, so its cost must not be charged to whatever AU comes next. Its
-            // stamp goes with it — the next AU is a new picture and maps itself.
-            self.au_feed_us = 0;
-            self.au_base_ns = None;
+            self.abandon_open_au();
             return SinkResult::Held;
         };
         let flags = FrameFlags {
@@ -341,12 +354,17 @@ impl VideoStage {
             // decoder is gone), so the AU cannot be completed. Forgetting it costs the rest of
             // one AU; keeping it would eventually feed a frame with a hole in it.
             self.parts.drop_open();
-            // The AU this was accumulating for will never complete, so it must not be added to
-            // whatever AU comes next — nor may its stamp be repeated onto one.
-            self.au_feed_us = 0;
-            self.au_base_ns = None;
+            self.abandon_open_au();
         }
         result
+    }
+
+    /// Forget the AU currently open: its accumulated submission time must not be charged to
+    /// whatever AU comes next, and its stamp must not be repeated onto one — the next AU is a new
+    /// picture and maps itself.
+    fn abandon_open_au(&mut self) {
+        self.au_feed_us = 0;
+        self.au_base_ns = None;
     }
 
     fn feed(&mut self, au: &[u8], pts_ns: u64, flags: FrameFlags) -> SinkResult {
