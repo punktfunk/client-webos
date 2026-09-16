@@ -536,24 +536,32 @@ What still matters:
 
 ## NDL's audio plane: why every load has one
 
-⚠ **NDL only paces the picture when its audio plane is fed.** On a video-only load it ignores
-`pauseAtDecodeTime` entirely and presents at feed cadence, which beats against a 120 Hz panel —
-the long-standing "smooth at 1080p, randomly smooth above it" stutter. Measured on a CX: frames
-stamped ~60 ms ahead of the player clock still left `render_buffer_length` at 0-1 and still
-stuttered, and the same session with the audio plane fed was smooth.
+⚠ **NDL only paces the picture when the load HAS an audio plane and that plane is PRIMED.** On a
+video-only load it ignores presentation timestamps entirely and presents at feed cadence, which
+beats against a 120 Hz panel — the long-standing "smooth at 1080p, randomly smooth above it"
+stutter. Measured on a CX: frames stamped ~60 ms ahead of the player clock still left
+`render_buffer_length` at 0-1 and still stuttered, and the same session with an audio plane was
+smooth.
+
+**It does NOT need that plane to keep being fed** (CX, 2026-09-16). With the plane left 136 seconds
+stale — across an idle stretch where the host sent no frames either — the picture paced normally
+and the deadline margins were slightly better than with a metronome running. This is why the
+silent metronome is gone: the load prime is what matters, which is also aurora's structure (one
+empty Opus frame at `LoadMedia`, `ndl_player.c:225-227`, and nothing after). Evidence is one set;
+`ndl_plane_feed=continuous` restores the metronome without a rebuild.
 
 So **every accepted V2 load asks for a stereo audio plane**, and what rides it is a separate
 question:
 
-- **The clock plane** (the default) — `NdlVideo::run_clock_plane` feeds a silent Opus metronome
-  stamped in NDL's own player-clock domain, while `platform::webos::audio` decodes the real audio
-  to SDL. Confirmed at 4K120 5.1.
+- **Software decode** (the default) — `platform::webos::audio` decodes the real audio to SDL and
+  the NDL plane carries only its load prime. `NdlVideo::run_clock_plane` still runs, but it now
+  only watches (the unconfirmed-plane check) unless a launch param restores the metronome.
 - **Hardware Opus decode** (Audio processing → Offload, opt-in) — the audio pump feeds the real
   stream, stamped on the video timeline; no SDL device is opened.
 
-`run_clock_plane` runs on **both** routes (`session::pipeline::spawn_plane_threads`): under offload
-it yields to the real stream and only fills in after `REAL_FEED_GRACE_MS` with no packet, since a
-host that stops sending would otherwise starve the plane and freeze the picture.
+`run_clock_plane` runs on **both** routes (`session::pipeline::spawn_plane_threads`), and with the
+metronome retired its remaining job is the unconfirmed-plane check, kept off the feed path. The
+dead-capture filler went with the metronome: a starved plane turned out not to freeze the picture.
 
 A set that refuses the audio plane outright ends up video-only at the load and gives up pacing with
 it; the session log names which route it took. **NDL v1 has no Opus audio type at all**, so webOS 4
@@ -725,8 +733,12 @@ queue. Pacing is therefore only about *when* bytes are released.
 `session::timeline::Pacing` wraps **`punktfunk_core::phase::CadenceClock`** (the same loop the
 desktop/Android/Apple presenters pace on, so every client computes the same statistic): a type-2
 loop over `ready − pts` whose cushion is `2 × measured MAD`, floored at 0.5 ms and **capped at one
-frame interval** — that ceiling is core's invariant, not a knob. `snapping()` tuning, because NDL
-presents on the panel's grid and the snap-up already carries ~half a refresh.
+frame interval** — that ceiling is core's invariant, not a knob. `snapping()` tuning, whose
+rationale ASSUMES the sink latches to the panel's grid so the snap-up already carries ~half a
+refresh of slack. **That assumption is unverified on NDL** — no claim of it exists anywhere in
+upstream ss4s, aurora's software grid observes no display phase, and NDL's own scheduling is not
+documented. Until it is measured, read the tuning
+as a design assumption rather than firmware behaviour.
 
 The mapping it replaced (a fixed anchor `base = player0 + (host_pts - host0)` plus a one-off lead
 trim) is gone. It carried no rate term, so two free-running crystals walked the session's real lead
