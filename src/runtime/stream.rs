@@ -420,6 +420,9 @@ pub(super) fn run_inner() -> Result<()> {
                 }
                 _ => None,
             };
+            // Every Bluetooth pad's input arrives in 77.5 ms batches unless its link is held out of
+            // sniff — see `pad_link`. Dropped with the session, which hands the links back.
+            let pad_link = crate::platform::webos::pad_link::PadLink::start();
             // See `open_ds_feedback`. The envelope rides along so a Bluetooth pad plays the coil lane
             // itself (tier A); it is harmless on the spawn route, which never claims it.
             let mut ds_feedback = open_ds_feedback(settings.gamepad_type(), haptics.clone());
@@ -1163,6 +1166,7 @@ pub(super) fn run_inner() -> Result<()> {
 
             // Trigger resistance is firmware state that outlives the session — hand the pad back
             // first or a game that ended with R2 stiff leaves it stiff on the TV home screen.
+            drop(pad_link);
             if let Some(mut fb) = ds_feedback.take() {
                 fb.release();
             }

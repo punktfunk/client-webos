@@ -215,8 +215,15 @@ The pad's speaker and coils take Opus / s8-PCM over the same HID output plane (r
 `device/internal/stopSniff` was called for the pad: **the TV keeps the HID link in sniff mode**, so
 output reports leave in bursts at the anchor points and the pad's audio buffer starves in between —
 it then replays stale buffer content, which is what "frames out of order" sounded like.
-`stopSniff`/`startSniff` sit in the `public` group; call stop when the audio lane opens and start
-when it closes. The coil lane alone masked this: a buzz with periodic holes still feels like a buzz.
+`stopSniff`/`startSniff` sit in the `public` group. The coil lane alone masked this: a buzz with
+periodic holes still feels like a buzz.
+
+**Sniff batches input too, for every Bluetooth pad.** In sniff the pad's input reports reach the
+kernel in bursts at the ~77.5 ms anchor (measured on the G5: ~10 bursts a second, gaps of 77.5 ms
+and multiples), so every press waits for the next burst and a tap shorter than one burst arrives as
+press and release together, which the pad-state snapshot folds away. `platform::webos::pad_link`
+holds every Bluetooth joystick out of sniff for the whole stream and hands the links back to the
+TV's policy at the end.
 
 **The two take different payloads.** `stopSniff` wants the address alone; `startSniff` wants HCI
 Sniff Mode's parameters and refuses anything else with `errorCode 144`, a schema error that names
@@ -233,10 +240,11 @@ it: replies are asynchronous and `REPLIES` is process-wide, so an undispatched o
 into the next session and reads as its fault.
 
 Those two are the **only** sniff-related methods in the whole `bluetooth2` API — there is no
-link-policy or QoS call, so nothing persistent can be set and a re-assert is the only lever. Do not
-re-assert on a timer: sniff is a link-IDLE state and a lane at 94 reports/s never lets the link
-idle, so `stopSniff` rides the edge out of an idle lane (2 s floor, since the host gates audio on
-silence).
+link-policy or QoS call, so nothing persistent can be set and a re-assert is the only lever. One
+`stopSniff` does not hold: the stack slides back into sniff within seconds even while the pad streams
+motion reports. The keeper re-asserts every 250 ms and at once when the pad reader sees a gap over
+50 ms (a motion node reports every ~2.5 ms); a call replies in 1–3 ms. Measured with the keeper:
+~400 reports a second instead of ~10 bursts.
 
 **Feed the pad at its own clock, never faster.** One report per 10.667 ms, and the tick must land
 on the next interval in the *future* — advancing by one interval lets a tick whose work overran
