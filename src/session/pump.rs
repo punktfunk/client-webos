@@ -15,16 +15,14 @@ use punktfunk_core::PunktfunkError;
 use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::session::audio::AudioStage;
 use crate::session::stage::{SinkResult, VideoStage, WireFrame};
+use crate::session::timeline::{CadenceTrace, Deltas};
 use crate::session::StreamStats;
 
 /// Longest a `next_frame` call parks before the loop re-checks `stop`.
 const FRAME_WAIT: Duration = Duration::from_millis(500);
-/// Cadence of the pump's liveness check: refreshes the overlay's backlog figure, and is the
-/// only place a "nothing is arriving" line can come from.
+/// Pump liveness check cadence; refreshes overlay backlog and logs "nothing arriving".
 const HEARTBEAT: Duration = Duration::from_secs(2);
-/// How often the heartbeat's detail line reaches the log. The line is a trend ("still
-/// draining, still not holding"), and one every couple of seconds buried the rest of the log
-/// saying nothing new.
+/// Cadence for verbose heartbeat detail logging (trend line).
 const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
 /// A stamp that fires once per `interval` and re-arms itself.
@@ -41,12 +39,14 @@ impl Tick {
         }
     }
 
-    fn due(&mut self) -> bool {
-        let ready = self.last.elapsed() >= self.interval;
-        if ready {
-            self.last = Instant::now();
+    /// Elapsed span when due; allows reporting actual window coverage vs. nominal interval.
+    fn due(&mut self) -> Option<Duration> {
+        let elapsed = self.last.elapsed();
+        if elapsed < self.interval {
+            return None;
         }
-        ready
+        self.last = Instant::now();
+        Some(elapsed)
     }
 }
 
@@ -56,12 +56,9 @@ struct VideoPump {
     client: Arc<NativeClient>,
     stage: VideoStage,
     stats: Arc<StreamStats>,
-    /// Whether the host's per-content HDR metadata is worth draining. False on every session
-    /// where nothing would apply it: an SDR or non-HEVC stream.
+    /// Whether to drain host HDR metadata (false for SDR or non-HEVC).
     is_hdr: bool,
-    /// Whether the REAL audio stream rides the NDL plane. False on the software route, where the
-    /// plane carries the silent metronome only: its lead is then a pacing figure that says nothing
-    /// about lip sync, so the A/V offset below would be a fiction.
+    /// True when real audio rides the NDL plane; false when plane is silent metronome only.
     audio_rides_plane: bool,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
@@ -70,6 +67,10 @@ struct VideoPump {
     drop_credit_expiry: Option<Instant>,
     heartbeat: Tick,
     video_log: Tick,
+    /// Session totals as of the last heartbeat, so the line can report this window's change.
+    last_dropped: u64,
+    last_holds: u64,
+    last_held: Duration,
 }
 
 impl VideoPump {
@@ -96,6 +97,9 @@ impl VideoPump {
             drop_credit_expiry: None,
             heartbeat: Tick::new(HEARTBEAT),
             video_log: Tick::new(VIDEO_LOG_INTERVAL),
+            last_dropped: 0,
+            last_holds: 0,
+            last_held: Duration::ZERO,
         }
     }
 
@@ -103,14 +107,11 @@ impl VideoPump {
         while !stop.load(Ordering::Relaxed) {
             match self.client.next_frame(FRAME_WAIT) {
                 Ok(frame) => self.on_frame(&frame),
-                Err(PunktfunkError::NoFrame) => {
-                    if self.heartbeat.due() {
-                        // INFO for the same reason as the main heartbeat — and this arm is the
-                        // one that says "nothing is arriving at all", which is a different fault
-                        // from "arriving but not presenting".
-                        tracing::info!("video: {} frames (idle)", self.frames());
-                    }
-                }
+                // The SAME heartbeat as the frame path, not a second consumer of the tick: this
+                // arm used to swallow the fire and print only the idle line, so an idle stretch
+                // published nothing and left the cadence window accumulating across it — the next
+                // window then covered far more than the interval it claimed.
+                Err(PunktfunkError::NoFrame) => self.heartbeat(true),
                 // A teardown the user asked for reaches both pumps as `Closed`, so it is not an
                 // error in either — the audio pump already logged it at INFO.
                 Err(PunktfunkError::Closed) => {
@@ -135,7 +136,7 @@ impl VideoPump {
     }
 
     fn on_frame(&mut self, frame: &punktfunk_core::session::Frame) {
-        self.heartbeat();
+        self.heartbeat(false);
 
         // Everything wire-shaped, and nothing else: whether this delivery is decodable at all,
         // and how one AU's pieces fit together, is the stage's bookkeeping.
@@ -147,12 +148,8 @@ impl VideoPump {
             reanchor: frame.flags & u32::from(FLAG_SOF) != 0 || frame.flags & USER_FLAG_RECOVERY_ANCHOR != 0,
             loss: self.note_loss(frame),
         };
-        // Sampled ahead of the feed so a stalled decoder is not handed one more frame first.
-        if self.stage.backpressure() {
-            if let Err(e) = self.client.request_keyframe() {
-                tracing::warn!("request_keyframe: {e:#}");
-            }
-        }
+        // Diagnostic only — see `VideoStage::sample_backlog`. Nothing steers on the reading.
+        self.stage.sample_backlog();
         match self.stage.submit(&wire) {
             SinkResult::Presented { decode_us } => {
                 if let Some(us) = decode_us {
@@ -178,41 +175,60 @@ impl VideoPump {
         }
     }
 
-    /// Refreshes the overlay's backlog figure, and on a slower cadence logs the pump's state.
-    ///
-    /// Every figure here is diagnostic, so the whole body is skipped unless one of its two readers
-    /// is actually listening: the overlay, or the TRACE log below. Nothing here queries NDL — the
-    /// backlog is the backpressure path's last sample (`VideoStage::backlog_depth`), because that
-    /// query is an FFI call behind the same lock the feed takes.
-    fn heartbeat(&mut self) {
-        if !self.heartbeat.due() {
+    /// Close the measurement window: take-and-re-arm all figures and difference all session counters
+    /// in one place. Called once per heartbeat before listener check. Dropping the return resets accumulators.
+    fn close_window(&mut self) -> WindowFigures {
+        let dropped = self.client.frames_dropped();
+        let (holds, held) = self.stage.hold_totals();
+        let figures = WindowFigures {
+            dropped: dropped.saturating_sub(self.last_dropped),
+            holds: holds.saturating_sub(self.last_holds),
+            held: held.saturating_sub(self.last_held),
+            // A minimum rather than a mean, so one bad frame stays visible.
+            min_slack_us: self.stage.take_pacing_slack_us(),
+            cadence: self.stage.take_cadence_trace(),
+        };
+        self.last_dropped = dropped;
+        self.last_holds = holds;
+        self.last_held = held;
+        figures
+    }
+
+    /// Refresh overlay backlog; log pump state on slower cadence. Close the window regardless,
+    /// so the next one starts clean. Backlog is the sampler's last reading, not a fresh NDL query.
+    fn heartbeat(&mut self, idle: bool) {
+        let Some(window) = self.heartbeat.due() else {
             return;
+        };
+        if idle {
+            // This arm says "nothing is arriving at all", which is a different fault from
+            // "arriving but not presenting".
+            tracing::info!("video: {} frames (idle)", self.frames());
         }
-        // Latched for the feed path, so the timing decision there costs a field read rather than
-        // an atomic load per AU piece. A toggle takes effect within one heartbeat. TRACE latches
-        // it too: the log below reads the same `timed`-gated figures the overlay does
-        // (`late_submit`, `min_slack`), which would otherwise stay zero forever.
+        // Latch for feed path (field read, not atomic per AU). Takes effect within one heartbeat.
         let overlay = self.stats.wants_diagnostics();
-        // TRACE, matching where the dump below now sits: the latch exists so that line's
-        // `timed`-gated figures are populated when something is going to print them.
-        let tracing_stats = tracing::enabled!(tracing::Level::TRACE);
+        // DEBUG level runs on real deploys; latch ensures `timed`-gated figures populate.
+        let tracing_stats = tracing::enabled!(tracing::Level::DEBUG);
         self.stage.set_diagnostics(overlay || tracing_stats);
-        // `due()` on its own line, so the tick keeps advancing on a level where nothing listens.
-        // The body stays behind a real reader: it takes the slack window, which re-arms it, so a
-        // heartbeat nobody reads would silently shorten the next one.
-        let log_due = self.video_log.due() && tracing_stats;
-        if !overlay && !log_due {
+        // ⚠ Pacing lines print EVERY heartbeat (not on `video_log`'s slower tick). Take-and-re-arm
+        // figures must happen here; slower cadence would silently skip windows. Heartbeat is the window.
+        let log_due = self.video_log.due().is_some() && tracing::enabled!(tracing::Level::TRACE);
+        // Close window before early return so unread heartbeats still reset figures.
+        let window_figures = self.close_window();
+        if !overlay && !tracing_stats {
             return;
         }
+        let WindowFigures {
+            dropped: dropped_window,
+            holds: holds_window,
+            held: held_window,
+            min_slack_us,
+            cadence,
+        } = window_figures;
         let backlog = self.stage.backlog_depth();
         let pacing = self.stage.pacing_health();
         let plane_lead = self.stage.audio_plane_lead_ms();
-        // The take re-arms the window, so it happens exactly once per heartbeat and the figure the
-        // overlay shows is the worst frame of the last interval — which is the point of a min.
-        let min_slack_us = self.stage.take_pacing_slack_us();
-        // Differenced here rather than in the stage: both halves are already in hand, and they are
-        // one clock apart by construction — NDL stamps audio a fixed lead ahead of its load clock
-        // and the picture its mapped cushion ahead, so the gap between them is the lip sync.
+        // Difference here: both halves in hand, one clock apart by construction.
         let av_offset = self
             .audio_rides_plane
             .then(|| plane_lead.map(|lead| lead - pacing.cushion_ns / 1_000_000))
@@ -239,17 +255,22 @@ impl VideoPump {
         };
         publish(&self.stats.audio_plane_lead_ms, plane_lead);
         publish(&self.stats.av_offset_ms, av_offset);
-        // ⚠ **These are the OVERLAY's figures, and the overlay is where they belong.** A periodic
-        // dump of live counters buries the events worth reading — the holds, the refusals, the slow
-        // feeds — so it sits at TRACE, one step below the `TELEMETRY_LEVEL=debug` a deploy usually
-        // runs at. Turn it up only when the screen is not in front of you; everything here is on
-        // the stats overlay live.
-        if log_due {
+        // ⚠ **These are the OVERLAY's figures, and the overlay is where they belong** — everything
+        // here is live on the stats overlay. Two lines are at DEBUG anyway, because the pacing
+        // baseline has to be capturable off a normal deploy and is read as one window.
+        // The per-frame video dump, which is
+        // what actually buries the events worth reading, stays at TRACE.
+        if tracing_stats {
             // Neither counter measures on-glass cadence; final submission includes AU tail and FFI waits.
-            tracing::trace!(
-                "pacing: late_stamp={} late_submit={} jitter={:.1}ms cushion={:.1}ms reanchors={} av={} min_slack={}",
-                pacing.late_stamps,
-                pacing.late_submissions,
+            tracing::debug!(
+                "pacing[{:.1}s]: late_stamp={}/{} late_submit={}/{} au_span={:.1}ms now(jitter={:.1}ms cushion={:.1}ms) reanchors={} av={} min_slack={} stamp_slack={}",
+                window.as_secs_f32(),
+                cadence.late_stamps,
+                cadence.mapped,
+                cadence.late_submissions,
+                cadence.submissions,
+                // Paired per picture: mapping to completed submission, the window's worst.
+                f64::from(cadence.max_au_span_us) / 1000.0,
                 pacing.jitter_ns as f64 / 1e6,
                 pacing.cushion_ns as f64 / 1e6,
                 pacing.reanchors,
@@ -257,20 +278,51 @@ impl VideoPump {
                 // Persistently negative here, while `jitter` stays healthy, is the signature of a
                 // large AU finishing against a deadline its first piece set.
                 min_slack_us.map_or_else(|| "n/a".to_string(), |us| format!("{:.1}ms", f64::from(us) / 1000.0)),
+                // How deep the arrival tail ran past the cushion — the figure that sizes one.
+                cadence
+                    .min_stamp_slack_us
+                    .map_or_else(|| "n/a".to_string(), |us| format!("{:.1}ms", f64::from(us) / 1000.0)),
             );
+            // Plan §4 step 1's baseline, in one line: the cadence the mapping was handed, what it
+            // produced, and what NDL received. `src` irregular with `out` matching it is the source;
+            // `out` irregular where `src` is clean is ours. Events are apart from the deltas because
+            // a gap or a repeat is not a short frame.
+            tracing::debug!(
+                "cadence[{:.1}s]: src={} due={} out={} repeats={} regressions={} gaps={}",
+                window.as_secs_f32(),
+                fmt_deltas(&cadence.source),
+                fmt_deltas(&cadence.due),
+                fmt_deltas(&cadence.emitted),
+                cadence.repeats,
+                cadence.regressions,
+                cadence.gaps,
+            );
+            // On the SAME 2s window as the cadence above, because that is how a stutter report is
+            // read: a plane lead sagging towards zero is what NDL stops pacing the picture on
+            // (docs/NOTES.md § "NDL's audio plane"), and a hold or a backlog says the gap in the
+            // cadence was ours rather than the source's.
+            // `holds`/`held`/`dropped` cover the window; `backlog` and `plane_lead` are SNAPSHOTS
+            // read at this instant and say nothing about what happened between two of them — a
+            // plane lead that dipped and recovered is invisible here. Labelled so, because the
+            // difference is exactly what an earlier read of these lines got wrong.
+            tracing::debug!(
+                "feed[{:.1}s]: holds={} held={:.0}ms dropped={} now(backlog={} plane_lead={})",
+                window.as_secs_f32(),
+                holds_window,
+                held_window.as_secs_f32() * 1000.0,
+                dropped_window,
+                backlog.map_or_else(|| "n/a".to_string(), |b| b.to_string()),
+                plane_lead.map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms")),
+            );
+        }
+        if log_due {
             tracing::trace!(
-                "video: {} frames, parts={}, holding={}, dropped={}, backlog={}, plane_lead={}",
+                "video: {} frames, parts={}",
                 self.frames(),
                 // Against `frames`: 0 means slice-progressive delivery never fired on this mode
                 // (core emits early parts only for an AU spanning more than one FEC block), so the
                 // whole lever is inert here and its copy cost is not being paid either.
                 self.stage.parts_fed(),
-                self.stage.holding(),
-                self.client.frames_dropped(),
-                backlog.map_or_else(|| "n/a".to_string(), |b| b.to_string()),
-                // The audio plane's depth is a video figure: NDL paces the picture on it, and a
-                // lead sagging towards zero is what a stutter report should be read against.
-                plane_lead.map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms")),
             );
         }
     }
@@ -312,8 +364,7 @@ impl VideoPump {
         let dropped = dropped_delta > credited;
         let lost = gap_width > 0 || dropped;
         if lost && !self.stage.holding() {
-            // Logged alongside the freeze the sink reports next: a sequence hole and a frame the
-            // transport itself gave up on point at different faults.
+            // Logged with the sink's freeze report; gaps and drops point at different faults.
             tracing::warn!("loss: gap={gap_width} dropped={dropped} (frame {})", frame.frame_index);
         }
         lost
@@ -348,9 +399,7 @@ impl VideoPump {
     }
 }
 
-/// The video thread's body: pump until `stop`.
-// The thread body owns everything it is handed — the `Arc`s die with it, which is what keeps
-// the client and the stats alive for exactly as long as the pump runs.
+/// The video thread's body: pump until `stop`. Owns all `Arc`s, keeping client and stats alive.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn video_pump(
     client: Arc<NativeClient>,
@@ -366,19 +415,10 @@ pub(super) fn video_pump(
 /// How long an audio drain parks on an empty plane before re-checking `stop`.
 const AUDIO_WAIT: Duration = Duration::from_millis(100);
 
-/// The shared body of both audio threads: pull packets, hand each to `play`, exit on `stop` or
-/// a closed plane.
+/// Shared body of both audio threads: pull packets, hand each to `play`, exit on `stop` or closed plane.
 ///
-/// A thread of its own on either path, not a drain bolted onto another loop. Bolted onto the
-/// video pump (where the offloaded path first lived) audio only drained after a `next_frame`
-/// call that blocks up to [`FRAME_WAIT`], so a video drought — an encoder stall on the host, a
-/// loss hold — chopped audio into ≤500 ms stalls *with packets already waiting*, and in normal
-/// flow packets drained in per-video-frame clumps that all took the same drain-time PTS. Bolted
-/// onto the main loop (where the software path lived, forced by `sdl2::audio::AudioQueue` being
-/// `!Send`) it sat behind the UI's software rasterizer on a 2-3 core panel, and `docs/NOTES.md`
-/// already named the 500 ms stats-overlay raster as an underrun source because of it. Core's
-/// `next_audio` docs ask for exactly this thread ("packets arrive every 5 ms"), and its pull
-/// methods are one-thread-per-plane safe by contract.
+/// Dedicated thread per core's contract (packets arrive every 5 ms); avoids stalls from
+/// video pump blocking or main-loop rasterizer contention. Pull methods are one-thread-per-plane safe.
 fn audio_drain(client: &NativeClient, stop: &AtomicBool, what: &str, mut play: impl FnMut(&AudioPacket)) {
     while !stop.load(Ordering::Relaxed) {
         match client.next_audio(AUDIO_WAIT) {
@@ -423,8 +463,7 @@ pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &A
     });
 }
 
-/// Spawns the audio thread for a session whose sink lives outside `connect` (the SDL device, which
-/// belongs to whichever thread initialised SDL).
+/// Spawns the audio thread for a session whose sink lives outside `connect` (SDL device).
 pub fn spawn_audio_feed(
     client: Arc<NativeClient>,
     mut stage: AudioStage,
@@ -436,9 +475,33 @@ pub fn spawn_audio_feed(
         .context("spawn audio thread")
 }
 
-/// Joins the audio thread, bounded by the same timeout every other teardown join uses — a thread
-/// wedged in an Opus decode must not hold the whole app on the way back to the menu. This is the
-/// SDL route only, so a wedge here needs no `ndl::poison()`.
+/// Joins audio thread with standard teardown timeout. SDL route only; no ndl::poison() needed.
 pub fn join_audio_feed(handle: std::thread::JoinHandle<()>) -> bool {
     join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT, "audio-feed", || ())
+}
+
+/// One cadence series for the heartbeat: how many intervals, which way they ran, how irregular they
+/// were, and the extremes. `n=0` means the series never advanced in this window.
+fn fmt_deltas(d: &Deltas) -> String {
+    if d.n == 0 {
+        return "n=0".to_string();
+    }
+    format!(
+        "n={} mean{:+.2} mad{:.2} [{:.2},{:.2}]ms",
+        d.n,
+        d.mean_err_ns() as f64 / 1e6,
+        d.mad_ns() as f64 / 1e6,
+        d.min_ns as f64 / 1e6,
+        d.max_ns as f64 / 1e6,
+    )
+}
+
+/// Everything on the heartbeat's lines that belongs to ONE window rather than to the session —
+/// see [`VideoPump::close_window`].
+struct WindowFigures {
+    dropped: u64,
+    holds: u64,
+    held: Duration,
+    min_slack_us: Option<i32>,
+    cadence: CadenceTrace,
 }
