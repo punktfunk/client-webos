@@ -115,8 +115,9 @@ pub(super) fn run_ui_flow(
     // dialog while streaming — see `DisconnectChord`.
     let mut chord = DisconnectChord::default();
     let mut quit_dialog_was_active = false;
-    // The blurred page a frosted modal card sits on, held across frames — see the frame block.
-    let mut page: Option<skia_safe::Image> = None;
+    // The page a frosted modal card sits on, sharp and blurred, held across frames — see the
+    // frame block.
+    let mut page: Option<crate::app::draw::glass::Page> = None;
     let mut drawable_size = canvas.window().drawable_size();
     let mut backdrop_was_moving = false;
     'ui: loop {
@@ -440,11 +441,11 @@ pub(super) fn run_ui_flow(
             if card_up && page.is_none() {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
                 let sigma = crate::app::draw::glass::page_sigma(display_mode.h as u32, dh);
-                page = snap.and_then(|snap| crate::app::draw::glass::blur_image(surface.canvas(), &snap, sigma));
+                page = snap.and_then(|snap| crate::app::draw::glass::Page::capture(surface.canvas(), &snap, sigma));
             }
             let c = surface.canvas();
             let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)
-                .with_backdrop(page.as_ref());
+                .with_backdrop(page.as_ref().map(crate::app::draw::glass::Page::backdrop));
             app.draw_modals(&frame, dt);
             app.draw_launch(&frame);
             if let Some(lines) = &log_lines {
@@ -467,6 +468,7 @@ pub(super) fn run_ui_flow(
     // stay, so the next entry is not a cold start. The page blur first: `free_gpu_resources`
     // cannot reclaim a texture a live `Image` still holds.
     drop(page.take());
+    crate::app::draw::glass::release();
     gl.release_resources();
     Ok(match connect_handle {
         Some((handle, target, settings, gamepad_auto)) => UiOutcome::Launch(Box::new(ConnectOutcome {

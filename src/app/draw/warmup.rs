@@ -35,13 +35,21 @@ pub(crate) fn draw(
         info.width() as f32 / w.max(1) as f32,
         info.height() as f32 / h.max(1) as f32,
     );
-    let backdrop = glass::blur_image(target.canvas(), &source, glass::page_sigma(h, info.height() as u32))?;
-    let mut cover = skia_safe::surfaces::raster_n32_premul((480, 720))?;
-    cover.canvas().clear(theme::card_face(0.0));
-    cover
-        .canvas()
-        .draw_circle((240.0, 360.0), 180.0, &theme::fill(theme::fg(0.5)));
-    let cover = cover.image_snapshot();
+    let page = glass::Page::capture(target.canvas(), &source, glass::page_sigma(h, info.height() as u32))?;
+    // The same format the library decodes covers into: an unpremultiplied RGBA8 raster. A
+    // premultiplied stand-in compiled different sampling programs, so the first real card
+    // menu compiled its own while it slid up.
+    let (cw, ch) = (480u32, 720u32);
+    let pixels: Vec<u8> = (0..cw * ch)
+        .flat_map(|i| {
+            if (i % cw).abs_diff(cw / 2) < cw / 4 {
+                [200, 180, 160, 255]
+            } else {
+                [20, 24, 28, 255]
+            }
+        })
+        .collect();
+    let cover = home::raw_image(cw, ch, home::RawFormat::Rgba8888, &pixels)?;
     let rows = [RowSpec::action("Connect", true), RowSpec::action("Settings", true)];
     let settings_rows = [
         RowSpec::choice("Resolution", "Native").with_header("Display"),
@@ -63,7 +71,7 @@ pub(crate) fn draw(
             c.clear(theme::card_face(0.0));
             c.scale((sx, sy));
             fonts.begin_frame();
-            let f = Frame::new(c, fonts, w, h).with_backdrop(Some(&backdrop));
+            let f = Frame::new(c, fonts, w, h).with_backdrop(Some(page.backdrop()));
             let dy = crate::ui::animation::modal_rise(progress) as f32;
             list::draw(
                 &f,
