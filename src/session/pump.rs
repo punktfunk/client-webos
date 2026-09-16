@@ -288,11 +288,11 @@ impl VideoPump {
             // `out` irregular where `src` is clean is ours. Events are apart from the deltas because
             // a gap or a repeat is not a short frame.
             tracing::debug!(
-                "cadence[{:.1}s]: src={} due={} out={} repeats={} regressions={} gaps={}",
+                "cadence[{:.1}s]: src={} due={} assigned={} repeats={} regressions={} gaps={}",
                 window.as_secs_f32(),
                 fmt_deltas(&cadence.source),
                 fmt_deltas(&cadence.due),
-                fmt_deltas(&cadence.emitted),
+                fmt_deltas(&cadence.assigned),
                 cadence.repeats,
                 cadence.regressions,
                 cadence.gaps,

@@ -18,11 +18,11 @@ pub struct Pacing {
     last_host_pts_ns: Option<u64>,
     /// Session total for overlay; per-window figures live in [`CadenceTrace`].
     late_stamps: u64,
-    /// Baseline window: source, mapped, emitted cadence.
+    /// Baseline window: source, mapped, assigned cadence.
     trace: CadenceTrace,
     /// Previous mapped value, for trace deltas. Separate from monotonic floor `last_base_ns`.
     last_due_ns: Option<i64>,
-    last_emitted_ns: Option<u64>,
+    last_assigned_ns: Option<u64>,
     /// Player clock when open picture was mapped; for span measurement in `note_submitted`.
     map_clock_ns: Option<u64>,
     /// Tightest deadline margin since last read, µs; taken (cleared) on read.
@@ -52,7 +52,7 @@ impl Pacing {
             late_stamps: 0,
             trace: CadenceTrace::default(),
             last_due_ns: None,
-            last_emitted_ns: None,
+            last_assigned_ns: None,
             map_clock_ns: None,
             min_slack_us: None,
         }
@@ -70,7 +70,7 @@ impl Pacing {
             self.clock.due_ns(host_pts_ns, ready, self.source_interval_ns)
         };
         // Keep the three series aligned: excluded frames can't be counted in one and not others.
-        // Without this, src/due/emitted count different frames and their MADs don't compare.
+        // Without this, src/due/assigned count different frames and their MADs don't compare.
         let usable = self
             .trace
             .note_source(self.last_host_pts_ns, host_pts_ns, self.source_interval_ns);
@@ -97,14 +97,14 @@ impl Pacing {
             if let Some(last) = self.last_due_ns {
                 self.trace.due.note(due - last, self.source_interval_ns);
             }
-            if let Some(last) = self.last_emitted_ns {
+            if let Some(last) = self.last_assigned_ns {
                 self.trace
-                    .emitted
+                    .assigned
                     .note(i64::try_from(base - last).unwrap_or(0), self.source_interval_ns);
             }
         }
         self.last_due_ns = Some(due);
-        self.last_emitted_ns = Some(base);
+        self.last_assigned_ns = Some(base);
         self.map_clock_ns = Some(player_clock_ns);
         base
     }
@@ -149,7 +149,7 @@ impl Pacing {
         self.last_host_pts_ns = None;
         // The timeline jumped, so the first delta after it is not a cadence observation.
         self.last_due_ns = None;
-        self.last_emitted_ns = None;
+        self.last_assigned_ns = None;
         self.map_clock_ns = None;
     }
 
@@ -211,7 +211,7 @@ impl Deltas {
     }
 }
 
-/// Source, mapped, emitted cadence over the same window; frame events counted separately.
+/// Source, mapped, assigned cadence over the same window; frame events counted separately.
 /// Read all three together or not at all — neither has meaning across gaps, repeats, or re-anchors.
 #[derive(Clone, Copy, Default)]
 pub struct CadenceTrace {
@@ -219,8 +219,15 @@ pub struct CadenceTrace {
     pub source: Deltas,
     /// Mapped deadline deltas, before the monotonic clamp and the millisecond rounding.
     pub due: Deltas,
-    /// What NDL actually received, after both.
-    pub emitted: Deltas,
+    /// Assigned stamp deltas, after the clamp and the rounding — the cadence the sink was ASKED
+    /// for, recorded at mapping time.
+    ///
+    /// ⚠ **Not what the decoder accepted.** A picture the sink refuses (`NotReady` during a load,
+    /// a play error) is stamped before it is fed, so its delta lands here either way — a startup
+    /// that feeds nothing still shows a populated series. Recording it after a successful feed
+    /// would be the wrong fix: the three series only compare because every one of them observes
+    /// the same frames. If accepted-frame cadence is ever wanted, it needs its own series.
+    pub assigned: Deltas,
     /// Frames repeating the previous host PTS: no cadence observation, and excluded from `source`.
     pub repeats: u64,
     /// Host PTS going backwards. Excluded from `source` — a negative delta is not a short frame.
@@ -337,12 +344,12 @@ mod tests {
         assert_eq!(t.repeats, 1);
         assert_eq!(t.regressions, 0);
         assert_eq!(
-            (t.source.n, t.due.n, t.emitted.n),
+            (t.source.n, t.due.n, t.assigned.n),
             (t.source.n, t.source.n, t.source.n),
-            "series disagree: src={} due={} out={}",
+            "series disagree: src={} due={} assigned={}",
             t.source.n,
             t.due.n,
-            t.emitted.n,
+            t.assigned.n,
         );
         // 13 mapped pictures: the first has no predecessor, the gap and the repeat are excluded.
         assert_eq!(t.mapped, 13);
@@ -363,7 +370,7 @@ mod tests {
         }
         let t = p.take_trace();
         assert_eq!(t.source.n, t.due.n);
-        assert_eq!(t.source.n, t.emitted.n);
+        assert_eq!(t.source.n, t.assigned.n);
         assert!(t.source.n > 0, "every regular interval was excluded");
     }
 }

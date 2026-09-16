@@ -206,7 +206,7 @@ impl VideoStage {
         self.pacing.take_min_slack_us()
     }
 
-    /// The window's source/mapped/emitted cadence — see [`CadenceTrace`]. Take-and-re-arm, so it
+    /// The window's source/mapped/assigned cadence — see [`CadenceTrace`]. Take-and-re-arm, so it
     /// belongs on the heartbeat next to the slack figure and nowhere else.
     pub fn take_cadence_trace(&mut self) -> CadenceTrace {
         self.pacing.take_trace()
