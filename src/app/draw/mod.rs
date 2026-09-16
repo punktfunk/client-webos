@@ -85,7 +85,14 @@ pub(crate) struct Frame<'a> {
     /// hardware plane, composited outside our GL context, so a grab of our own framebuffer
     /// reads punch-through alpha and the card would frost a smear of the graphics plane.
     /// Frosting over video is unrepresentable rather than merely discouraged.
-    pub backdrop: Option<&'a skia_safe::Image>,
+    pub backdrop: Option<Backdrop<'a>>,
+}
+
+/// The page under a frosted card: blurred for its face, sharp for its rim.
+#[derive(Clone, Copy)]
+pub(crate) struct Backdrop<'a> {
+    pub blurred: &'a skia_safe::Image,
+    pub sharp: &'a skia_safe::Image,
 }
 
 impl<'a> Frame<'a> {
@@ -102,7 +109,7 @@ impl<'a> Frame<'a> {
 
     /// The same frame with a page for its cards to frost. The borrow is what keeps a snapshot
     /// from outliving the frame it was taken in.
-    pub fn with_backdrop(self, page: Option<&'a skia_safe::Image>) -> Self {
+    pub fn with_backdrop(self, page: Option<Backdrop<'a>>) -> Self {
         Self { backdrop: page, ..self }
     }
 }
