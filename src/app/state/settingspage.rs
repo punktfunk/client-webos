@@ -155,6 +155,7 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             if !profile {
                 push(Row::CalibrateHdr, None);
             }
+            push(Row::Kit(K::TenBitSdr), None);
             push(Row::Kit(K::PresentPriority), Some("Presentation"));
             push(Row::Kit(K::SmoothBuffer), None);
             if !profile {
@@ -203,6 +204,7 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
         RowId::Bitrate => "bitrate_kbps",
         RowId::Codec => "codec",
         RowId::Hdr => "hdr_enabled",
+        RowId::TenBitSdr => "ten_bit_sdr",
         RowId::PresentPriority => "present_priority",
         RowId::SmoothBuffer => "smooth_buffer",
         RowId::Audio => "audio_channels",
@@ -227,6 +229,7 @@ fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
         RowId::Bitrate => o.bitrate_kbps.is_some(),
         RowId::Codec => o.codec.is_some(),
         RowId::Hdr => o.hdr_enabled.is_some(),
+        RowId::TenBitSdr => o.ten_bit_sdr.is_some(),
         RowId::PresentPriority => o.present_priority.is_some(),
         RowId::SmoothBuffer => o.smooth_buffer.is_some(),
         RowId::Audio => o.audio_channels.is_some(),
@@ -559,6 +562,7 @@ impl App {
     fn tv_lock(&self, id: RowId, core: &trust::Settings) -> Option<String> {
         let row = match id {
             RowId::Hdr => menu::SettingsRow::Hdr,
+            RowId::TenBitSdr => menu::SettingsRow::TenBitSdr,
             RowId::Codec => menu::SettingsRow::Codec,
             RowId::Audio => menu::SettingsRow::Audio,
             RowId::PadType => menu::SettingsRow::Gamepad,
@@ -860,6 +864,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Bitrate
         | RowId::Codec
         | RowId::Hdr
+        | RowId::TenBitSdr
         | RowId::PresentPriority
         | RowId::SmoothBuffer
         | RowId::Audio
@@ -883,7 +888,6 @@ fn absence(id: RowId) -> Option<&'static str> {
         // The kit answers `false` for WebOS, so a page entry would draw nothing.
         RowId::Decoder
         | RowId::Chroma444
-        | RowId::TenBitSdr
         | RowId::VideoFit
         | RowId::Vsync
         | RowId::AllowVrr

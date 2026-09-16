@@ -142,6 +142,7 @@ fn spawn_connect(
                     mode,
                     bitrate_kbps: settings.bitrate_kbps,
                     hdr_enabled: settings.hdr_enabled,
+                    ten_bit_sdr: settings.ten_bit_sdr,
                     audio_channels: settings.audio_channels,
                     identity,
                     pin: Some(fp),
