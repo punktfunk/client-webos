@@ -904,12 +904,9 @@ signal that matters is packet drops on the probe and video that never arrives at
 **The cap is this client's.** `main.rs`'s `set_abr_env` sets `PUNKTFUNK_ABR_PROBE_KBPS` to 320 Mbps
 before anything spawns a thread (`setenv` isn't thread-safe, and core reads it while building its
 data-plane pump) — the connection test's proven-safe target, high enough to clear core's 70 %
-margin and far below the mode-derived ~1.8 Gbps 4K120 target. Host/network signals own the climbs
-and descent; NDL contributes only measured feed backpressure.
-
-**Never set `PUNKTFUNK_ABR_MAX_MBPS` here.** Core skips the startup probe under any ceiling cap,
-env or the Bitrate limit setting, and only the probe raises the climb ceiling. With the cap set,
-Automatic sits at the host's start rate (~20 Mbps) for the whole session.
+margin and far below the mode-derived ~1.8 Gbps 4K120 target. `PUNKTFUNK_ABR_MAX_MBPS` clamps the
+learned ceiling to the settings slider's 200 Mbps maximum. Host/network signals own the climbs and
+descent; NDL contributes only measured feed backpressure.
 
 Blind alleys, so they aren't re-tried:
 

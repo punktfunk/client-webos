@@ -141,7 +141,6 @@ fn spawn_connect(
                     port,
                     mode,
                     bitrate_kbps: settings.bitrate_kbps,
-                    abr_max_kbps: settings.abr_max_kbps,
                     hdr_enabled: settings.hdr_enabled,
                     audio_channels: settings.audio_channels,
                     identity,

@@ -150,7 +150,6 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             push(Row::Kit(K::Resolution), None);
             push(Row::Kit(K::Refresh), None);
             push(Row::Kit(K::Bitrate), Some("Quality"));
-            push(Row::Kit(K::BitrateCap), None);
             push(Row::Kit(K::Codec), None);
             push(Row::Kit(K::Hdr), None);
             if !profile {
@@ -201,8 +200,7 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
     Some(match id {
         RowId::Resolution | RowId::Aspect => "resolution",
         RowId::Refresh => "refresh_hz",
-        // The kit pins the rate and its limit as one pair.
-        RowId::Bitrate | RowId::BitrateCap => "bitrate_kbps",
+        RowId::Bitrate => "bitrate_kbps",
         RowId::Codec => "codec",
         RowId::Hdr => "hdr_enabled",
         RowId::PresentPriority => "present_priority",
@@ -226,7 +224,7 @@ fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
     match id {
         RowId::Resolution | RowId::Aspect => o.width.is_some() || o.height.is_some() || o.match_window.is_some(),
         RowId::Refresh => o.refresh_hz.is_some(),
-        RowId::Bitrate | RowId::BitrateCap => o.bitrate_kbps.is_some(),
+        RowId::Bitrate => o.bitrate_kbps.is_some(),
         RowId::Codec => o.codec.is_some(),
         RowId::Hdr => o.hdr_enabled.is_some(),
         RowId::PresentPriority => o.present_priority.is_some(),
@@ -860,7 +858,6 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Resolution
         | RowId::Refresh
         | RowId::Bitrate
-        | RowId::BitrateCap
         | RowId::Codec
         | RowId::Hdr
         | RowId::PresentPriority

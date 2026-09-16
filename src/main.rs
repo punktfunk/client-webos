@@ -20,6 +20,8 @@ mod services;
 mod session;
 mod ui;
 
+use crate::core::model::BITRATE_MAX_KBPS;
+
 #[cfg(target_os = "linux")]
 mod runtime;
 
@@ -33,17 +35,21 @@ mod runtime {
     }
 }
 
+/// [`BITRATE_MAX_KBPS`] in the Mbps unit `PUNKTFUNK_ABR_MAX_MBPS` is spelled in.
+const ABR_MAX_MBPS: u32 = BITRATE_MAX_KBPS / 1_000;
 /// Same proven-safe target as the client's connection test. Core keeps 70% of delivered probe
 /// throughput, so probing at the 200 Mbps policy ceiling can never prove that ceiling.
 const ABR_PROBE_KBPS: u32 = 320_000;
 
-/// Publishes the startup probe's burst target: the connection test's proven-safe 320 Mbps, not
-/// core's mode-derived 1.8 Gbps 4K120 burst. See `docs/NOTES.md` § "ABR startup probe".
+/// Publishes the two automatic-bitrate knobs `punktfunk_core` reads from the environment.
 ///
-/// Never `PUNKTFUNK_ABR_MAX_MBPS`: core skips the startup probe under any ceiling cap, and
-/// Automatic then never climbs past the host's start rate.
+/// `PUNKTFUNK_ABR_MAX_MBPS` clamps core's climb ceiling however it is learned;
+/// `PUNKTFUNK_ABR_PROBE_KBPS` uses the connection test's proven-safe 320 Mbps target. This clears
+/// core's 70% safety margin while avoiding its mode-derived 1.8 Gbps 4K120 burst. See
+/// `docs/NOTES.md` § "ABR startup probe".
 fn set_abr_env() {
     std::env::set_var("PUNKTFUNK_ABR_PROBE_KBPS", ABR_PROBE_KBPS.to_string());
+    std::env::set_var("PUNKTFUNK_ABR_MAX_MBPS", ABR_MAX_MBPS.to_string());
 }
 
 fn main() -> anyhow::Result<()> {
