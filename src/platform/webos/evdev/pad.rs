@@ -121,7 +121,13 @@ pub(super) struct Sensors {
     sent: Option<[i16; 6]>,
     /// Per-axis node units → wire units, `SCALE_SHIFT` fixed point — see [`Sensors::new`].
     scale: [i64; 6],
+    /// Kernel time of the last report, µs — see [`Sensors::note_report`].
+    last_report_us: Option<i64>,
 }
+
+/// Two consecutive reports further apart than an awake link allows: a `DualSense` motion node
+/// reports every ~2.5 ms, and Bluetooth sniff's anchor shows as gaps of 77.5 ms and multiples.
+const SNIFF_GAP_US: i64 = 50_000;
 
 /// Multitouch decode state for a claimed pad touchpad, plus the axis ranges its coordinates are
 /// normalized against.
@@ -215,6 +221,19 @@ impl Sensors {
         Self {
             scale,
             ..Default::default()
+        }
+    }
+
+    /// Flags a sniff-sized gap before this report, from its kernel timestamp, so `pad_link`
+    /// re-wakes the link at once instead of at its next timer.
+    fn note_report(&mut self, time: libc::timeval) {
+        let at_us = i64::from(time.tv_sec) * 1_000_000 + i64::from(time.tv_usec);
+        if self
+            .last_report_us
+            .replace(at_us)
+            .is_some_and(|last| at_us - last > SNIFF_GAP_US)
+        {
+            crate::platform::webos::pad_link::SNIFF_SUSPECT.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -320,7 +339,10 @@ fn read_sensors(sensors: &mut Sensors, buf: &[u8], size: usize) {
             (EV_ABS, ABS_RX..=ABS_RZ) => sensors.axes[(ev.code - ABS_RX) as usize] = ev.value,
             (EV_ABS, ABS_X..=ABS_Z) => sensors.axes[(ev.code - ABS_X) as usize + 3] = ev.value,
             // Only a completed report is a sample: sending mid-report would mix axes from two.
-            (EV_SYN, SYN_REPORT) => sensors.dirty = true,
+            (EV_SYN, SYN_REPORT) => {
+                sensors.dirty = true;
+                sensors.note_report(ev.time);
+            }
             _ => {}
         }
     }

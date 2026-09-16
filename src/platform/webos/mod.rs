@@ -14,5 +14,6 @@ pub mod ls2;
 pub mod luna;
 pub mod mouse;
 pub mod ndl;
+pub mod pad_link;
 pub mod sdl_webos;
 pub mod usb_audio;

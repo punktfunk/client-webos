@@ -158,6 +158,7 @@ fn spawn_connect(
                     // inside a session that claimed the cap up front — probing here would cost hotplug.
                     pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true),
                     audio_route: settings.audio_route(),
+                    multi_slice: settings.multi_slice(),
                     present_priority: settings.present_priority(),
                     display_hdr: settings.hdr_display().hdr_meta(),
                 },

@@ -25,6 +25,14 @@ const HEARTBEAT: Duration = Duration::from_secs(2);
 /// Cadence for verbose heartbeat detail logging (trend line).
 const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Now on the clock `Frame::pts_ns` is stamped against — Unix-epoch ns, `CLOCK_REALTIME` — which
+/// is what core's HUD differences a capture time with. A monotonic stamp would read as nonsense.
+fn realtime_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
 /// A stamp that fires once per `interval` and re-arms itself.
 struct Tick {
     interval: Duration,
@@ -56,6 +64,11 @@ struct VideoPump {
     client: Arc<NativeClient>,
     stage: VideoStage,
     stats: Arc<StreamStats>,
+    /// Core's shared HUD, held rather than fetched per frame. Its endpoint on this client is the
+    /// submit to NDL: nothing past that call — decode, present, panel — is observable from the
+    /// app, so the capture-to-decoded figure is a lower bound on glass latency, never an estimate
+    /// of it.
+    hud: Arc<punktfunk_core::hud::Stats>,
     /// Whether to drain host HDR metadata (false for SDR or non-HEVC).
     is_hdr: bool,
     /// True when real audio rides the NDL plane; false when plane is silent metronome only.
@@ -86,10 +99,12 @@ impl VideoPump {
         // has to be written before the first heartbeat, or the overlay shows a fabricated
         // `slack +0.0 ms` for the two seconds it takes one to arrive.
         stats.pacing_min_slack_us.store(i32::MIN, Ordering::Relaxed);
+        let hud = client.hud_shared();
         Self {
             client,
             stage,
             stats,
+            hud,
             is_hdr,
             audio_rides_plane,
             last_dropped_seen,
@@ -154,6 +169,10 @@ impl VideoPump {
             SinkResult::Presented { decode_us } => {
                 if let Some(us) = decode_us {
                     self.client.report_decode_us(us);
+                }
+                // Once per picture: a slice-progressive piece is not a frame.
+                if frame.part.is_none_or(|part| part.last) {
+                    self.hud.note_decoded(frame.pts_ns, realtime_ns());
                 }
             }
             SinkResult::Held => {}

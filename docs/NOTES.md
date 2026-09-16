@@ -10,6 +10,12 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 - **glibc shims required** (`src/platform/webos/glibc_compat_shim.c`): webOS glibc ~2.12 predates `getauxval`/`gettid`/`sendmmsg`. Linked via `cargo:rustc-link-arg`, **must land AFTER libstd** (single-pass linker drops `link-lib=static` too early).
 - **SDL2 must be webosbrew fork** (release-2.30.12-webos.5, not generic SDL2). Only fork has Wayland shell-integration (`QT_WAYLAND_SHELL_INTEGRATION=webos`). On-device system copy is 2.0.10 (too old). Bundle own libSDL2 with `$ORIGIN/../lib` RPATH (set in `build.rs`).
 - **cmake/opus**: `punktfunk-core`'s `quic` feature needs CMAKE_POLICY_VERSION_MINIMUM=3.5 (modern CMake refuses vendored libopus's old minimum).
+- **Release builds are fat LTO, one codegen unit** (`Taskfile.yml`/`taskfiles/toolchain.yml`
+  `RELEASE_LTO`). `Cargo.toml`'s profile has said so all along, but the task default was `thin` with
+  16 units, which is what every `docker:build`, `docker:package`, `deploy` and CI package actually
+  shipped — so the cross-crate inlining the hot loops were written for (AEAD decrypt, FEC, QUIC
+  parsing, all in `punktfunk-core`'s dependencies) was never in the binary on the one target whose
+  CPU cannot absorb the difference. `RELEASE_LTO=thin` is still there for a faster local cycle.
 - **libstdc++ is linked statically, never bundled.** A bundled `lib/libstdc++.so.6` is found
   through the binary's `DT_RPATH`, which outranks the jail's `LD_LIBRARY_PATH`, so every library
   the process loads gets the SDK's copy — including the TV's own. webOS 11's
@@ -81,6 +87,14 @@ clears transparent so NDL's plane shows through.
 - ⚠ **The `ui_scale` launch param is deliberately untyped.** It is a launch param rather than a
   settings row so an unowned panel can be tuned on glass — and a field that rejects the string
   `ares-launch` sends fails the whole struct, silently costing every other param.
+- ⚠ **The swap interval is vsync in menus and immediate over a stream** (`ConsoleGl::set_swap_interval`,
+  chosen by `console_flow::bring_up`'s `vsync` argument). `gl_swap_window` blocks on the panel, and
+  the menu loop wants that — it is its only sleep. The stream loop must not have it: **the same
+  thread forwards input**, so with vsync on, every toast, dial, stats card and dialog put up to a
+  refresh between a button press and the wire — including the "Connection issues" toast, which by
+  construction appears when latency is already the complaint. It is pushed after every
+  `make_current` rather than once at construction, because the interval belongs to the window
+  SURFACE, which SDL's renderer context shares.
 
 ## Video decode (NDL DirectMedia)
 
@@ -109,6 +123,13 @@ clears transparent so NDL's plane shows through.
 - **Name a hold only once it outlasts a blip** (`HOLD_TOAST_AFTER`, 300 ms, once per hold). An RFI
   recovery lifts one inside a round trip and the startup capacity probe's own loss clears at the
   burst's end, so a rising-edge toast fired at the start of every Wi-Fi session.
+- **Multi-slice is opt-in** (`webos.multi_slice`, Settings ▸ Display ▸ TV). Without
+  `VIDEO_CAP_MULTI_SLICE` the host pins `max_slices = 1` for every client on purpose ("single-slice
+  frames for TV-SoC decoders"), which also keeps `USER_FLAG_SLICE_STREAM` from ever engaging. With
+  it the host can emit a picture's slices as they are encoded, which compounds with the
+  slice-progressive delivery already on every v2 session. Off by default because the risk is a
+  wedged hardware decoder rather than a slow one; broadcast HEVC/H.264 is multi-slice, so the
+  caution is generic and not known to apply to LG. **Unmeasured — the toggle exists to measure it.**
 - HDR mastering metadata can change mid-session — drain `next_hdr_meta` every frame.
 - **`NDL_DirectVideoSetHDRInfo` forces the panel into HDR mode on *any* call** (OLED65CX, webOS 5):
   it ignores an SDR `transfer`/`primaries` triplet and emits an HDR infoframe regardless, so an
@@ -194,8 +215,15 @@ The pad's speaker and coils take Opus / s8-PCM over the same HID output plane (r
 `device/internal/stopSniff` was called for the pad: **the TV keeps the HID link in sniff mode**, so
 output reports leave in bursts at the anchor points and the pad's audio buffer starves in between —
 it then replays stale buffer content, which is what "frames out of order" sounded like.
-`stopSniff`/`startSniff` sit in the `public` group; call stop when the audio lane opens and start
-when it closes. The coil lane alone masked this: a buzz with periodic holes still feels like a buzz.
+`stopSniff`/`startSniff` sit in the `public` group. The coil lane alone masked this: a buzz with
+periodic holes still feels like a buzz.
+
+**Sniff batches input too, for every Bluetooth pad.** In sniff the pad's input reports reach the
+kernel in bursts at the ~77.5 ms anchor (measured on the G5: ~10 bursts a second, gaps of 77.5 ms
+and multiples), so every press waits for the next burst and a tap shorter than one burst arrives as
+press and release together, which the pad-state snapshot folds away. `platform::webos::pad_link`
+holds every Bluetooth joystick out of sniff for the whole stream and hands the links back to the
+TV's policy at the end.
 
 **The two take different payloads.** `stopSniff` wants the address alone; `startSniff` wants HCI
 Sniff Mode's parameters and refuses anything else with `errorCode 144`, a schema error that names
@@ -212,10 +240,11 @@ it: replies are asynchronous and `REPLIES` is process-wide, so an undispatched o
 into the next session and reads as its fault.
 
 Those two are the **only** sniff-related methods in the whole `bluetooth2` API — there is no
-link-policy or QoS call, so nothing persistent can be set and a re-assert is the only lever. Do not
-re-assert on a timer: sniff is a link-IDLE state and a lane at 94 reports/s never lets the link
-idle, so `stopSniff` rides the edge out of an idle lane (2 s floor, since the host gates audio on
-silence).
+link-policy or QoS call, so nothing persistent can be set and a re-assert is the only lever. One
+`stopSniff` does not hold: the stack slides back into sniff within seconds even while the pad streams
+motion reports. The keeper re-asserts every 250 ms and at once when the pad reader sees a gap over
+50 ms (a motion node reports every ~2.5 ms); a call replies in 1–3 ms. Measured with the keeper:
+~400 reports a second instead of ~10 bursts.
 
 **Feed the pad at its own clock, never faster.** One report per 10.667 ms, and the tick must land
 on the next interval in the *future* — advancing by one interval lets a tick whose work overran

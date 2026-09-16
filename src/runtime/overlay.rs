@@ -43,7 +43,8 @@ pub(super) fn frame(
     clear: Color4f,
     draw: impl FnOnce(&Frame<'_>),
 ) -> Result<()> {
-    let gl = super::console_flow::bring_up(gl, canvas)?;
+    // Never vsync: every caller here draws over live video, on the thread forwarding input.
+    let gl = super::console_flow::bring_up(gl, canvas, false)?;
     let (dw, dh) = canvas.window().drawable_size();
     {
         let surface = gl.surface(dw, dh)?;

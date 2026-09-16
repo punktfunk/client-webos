@@ -7,7 +7,9 @@ vars:
   SDL2_BACKPORT_RELEASE: release-2.30.12-webos.5
   SDL2_BACKPORT_VERSION: 2.30.12
   SDL2_BACKPORT_SONAME: libSDL2-2.0.so.0.3000.12
-  RELEASE_LTO: 'thin'
+  # Fat LTO plus one codegen unit is what inlines core's decrypt/FEC/QUIC loops across crates
+  # (see the root Cargo.toml's `[profile.release]`). `RELEASE_LTO=thin` for a faster local build.
+  RELEASE_LTO: 'fat'
   DOCKER_MOUNTS: >-
     -v {{.ROOT_DIR}}:/workspace
     -v punktfunk-webos-toolchains:/workspace/.toolchains

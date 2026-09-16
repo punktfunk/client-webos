@@ -42,12 +42,6 @@ static TRIGGERS_SEEN: AtomicU32 = AtomicU32::new(0);
 /// `hid/internal/sendData` — the only one of the three HID methods that works. `getReport`
 /// hangs on a pad that doesn't answer; `setReport` refuses with error 4 whatever the payload.
 const SEND_DATA_URI: &str = "luna://com.webos.service.bluetooth2/hid/internal/sendData";
-/// Takes the pad's link out of Bluetooth sniff mode. In sniff, the stack delivers output reports
-/// in bursts at the sniff anchor points; that starved the pad's audio buffer between bursts and
-/// made every speaker layout choppy until this call — the single fix that made audio continuous
-/// (G5, webOS 10.3). `public` group, like `sendData`. Its counterpart re-enters sniff on release.
-const STOP_SNIFF_URI: &str = "luna://com.webos.service.bluetooth2/device/internal/stopSniff";
-const START_SNIFF_URI: &str = "luna://com.webos.service.bluetooth2/device/internal/startSniff";
 
 /// Bluetooth `DualSense` output report, per Linux `hid-playstation`'s
 /// `dualsense_output_report_bt`: `0x31`, seq/tag, tag, the 47-byte common block, 24 reserved
@@ -73,10 +67,6 @@ const SPEAKER_OUT_SAMPLES: usize = 480;
 /// Speaker reports sent ahead before steady cadence: the pad's FIFO then holds ~100 ms, which
 /// rides out the link's residual 35–45 ms scheduling gaps (measured; sniff off).
 const SPEAKER_PREFILL: usize = 10;
-/// Floor between two `stopSniff` calls. Sniff is a link-IDLE power state, so it is re-asserted on
-/// the edge out of an idle lane, never on a timer — a lane at 94 reports/s never lets the link
-/// idle. The floor exists only because a silence-gated host can gate audio on and off quickly.
-const RESNIFF_FLOOR: Duration = Duration::from_secs(2);
 /// The five config bytes of the audio report's `0x11` sub-packet ("audio buffer length").
 const AUDIO_CONFIG: u8 = 64;
 /// Speaker volume: the pad honours only `0x3D..=0x64`.
@@ -165,8 +155,8 @@ pub fn find_address() -> Option<String> {
 /// **`Uniq` is not the discriminator.** `hid-playstation` reads the pad's Bluetooth MAC out of its
 /// pairing-info feature report over USB as well, so a wired pad publishes exactly the same address
 /// as a paired one (verified on a G5 with one pad on both transports). `I: Bus=` is what separates
-/// them: `0005` is Bluetooth, `0003` is USB. Everything this address reaches — `sendData`, the
-/// sniff calls, the whole audio lane — goes through `bluetooth2`, which a wired pad is not on, so
+/// them: `0005` is Bluetooth, `0003` is USB. Everything this address reaches — `sendData` and the
+/// whole audio lane — goes through `bluetooth2`, which a wired pad is not on, so
 /// handing one back would claim the coils for a transport that cannot carry them.
 fn address_in(devices: &str) -> Option<String> {
     dualsense_blocks(devices)
@@ -697,22 +687,11 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     };
     // The coil lane needs the bus: ~94 reports a second is not a spawn rate. Claiming it here
     // parks the motor envelope for the session (`Envelope::own_coils`).
-    let sniff_payload = format!("{{\"address\":\"{address}\"}}");
-    // `startSniff` does NOT take the address-only payload `stopSniff` does: it wants HCI Sniff
-    // Mode's own parameters, and refuses anything else with a generic schema error (verified by
-    // sending both shapes tagged, webOS 10.3). Intervals are 0.625 ms slots, and they bound how
-    // long the pad waits to transmit — the pad also drives this app's UI between sessions, so
-    // they track the ~77 ms anchor the TV's own policy used rather than a slower power-saving one.
-    let sniff_params_payload =
-        format!("{{\"address\":\"{address}\",\"minInterval\":96,\"maxInterval\":124,\"attempt\":4,\"timeout\":1}}");
     let lane = match (&bus, coils) {
-        (Some(bus), Some(envelope)) => {
-            // Un-burst the link before the first audio report; the reply is counted like any
-            // other (a refusal shows up once in the log through `REPLIES`).
-            match bus.call(STOP_SNIFF_URI, &sniff_payload, ls2::Call::StopSniff) {
-                Ok(()) => tracing::info!("DualSense audio: lanes over the Luna bus, sniff stopped"),
-                Err(e) => tracing::warn!("DualSense audio: stopSniff refused ({e:#}); expect bursts"),
-            }
+        (Some(_), Some(envelope)) => {
+            // `pad_link` holds the link out of sniff for the whole stream; in sniff these reports
+            // would reach the pad in bursts and starve its audio buffer.
+            tracing::info!("DualSense audio: lanes over the Luna bus");
             envelope.own_coils();
             Some(envelope)
         }
@@ -755,9 +734,6 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     // Shared by state and coil reports: it is per link, not per report kind.
     let mut seq: u8 = 0;
     let mut next_tick = Instant::now() + COIL_TICK;
-    // Sniff is re-asserted on the edge out of an idle lane; `stopSniff` at open covers the first.
-    let mut was_quiet = false;
-    let mut last_resniff: Option<Instant> = None;
     let mut counter: u8 = 0;
     let mut frames = [[0i8; 2]; COIL_REPORT_FRAMES];
     let mut coil_sends: u32 = 0;
@@ -847,18 +823,6 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
                 } else {
                     1
                 };
-                // Re-assert on the edge out of idle: that is the only window in which the link can
-                // have slid back into sniff, and it costs one call per burst instead of two a second.
-                let sending = !holding && (speaker_live || had_coils || envelope.active());
-                let refloor = match last_resniff {
-                    Some(t) => now.duration_since(t) >= RESNIFF_FLOOR,
-                    None => true,
-                };
-                if sending && was_quiet && refloor {
-                    last_resniff = Some(now);
-                    let _ = bus.call(STOP_SNIFF_URI, &sniff_payload, ls2::Call::StopSniff);
-                }
-                was_quiet = !sending;
                 for _ in 0..if holding { 0 } else { reports_now } {
                     let report: Vec<u8> = if speaker_live {
                         let lane_enc = speaker.as_mut().expect("speaker_live implies a lane");
@@ -905,9 +869,7 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
             }
         }
     }
-    // Give the link back to sniff: the TV's own power policy, and what the pad expects at idle.
     if let (Some(bus), Some(_)) = (&bus, &lane) {
-        let _ = bus.call(START_SNIFF_URI, &sniff_params_payload, ls2::Call::StartSniff);
         // Wait out the replies HERE. This loop is the last thing that can report them, and
         // `REPLIES` is process-wide, so a refusal left undispatched surfaces inside the NEXT
         // session and reads as its fault. Teardown is not latency-critical; a reply on this bus
