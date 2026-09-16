@@ -28,6 +28,8 @@ pub enum SettingsRow {
     Codec,
     /// HDR applies only to HEVC, so the row locks on an explicit H.264 pick.
     Hdr,
+    /// 10-bit is HEVC-only here too: locked on an explicit H.264 pick or a backend without HEVC.
+    TenBitSdr,
     /// Locked where the backend is capped at stereo — the only channel count then.
     Audio,
     /// Which controller the host presents to the game — see `store::GamepadType`.
@@ -51,6 +53,8 @@ pub(crate) enum RowLock {
     /// HDR under an explicit H.264 pick: the host never resolves HDR for such a session, so the
     /// toggle would be a no-op. `Automatic` leaves it editable — HEVC may still be resolved.
     HdrNeedsHevc,
+    /// 10-bit SDR under an explicit H.264 pick, which the host always encodes at 8 bits.
+    TenBitNeedsHevc,
     /// The active backend has no HDR at all (NDL v1) — nothing to toggle either way.
     NoHdr,
     /// One decodable codec, so `codec_prefs` collapses to a single entry.
@@ -141,6 +145,7 @@ pub(crate) fn lock_caption(lock: RowLock, webos_major: Option<u32>) -> String {
     };
     match lock {
         RowLock::HdrNeedsHevc => "HDR is not supported by H.264".to_string(),
+        RowLock::TenBitNeedsHevc => "10-bit is not supported by H.264".to_string(),
         RowLock::NoHdr => format!("HDR is not supported by {}", source()),
         RowLock::OneCodec => format!("H.264 is the only codec supported by {}", source()),
         RowLock::StereoOnly => format!("Stereo is the only layout supported by {}", source()),
@@ -161,6 +166,8 @@ pub(crate) fn row_lock(row: SettingsRow, settings: &Settings, detected: Option<G
     match row {
         SettingsRow::Hdr if !caps.hdr => Some(RowLock::NoHdr),
         SettingsRow::Hdr if settings.codec_pref() == CodecPref::H264 => Some(RowLock::HdrNeedsHevc),
+        SettingsRow::TenBitSdr if !caps.h265 => Some(RowLock::OneCodec),
+        SettingsRow::TenBitSdr if settings.codec_pref() == CodecPref::H264 => Some(RowLock::TenBitNeedsHevc),
         SettingsRow::Codec if caps.codec_prefs().len() < 2 => Some(RowLock::OneCodec),
         // Device before route: where the client itself decodes stereo only, no audio-processing
         // pick could widen it, and naming one would send the user somewhere that cannot help.

@@ -104,6 +104,8 @@ pub struct ConnectParams {
     pub mode: Mode,
     pub bitrate_kbps: u32,
     pub hdr_enabled: bool,
+    /// Main10 at BT.709 without HDR. Subsumed by `hdr_enabled`.
+    pub ten_bit_sdr: bool,
     pub audio_channels: u8,
     /// This client's TLS identity, `(cert_pem, key_pem)`.
     pub identity: (String, String),
@@ -197,6 +199,9 @@ impl Negotiated {
         // caps are still advertised and the host resolves the codec, with application gated
         // on the *negotiated* codec being HEVC in `load_player`.
         let hdr = params.hdr_enabled && caps.hdr && codec_pref != CodecPref::H264;
+        // Same codec rule as HDR. NDL decodes Main10 from the SPS, and HDR metadata keys on the
+        // host's colour, not the depth, so an SDR Main10 stream never flips the panel.
+        let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && codec_pref != CodecPref::H264;
         Self {
             audio_channels,
             // VIDEO_CAP_CHACHA20: unconditional — armv7 has no hardware AES, so ChaCha20 is
@@ -204,6 +209,8 @@ impl Negotiated {
             video_caps: quic::VIDEO_CAP_CHACHA20
                 | if hdr {
                     quic::VIDEO_CAP_10BIT | quic::VIDEO_CAP_HDR
+                } else if ten_bit_sdr {
+                    quic::VIDEO_CAP_10BIT
                 } else {
                     0
                 }
