@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use punktfunk_core::config::Mode;
-use sdl2::controller::GameController;
 
 use crate::app::hero::Connect;
 use crate::app::{App, HomeFocus, Screen};
@@ -346,6 +345,8 @@ enum StreamOutcome {
 
 mod input;
 mod overlay;
+mod pad_session;
+mod pads;
 mod session_ext;
 mod stream;
 mod ui_flow;

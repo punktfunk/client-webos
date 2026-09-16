@@ -117,8 +117,8 @@ pub struct App {
     pub(crate) recents: crate::services::recents::Recents,
     /// Off-thread settings persist.
     pub(crate) state_writer: store::StateWriter,
-    /// Detected pad type (meaningful only if `gamepad_type` is Auto).
-    pub(crate) detected_gamepad_type: Option<store::GamepadType>,
+    /// Every open pad, by wire index — the Controllers page lists them.
+    pub(crate) detected_pads: Vec<DetectedPad>,
     /// webOS on-screen keyboard up (moves address form from under panel).
     pub(crate) keyboard_shown: bool,
     pub(crate) identity: (String, String),
@@ -171,13 +171,45 @@ fn known_entries(
     entries
 }
 
+/// One attached controller as the menus list it.
+#[derive(Clone, Debug)]
+pub struct DetectedPad {
+    pub name: String,
+    /// `None` for a pad the Xbox default already fits.
+    pub kind: Option<store::GamepadType>,
+    /// Wire pad index: player `index + 1`.
+    pub index: u8,
+}
+
+impl DetectedPad {
+    /// This pad as the shared shell lists it. Battery and rumble are reported absent: this client
+    /// reads neither, and the actions that would use them are Android's.
+    pub fn pad_info(&self) -> pf_client_core::menu_nav::PadInfo {
+        pf_client_core::menu_nav::PadInfo {
+            name: self.name.clone(),
+            key: self.index.to_string(),
+            pref: crate::core::settings::gamepad_pref(self.kind.unwrap_or(store::GamepadType::XboxOne)),
+            steam_virtual: false,
+            battery: None,
+            detail: format!("Player {}", self.index + 1),
+            forwarded: true,
+            rumble: false,
+        }
+    }
+}
+
 impl App {
     // ------------------------------------------------------ what `runtime` may write --
     // The menu owns its own state; these are the four things only the outer loop can know.
 
-    /// The attached pad's type per `gamepad::detect_type`, refreshed on hotplug.
-    pub fn set_gamepad_type(&mut self, kind: Option<store::GamepadType>) {
-        self.detected_gamepad_type = kind;
+    /// The open pads, refreshed on hotplug.
+    pub fn set_pads(&mut self, pads: Vec<DetectedPad>) {
+        self.detected_pads = pads;
+    }
+
+    /// The first attached pad this client recognizes — what `Automatic` mirrors.
+    pub(crate) fn detected_gamepad_type(&self) -> Option<store::GamepadType> {
+        self.detected_pads.iter().find_map(|pad| pad.kind)
     }
 
     /// Whether webOS's on-screen keyboard is up, polled from `SDL_IsScreenKeyboardShown`.
@@ -271,7 +303,7 @@ impl App {
             intro_hint_owed: new_build,
             recents: crate::services::recents::Recents::load(),
             state_writer,
-            detected_gamepad_type: None,
+            detected_pads: Vec::new(),
             keyboard_shown: false,
             identity,
             profiles,
@@ -713,7 +745,7 @@ impl App {
     pub(crate) fn dualsense_limited(&self) -> bool {
         let settings = &self.settings_ui.settings;
         let effective = if settings.gamepad_type() == store::GamepadType::Auto {
-            self.detected_gamepad_type.unwrap_or_default()
+            self.detected_gamepad_type().unwrap_or_default()
         } else {
             settings.gamepad_type()
         };

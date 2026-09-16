@@ -98,8 +98,8 @@ pub(crate) enum Row {
     MultiSlice,
     /// The three-step calibration screen.
     CalibrateHdr,
-    /// One detected controller, or the "none" placeholder.
-    Pad,
+    /// Detected controller `n`, or the "none" placeholder past the end.
+    Pad(usize),
     Version,
     LogLevel,
     ShowLogs,
@@ -122,8 +122,9 @@ pub(crate) struct SettingsPage {
 type Rows = Vec<(Row, Option<&'static str>)>;
 
 /// The rows a page lists in `scope`. The positive list of plan §4; the console's own platform
-/// gate and applicability filter run over the shared rows afterwards.
-fn page_rows(page: Page, scope: &Scope) -> Rows {
+/// gate and applicability filter run over the shared rows afterwards. `pads` is how many
+/// controllers are attached.
+fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
     use RowId as K;
     let profile = matches!(scope, Scope::Profile(_));
     let mut rows: Rows = Vec::new();
@@ -178,7 +179,9 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
         }
         Page::Controllers => {
             if !profile {
-                push(Row::Pad, Some("Detected controllers"));
+                for i in 0..pads.max(1) {
+                    push(Row::Pad(i), (i == 0).then_some("Detected controllers"));
+                }
             }
             push(Row::Kit(K::PadType), Some("Gamepad"));
             if !profile {
@@ -393,20 +396,11 @@ impl App {
         f(&mut ctx)
     }
 
-    /// The attached pad as the engine's `PadInfo`, so the pad-type row applies.
+    /// The attached pads as the engine's `PadInfo`, so the pad-type row applies.
     fn kit_pads(&self) -> Vec<pf_client_core::menu_nav::PadInfo> {
-        self.detected_gamepad_type
-            .map(|kind| pf_client_core::menu_nav::PadInfo {
-                name: format!("{kind:?}"),
-                key: "0".into(),
-                pref: crate::core::settings::gamepad_pref(kind),
-                steam_virtual: false,
-                battery: None,
-                detail: String::new(),
-                forwarded: false,
-                rumble: false,
-            })
-            .into_iter()
+        self.detected_pads
+            .iter()
+            .map(crate::app::DetectedPad::pad_info)
             .collect()
     }
 
@@ -424,7 +418,7 @@ impl App {
     pub(crate) fn settings_page_rows(&self) -> Rows {
         let sp = &self.screens.settings_page;
         let mut settings = self.scope_settings();
-        let rows = page_rows(sp.page, &sp.scope);
+        let rows = page_rows(sp.page, &sp.scope, self.detected_pads.len());
         // Calibration has nothing to measure without an HDR stream, and the kit hides the HDR
         // row itself on a panel that cannot take one.
         let hdr_on = settings.hdr_enabled && crate::core::caps::video_caps().hdr;
@@ -510,8 +504,8 @@ impl App {
                             .with_note("Lower delay. Some TVs cannot decode them"),
                         // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
                         Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
-                        Row::Pad => match self.detected_gamepad_type {
-                            Some(kind) => RowSpec::field(format!("{kind:?}"), "Connected".into(), ""),
+                        Row::Pad(i) => match self.detected_pads.get(i) {
+                            Some(pad) => RowSpec::field(pad.name.clone(), format!("Player {}", pad.index + 1), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
                         },
                         Row::Version => RowSpec::field("Punktfunk", crate::core::VERSION.to_string(), ""),
@@ -571,7 +565,8 @@ impl App {
             RowId::GamepadUiMode => menu::SettingsRow::GamepadUiMode,
             _ => return None,
         };
-        menu::row_lock(row, core, self.detected_gamepad_type).map(|lock| menu::lock_caption(lock, self.webos_major()))
+        menu::row_lock(row, core, !self.detected_pads.is_empty())
+            .map(|lock| menu::lock_caption(lock, self.webos_major()))
     }
 
     /// One menu event on the page. Left/Right on the column switch pages; on a row they step
@@ -677,7 +672,7 @@ impl App {
             Row::Rename => self.open_rename_profile(),
             Row::Duplicate => self.duplicate_profile(),
             Row::Delete => self.open_delete_profile(),
-            Row::Pad | Row::Version => {}
+            Row::Pad(_) | Row::Version => {}
         }
     }
 
@@ -947,14 +942,14 @@ mod nav_tests {
     #[test]
     fn new_profile_is_a_row_of_its_own_in_both_scopes() {
         for scope in [Scope::Global, Scope::Profile("p1".into())] {
-            let rows = page_rows(Page::General, &scope);
+            let rows = page_rows(Page::General, &scope, 0);
             assert_eq!(rows.iter().filter(|(r, _)| *r == Row::NewProfile).count(), 1);
         }
         for page in Page::ALL {
             if page == Page::General {
                 continue;
             }
-            let rows = page_rows(page, &Scope::Global);
+            let rows = page_rows(page, &Scope::Global, 0);
             assert!(!rows.iter().any(|(r, _)| *r == Row::NewProfile));
         }
     }
@@ -967,7 +962,7 @@ mod nav_tests {
         let mut placed: Vec<RowId> = Vec::new();
         for page in Page::ALL {
             for scope in [Scope::Global, Scope::Profile("p1".into())] {
-                for (row, _) in page_rows(page, &scope) {
+                for (row, _) in page_rows(page, &scope, 0) {
                     if let Row::Kit(id) = row {
                         if !placed.contains(&id) {
                             placed.push(id);

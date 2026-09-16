@@ -203,76 +203,68 @@ impl Connected {
     /// Drains the host→client gamepad feedback planes (non-blocking) and applies them to the
     /// physical pad. Call once per main-loop tick.
     ///
-    /// The two planes go to different places, because each has one route that works for every
+    /// Every command is routed by its pad index to that pad's own handle and `DualSense` link. The
+    /// two planes go to different places, because each has one route that works for every
     /// controller rather than only one:
     ///   * **rumble** → SDL's evdev force feedback (`GameController::set_rumble`, plus
     ///     `set_rumble_triggers` for the impulse-trigger motors on pads that have them), which
     ///     works on any pad the TV has bound, `DualSense` included;
-    ///   * **`DualSense` HID feedback** (adaptive triggers, lightbar, player LEDs) → the Bluetooth
-    ///     service, since SDL's own `DualSense` path needs a hidraw node the app's jail doesn't
-    ///     have (see [`crate::platform::webos::dualsense`]).
+    ///   * **`DualSense` HID feedback** (adaptive triggers, lightbar, player LEDs) → the pad's
+    ///     Bluetooth address or wired hidraw node (see [`crate::platform::webos::dualsense`]).
     ///
     /// Both drains run even when their sink is absent: the planes are bounded queues, and leaving
     /// one unread would let it fill and then discard the *newest* events — including, for rumble,
     /// the zero that stops a motor.
-    pub(crate) fn pump_feedback_once(
-        &self,
-        mut controller: Option<&mut sdl2::controller::GameController>,
-        mut feedback: Option<&mut crate::platform::webos::dualsense::Feedback>,
-        haptics: Option<&crate::session::pad_audio::Envelope>,
-    ) {
+    pub(super) fn pump_feedback_once(&self, pads: &mut super::pads::Pads) {
         let client = &self.client;
-        // While coil frames arrive, the motors belong to the derived envelope: the host still
-        // forwards the title's classic rumble, and applying both makes them fight.
-        let haptics_own_motors = haptics.is_some_and(crate::session::pad_audio::Envelope::active);
         // `next_rumble_command` is the policy-engine API: it already resolves lease expiry, stale
         // legacy hosts and close-drain zeros, so commands apply verbatim — all-zero stops now.
-        //
-        // Queried once per tick, not per command: SDL walks its joystick list for this, and a hotplug
-        // arrives as a new `GameController` rather than changing this answer mid-drain.
-        let has_triggers = controller
-            .as_deref()
-            .is_some_and(sdl2::controller::GameController::has_rumble_triggers);
         let mut budget = FEEDBACK_DRAIN_BUDGET;
         while budget > 0 {
             let Ok(cmd) = client.next_rumble_command(Duration::ZERO) else {
                 break; // NoFrame (empty) or Closed (session over)
             };
             budget -= 1;
-            if haptics_own_motors {
+            let Some(slot) = pads.wire_mut(cmd.pad) else {
+                continue;
+            };
+            // While coil frames arrive, the motors belong to the derived envelope: the host still
+            // forwards the title's classic rumble, and applying both makes them fight.
+            if slot.extras.audio.as_ref().is_some_and(|audio| audio.envelope.active()) {
                 continue;
             }
-            if let Some(pad) = controller.as_deref_mut() {
-                // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
-                // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
-                //
-                // Errors here are the common "this pad has no rumble motors" case, not a fault:
-                // logging per command would spam a tick loop, and there is no recovery to attempt.
-                let n = RUMBLE_APPLIED.fetch_add(1, Ordering::Relaxed) + 1;
-                if n == 1 || n % 30 == 0 {
-                    tracing::debug!(
-                        "rumble applied #{n}: low={} high={} lt={} rt={} backstop={}ms",
-                        cmd.low,
-                        cmd.high,
-                        cmd.left_trigger,
-                        cmd.right_trigger,
-                        cmd.backstop_ms
-                    );
-                }
-                let _ = pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms);
-                // Dropping the trigger pair on a pad without those motors is the correct degrade;
-                // folding it into the handles would turn a racing title's continuous trigger stream
-                // into a handle motor droning flat-out for the whole race.
-                if has_triggers {
-                    let _ = pad.set_rumble_triggers(cmd.left_trigger, cmd.right_trigger, cmd.backstop_ms);
-                }
+            // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
+            // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
+            //
+            // Errors here are the common "this pad has no rumble motors" case, not a fault:
+            // logging per command would spam a tick loop, and there is no recovery to attempt.
+            let n = RUMBLE_APPLIED.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 30 == 0 {
+                tracing::debug!(
+                    "rumble applied #{n}: pad={} low={} high={} lt={} rt={} backstop={}ms",
+                    cmd.pad,
+                    cmd.low,
+                    cmd.high,
+                    cmd.left_trigger,
+                    cmd.right_trigger,
+                    cmd.backstop_ms
+                );
+            }
+            let _ = slot.pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms);
+            // Dropping the trigger pair on a pad without those motors is the correct degrade;
+            // folding it into the handles would turn a racing title's continuous trigger stream
+            // into a handle motor droning flat-out for the whole race.
+            if slot.triggers {
+                let _ = slot
+                    .pad
+                    .set_rumble_triggers(cmd.left_trigger, cmd.right_trigger, cmd.backstop_ms);
             }
         }
 
-        if let (Some(envelope), Some(pad)) = (haptics, controller) {
-            if let Some((low, high)) = envelope.take_change() {
+        for slot in pads.iter_mut() {
+            if let Some((low, high)) = slot.extras.audio.as_ref().and_then(|a| a.envelope.take_change()) {
                 // 0 = until changed; envelope sends the stop.
-                let _ = pad.set_rumble(low, high, 0);
+                let _ = slot.pad.set_rumble(low, high, 0);
             }
         }
 
@@ -282,8 +274,8 @@ impl Connected {
                 break;
             };
             budget -= 1;
-            if let Some(fb) = feedback.as_deref_mut() {
-                fb.apply(&event);
+            if let Some(feedback) = pads.wire_mut(event.pad()).and_then(|s| s.extras.feedback.as_mut()) {
+                feedback.apply(&event);
             }
         }
     }

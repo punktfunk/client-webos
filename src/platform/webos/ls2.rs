@@ -82,9 +82,7 @@ fn fns() -> Result<&'static Fns> {
     })
 }
 
-/// Which call a reply belongs to, so an asynchronous refusal can name itself. Rides the
-/// callback's context pointer as a plain integer and is never dereferenced, so there is no
-/// lifetime to manage — the hub may deliver the reply long after the caller moved on.
+/// Which call a reply belongs to, so an asynchronous refusal can name itself.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Call {
     SendReport = 1,
@@ -93,12 +91,11 @@ pub enum Call {
 }
 
 impl Call {
-    fn name(raw: usize) -> &'static str {
-        match raw {
-            1 => "sendData",
-            2 => "stopSniff",
-            3 => "startSniff",
-            _ => "unknown call",
+    fn name(self) -> &'static str {
+        match self {
+            Self::SendReport => "sendData",
+            Self::StopSniff => "stopSniff",
+            Self::StartSniff => "startSniff",
         }
     }
 }
@@ -107,8 +104,6 @@ impl Call {
 pub struct Replies {
     pub ok: AtomicU32,
     pub failed: AtomicU32,
-    /// Latched by the first "device not available" refusal: see [`on_reply`].
-    unavailable: AtomicBool,
     /// The first failing reply since the counters were last read, for one log line per run.
     first_failure: Mutex<Option<String>>,
 }
@@ -116,17 +111,18 @@ pub struct Replies {
 pub static REPLIES: Replies = Replies {
     ok: AtomicU32::new(0),
     failed: AtomicU32::new(0),
-    unavailable: AtomicBool::new(false),
     first_failure: Mutex::new(None),
 };
 
-impl Replies {
-    /// Whether the hub has answered "device not available" (`106`) for this address. Latched:
-    /// it means the set has no HID write path at all, so every later report would fail too.
-    pub fn device_unavailable(&self) -> bool {
-        self.unavailable.load(Ordering::Relaxed)
-    }
+/// What one call's reply reports back to the [`Bus`] that made it. Owned by that bus, whose
+/// context is the only place its replies are dispatched, so it outlives every callback.
+struct CallCtx {
+    call: Call,
+    /// Latched by the first `106` refusal to this kind of call: see [`on_reply`].
+    unavailable: AtomicBool,
+}
 
+impl Replies {
     /// Takes the first failure text recorded since the last take, if any.
     pub fn take_failure(&self) -> Option<String> {
         self.first_failure
@@ -139,6 +135,8 @@ impl Replies {
 /// Every call's reply lands here. Runs on the pumping thread, inside [`Bus::pump`].
 unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> bool {
     let Ok(f) = fns() else { return true };
+    // SAFETY: `ctx` points into the calling `Bus`'s `calls`, live while its context dispatches.
+    let ctx = unsafe { &*ctx.cast::<CallCtx>() };
     // SAFETY: `reply` is the live message the hub delivered for this callback.
     let payload = unsafe { (f.message_payload)(reply) };
     let text = if payload.is_null() {
@@ -151,17 +149,17 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
         REPLIES.ok.fetch_add(1, Ordering::Relaxed);
     } else {
         REPLIES.failed.fetch_add(1, Ordering::Relaxed);
-        // A set with no HID write path answers every single report with `106` ("Device with
-        // supplied address is not available"). Latch it: the sender loop reads this and stops
-        // sending, and the refusals after the first one are noise nobody can act on.
-        if text.contains("\"errorCode\":106") && REPLIES.unavailable.swap(true, Ordering::Relaxed) {
+        // An address with no HID write path answers every single report with `106` ("Device with
+        // supplied address is not available"). Latch it on this bus — one pad per bus, so another
+        // pad's sender keeps going — and treat the refusals after the first as noise.
+        if text.contains("\"errorCode\":106") && ctx.unavailable.swap(true, Ordering::Relaxed) {
             return true;
         }
         let mut first = REPLIES
             .first_failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        first.get_or_insert_with(|| format!("{} refused: {text}", Call::name(ctx as usize)));
+        first.get_or_insert_with(|| format!("{} refused: {text}", ctx.call.name()));
     }
     true
 }
@@ -171,6 +169,8 @@ pub struct Bus {
     handle: Handle,
     context: *mut c_void,
     fns: &'static Fns,
+    /// One reply context per [`Call`], boxed so the addresses handed to the hub are stable.
+    calls: Box<[CallCtx; 3]>,
 }
 
 impl Bus {
@@ -219,7 +219,24 @@ impl Bus {
             }
             bail!("LSGmainContextAttach failed: {msg}");
         }
-        Ok(Self { handle, context, fns })
+        let calls = Box::new(
+            [Call::SendReport, Call::StopSniff, Call::StartSniff].map(|call| CallCtx {
+                call,
+                unavailable: AtomicBool::new(false),
+            }),
+        );
+        Ok(Self {
+            handle,
+            context,
+            fns,
+            calls,
+        })
+    }
+
+    /// Whether the hub has answered "device not available" (`106`) on this bus. Latched: that
+    /// address has no HID write path, so every later report would fail too.
+    pub fn device_unavailable(&self) -> bool {
+        self.calls.iter().any(|c| c.unavailable.load(Ordering::Relaxed))
     }
 
     /// Fires one call; the reply is counted by [`on_reply`] when [`pump`](Self::pump) runs.
@@ -234,7 +251,7 @@ impl Bus {
         };
         let mut token: Token = 0;
         // SAFETY: handle attached in `open`; strings NUL-terminated and outlive the call, which
-        // copies them; the context is an integer the callback only ever reads back as one.
+        // copies them; the context lives in `self.calls`, and replies dispatch only in `pump`/`drop`.
         let ok = unsafe {
             (self.fns.error_init)(&mut err);
             (self.fns.call_one_reply)(
@@ -242,7 +259,14 @@ impl Bus {
                 uri.as_ptr(),
                 payload.as_ptr(),
                 on_reply,
-                what as usize as *mut c_void,
+                std::ptr::from_ref(
+                    self.calls
+                        .iter()
+                        .find(|c| c.call == what)
+                        .expect("every call has a context"),
+                )
+                .cast_mut()
+                .cast(),
                 &mut token,
                 &mut err,
             )
@@ -276,7 +300,8 @@ impl Drop for Bus {
             message: std::ptr::null_mut(),
             _rest: [0; 14],
         };
-        // SAFETY: handle and context were created in `open` and are released exactly once here.
+        // SAFETY: handle and context were created in `open` and are released exactly once here,
+        // before `calls` drops, so no reply can reach a freed context.
         unsafe {
             (self.fns.error_init)(&mut err);
             (self.fns.unregister)(self.handle, &mut err);

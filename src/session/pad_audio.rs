@@ -57,6 +57,11 @@ const COIL_RING_MAX: usize = COIL_REPORT_FRAMES * 6;
 /// link, which the coil lane will share once tier A exists — 60 Hz is plenty for a motor.
 const APPLY_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Whether Settings asks for any pad-audio lane at all — what the decode thread is started for.
+pub fn wanted(settings: &Settings) -> bool {
+    settings.pad_haptics || settings.pad_speaker_on()
+}
+
 /// The render capabilities to declare, from Settings. `bt_pad` is whether a Bluetooth `DualSense` is
 /// attached: the speaker lane has no other route, and a declared-but-silent lane would make the
 /// host stream it for nothing.
@@ -282,50 +287,116 @@ impl Envelope {
     }
 }
 
+/// Each pad's [`Envelope`], by wire pad index. The decode thread routes every frame through it,
+/// so a pad added mid-session starts rendering the moment it is registered.
+#[derive(Default)]
+pub struct Envelopes(Mutex<Vec<(u8, Arc<Envelope>)>>);
+
+impl Envelopes {
+    pub fn insert(&self, pad: u8, envelope: Arc<Envelope>) {
+        let mut all = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        all.retain(|(p, _)| *p != pad);
+        all.push((pad, envelope));
+    }
+
+    /// Unfiles `envelope` from `pad`, leaving a newer pad already filed there alone.
+    pub fn remove(&self, pad: u8, envelope: &Arc<Envelope>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(p, e)| *p != pad || !Arc::ptr_eq(e, envelope));
+    }
+
+    fn get(&self, pad: u8) -> Option<Arc<Envelope>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(p, _)| *p == pad)
+            .map(|(_, e)| e.clone())
+    }
+}
+
 /// Spawns the decode thread. Ends on `stop` (set at teardown before the join).
 pub fn spawn(
     client: Arc<NativeClient>,
     stop: Arc<AtomicBool>,
-    envelope: Arc<Envelope>,
+    envelopes: Arc<Envelopes>,
 ) -> Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("punktfunk-webos-pad-audio".into())
         .spawn(move || {
-            if let Err(e) = pump(&client, &stop, &envelope) {
+            if let Err(e) = pump(&client, &stop, &envelopes) {
                 tracing::warn!("pad audio thread ended: {e:#}");
             }
         })
         .context("spawn pad audio thread")
 }
 
-fn pump(client: &NativeClient, stop: &AtomicBool, envelope: &Envelope) -> Result<()> {
-    let mut coils =
-        opus::Decoder::new(48_000, opus::Channels::Stereo).map_err(|e| anyhow::anyhow!("opus decoder: {e}"))?;
-    let mut speaker =
-        opus::Decoder::new(48_000, opus::Channels::Stereo).map_err(|e| anyhow::anyhow!("opus decoder: {e}"))?;
+/// One pad's decoders and envelope levels: Opus state is per stream, so pads cannot share it.
+/// Tied to the envelope it fills, so a controller that takes over a freed index starts clean.
+struct PadLanes {
+    pad: u8,
+    envelope: Arc<Envelope>,
+    coils: opus::Decoder,
+    speaker: opus::Decoder,
+    low: f32,
+    high: f32,
+    logged_first: bool,
+}
+
+impl PadLanes {
+    fn new(pad: u8, envelope: Arc<Envelope>) -> Result<Self> {
+        let decoder =
+            || opus::Decoder::new(48_000, opus::Channels::Stereo).map_err(|e| anyhow::anyhow!("opus decoder: {e}"));
+        Ok(Self {
+            pad,
+            envelope,
+            coils: decoder()?,
+            speaker: decoder()?,
+            low: 0.0,
+            high: 0.0,
+            logged_first: false,
+        })
+    }
+}
+
+fn pump(client: &NativeClient, stop: &AtomicBool, envelopes: &Envelopes) -> Result<()> {
+    let mut lanes: Vec<PadLanes> = Vec::new();
     let mut pcm = vec![0f32; MAX_FRAME_SAMPLES];
-    // Left coil → low (heavy) motor, right coil → high (light) motor: the pad's own left/right
-    // split, and the mapping every tier-C client in the plan uses.
-    let (mut low, mut high) = (0f32, 0f32);
-    let mut logged_first = false;
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = client.next_pad_audio(Duration::from_millis(50)) else {
             continue;
         };
-        if frame.pad != 0 {
+        let Some(envelope) = envelopes.get(frame.pad) else {
             continue;
-        }
+        };
+        let pad = frame.pad;
+        let lane = match lanes.iter().position(|l| l.pad == pad) {
+            Some(i) if Arc::ptr_eq(&lanes[i].envelope, &envelope) => &mut lanes[i],
+            Some(i) => {
+                lanes[i] = PadLanes::new(pad, envelope.clone())?;
+                &mut lanes[i]
+            }
+            None => {
+                lanes.push(PadLanes::new(pad, envelope.clone())?);
+                lanes.last_mut().expect("just pushed")
+            }
+        };
         match frame.kind {
             PAD_AUDIO_KIND_HAPTICS => {
                 let n = envelope.frames.fetch_add(1, Ordering::Relaxed) + 1;
-                if !logged_first {
-                    logged_first = true;
-                    tracing::info!("pad audio: first coil frame (seq {}) — rendering as rumble", frame.seq);
+                if !lane.logged_first {
+                    lane.logged_first = true;
+                    tracing::info!(
+                        "pad audio: first coil frame on pad {pad} (seq {}) — rendering as rumble",
+                        frame.seq
+                    );
                 }
                 let (peak_l, peak_r) = if frame.opus.is_empty() {
                     (0.0, 0.0)
                 } else {
-                    match coils.decode_float(&frame.opus, &mut pcm, false) {
+                    match lane.coils.decode_float(&frame.opus, &mut pcm, false) {
                         Ok(samples) => {
                             if envelope.coils_owned() {
                                 envelope.push_coils_frame(&pcm[..samples * 2]);
@@ -338,27 +409,29 @@ fn pump(client: &NativeClient, stop: &AtomicBool, envelope: &Envelope) -> Result
                         }
                     }
                 };
-                low = (low * RELEASE).max(peak_l);
-                high = (high * RELEASE).max(peak_r);
-                envelope.publish(low, high);
+                // Left coil → low (heavy) motor, right coil → high (light) motor: the pad's own
+                // left/right split, and the mapping every tier-C client in the plan uses.
+                lane.low = (lane.low * RELEASE).max(peak_l);
+                lane.high = (lane.high * RELEASE).max(peak_r);
+                envelope.publish(lane.low, lane.high);
                 if n % 2000 == 0 {
                     tracing::debug!(
-                        "pad audio: {n} coil frames, {} speaker frames, level {:.2}/{:.2}",
+                        "pad audio: pad {pad}: {n} coil frames, {} speaker frames, level {:.2}/{:.2}",
                         envelope.speaker_frames.load(Ordering::Relaxed),
-                        low,
-                        high
+                        lane.low,
+                        lane.high
                     );
                 }
             }
             PAD_AUDIO_KIND_SPEAKER => {
                 let n = envelope.speaker_frames.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 {
-                    tracing::info!("pad audio: first speaker frame (seq {})", frame.seq);
+                    tracing::info!("pad audio: first speaker frame on pad {pad} (seq {})", frame.seq);
                 }
-                // Only the Bluetooth sender plays this lane; without it the frames are counted
+                // Only a lane that owns the coils plays this; otherwise the frames are counted
                 // and dropped (the lane is not declared then, so this is the rare race at start).
                 if envelope.coils_owned() && !frame.opus.is_empty() {
-                    match speaker.decode_float(&frame.opus, &mut pcm, false) {
+                    match lane.speaker.decode_float(&frame.opus, &mut pcm, false) {
                         Ok(samples) => envelope.push_speaker(&pcm[..samples * 2]),
                         Err(e) => tracing::debug!("pad audio: speaker decode failed: {e}"),
                     }

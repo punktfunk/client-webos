@@ -146,7 +146,9 @@ const IN_USE_WINDOW: Duration = Duration::from_millis(250);
 pub enum HidReport<'a> {
     Input(u32, &'a InputEvent),
     Release(u32),
-    Rich(RichInput),
+    /// A pad node's contact or sample, with that controller's `Uniq` (its MAC) so the caller can
+    /// route it to the right slot. The input's own `pad` is 0 until then.
+    Rich(RichInput, Option<&'a str>),
 }
 
 /// A HID reader: one thread polling every mouse- or keyboard-shaped evdev node, handing each
@@ -314,6 +316,8 @@ struct Device {
     /// decodes into rich input rather than pointer events — see [`pad`]. `None` on every other
     /// node.
     pad: Option<Pad>,
+    /// The pad's `Uniq` (its MAC), read once when [`Self::pad`] is claimed.
+    uniq: Option<String>,
 }
 
 impl Drop for Device {
@@ -431,6 +435,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         mouse: false,
         keyboard: false,
         pad: None,
+        uniq: None,
     };
     let rel = event_bits(fd, EV_REL);
     let abs = event_bits(fd, EV_ABS);
@@ -452,6 +457,9 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
     // Claimed in both cursor modes, unlike a mouse node: leaving it to the compositor is what
     // produces the stuck left button, which desktop mode wants gone just as much.
     dev.pad = Pad::probe(fd, &abs, &key, absolute_pointer);
+    if dev.pad.is_some() {
+        dev.uniq = fd_uniq(fd);
+    }
     if !dev.mouse && !dev.keyboard && dev.pad.is_none() {
         // Not ours, or a pointer-only node in desktop mode — left with the compositor so the
         // TV cursor is still the one you aim.
@@ -642,6 +650,34 @@ fn apply_grab(devices: &mut [Device], want: bool) {
     }
 }
 
+/// `EVIOCGUNIQ` — `hid-playstation` sets it to the pad's MAC on every node it publishes, which is
+/// what ties a touchpad or motion node to the controller SDL opened.
+fn fd_uniq(fd: RawFd) -> Option<String> {
+    let mut buf = [0u8; 64];
+    // SAFETY: as `event_bits` — length-encoding request, buffer of that length.
+    let rc = unsafe { libc::ioctl(fd, eviocg(0x08, buf.len() as u32), buf.as_mut_ptr()) };
+    if rc <= 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let uniq = String::from_utf8_lossy(&buf[..len]).trim().to_ascii_lowercase();
+    (!uniq.is_empty()).then_some(uniq)
+}
+
+/// The `Uniq` of the evdev node at `path`, lowercased.
+pub fn node_uniq(path: &str) -> Option<String> {
+    let c_path = std::ffi::CString::new(path).ok()?;
+    // SAFETY: `c_path` is NUL-terminated and outlives the call.
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    if fd < 0 {
+        return None;
+    }
+    let uniq = fd_uniq(fd);
+    // SAFETY: `fd` came from `open` above and is closed exactly once.
+    unsafe { libc::close(fd) };
+    uniq
+}
+
 /// `EVIOCGNAME` — for the log line, so a bug report from an unknown dongle names it.
 fn device_name(fd: RawFd) -> Option<String> {
     let mut buf = [0u8; 256];
@@ -687,7 +723,7 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
         apply_grab(&mut devices, active);
         // Gate reports; poll outlives dialog open.
         let gated_sink = |report: HidReport<'_>| {
-            if shared.grab.load(Ordering::Relaxed) || matches!(report, HidReport::Rich(_) | HidReport::Release(_)) {
+            if shared.grab.load(Ordering::Relaxed) || matches!(report, HidReport::Rich(..) | HidReport::Release(_)) {
                 sink(report);
             }
         };
@@ -785,8 +821,9 @@ fn scan_loop(
 
 /// [`Pad::release`] on a node that has one.
 fn release_pad(dev: &mut Device, sink: &impl Fn(HidReport)) {
+    let uniq = dev.uniq.as_deref();
     if let Some(pad) = dev.pad.as_mut() {
-        pad.release(sink);
+        pad.release(&|rich| sink(HidReport::Rich(rich, uniq)));
     }
 }
 
@@ -823,7 +860,8 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
         }
         let n = n as usize;
         if let Some(pad) = dev.pad.as_mut() {
-            pad.read(&buf[..n], size, sink);
+            let uniq = dev.uniq.as_deref();
+            pad.read(&buf[..n], size, &|rich| sink(HidReport::Rich(rich, uniq)));
         } else {
             decode_hid(dev, &buf[..n], size, sink, keys);
         }
@@ -832,8 +870,9 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
         }
     }
     flush_motion(dev, sink);
+    let uniq = dev.uniq.as_deref();
     if let Some(pad) = dev.pad.as_mut() {
-        pad.flush(sink);
+        pad.flush(&|rich| sink(HidReport::Rich(rich, uniq)));
     }
 }
 

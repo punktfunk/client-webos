@@ -1,6 +1,6 @@
 use super::overlay::{self, ConfirmAction, ConfirmDialog};
 use super::*;
-use crate::core::dial::{PadDial, PadRoute};
+use crate::core::dial::PadRoute;
 use crate::core::settings::TvSettings;
 use crate::platform::webos::device;
 use crate::platform::webos::input::{
@@ -9,21 +9,12 @@ use crate::platform::webos::input::{
 };
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
 use punktfunk_core::hud::{self, Extra, HudLine, Role, StatsSnapshot, StatsVerbosity};
+use std::sync::Arc;
 
 /// One frame of the dial's animation. The loop runs every 2 ms; the ring needs no more than 60 Hz.
 const RING_FRAME: Duration = Duration::from_millis(16);
 /// A synthetic system-button tap holds this long, so the host sees the press.
 const TAP_PRESS: Duration = Duration::from_millis(50);
-/// Every pad axis, for the dial's release on open and the re-send on close.
-const PAD_AXES: [sdl2::controller::Axis; 6] = [
-    sdl2::controller::Axis::LeftX,
-    sdl2::controller::Axis::LeftY,
-    sdl2::controller::Axis::RightX,
-    sdl2::controller::Axis::RightY,
-    sdl2::controller::Axis::TriggerLeft,
-    sdl2::controller::Axis::TriggerRight,
-];
-
 /// How long the finished launch frame is held waiting for the first frame to reach the decoder
 /// before uncovering the video plane regardless. `None` only when the loading screen never
 /// started this budget — it waits on the same signal (`app::hero::handover_ready`) and hands
@@ -88,39 +79,10 @@ fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl2::Eve
     false
 }
 
-/// How many copies of a mid-stream `GamepadArrival` to send — see its one caller.
-const ARRIVAL_SENDS: usize = 3;
-
 /// How long a freeze-until-reanchor hold must last before the toast names it. An RFI recovery
 /// lifts a hold within a round trip and the startup capacity probe's own loss clears at the
 /// burst's end; a toast for those flashed on every blip and said nothing the picture did not.
 const HOLD_TOAST_AFTER: Duration = Duration::from_millis(300);
-
-/// `DualSense` HID feedback (adaptive triggers, lightbar), opened only for a pad kind that emits
-/// it — anything else never sends these events. Not found (USB pad, no `luna-send-pub`) isn't an
-/// error: logged once, the feature just stays off.
-fn open_ds_feedback(
-    kind: store::GamepadType,
-    coils: Option<std::sync::Arc<crate::session::pad_audio::Envelope>>,
-) -> Option<crate::platform::webos::dualsense::Feedback> {
-    if !kind.is_dualsense() {
-        return None;
-    }
-    if let Some(addr) = crate::platform::webos::dualsense::find_address() {
-        return crate::platform::webos::dualsense::Feedback::new(addr, coils);
-    }
-    // A wired pad is not on `bluetooth2`, but the kernel gives it a hidraw node and the same
-    // effects reach it as a 48-byte `0x02` report. Audio does not come this way: those lanes ride
-    // the pad's own UAC card, so the coil envelope is left with the motors here.
-    if let Some(node) = crate::platform::webos::hidraw::Hidraw::find_dualsense() {
-        return crate::platform::webos::dualsense::Feedback::new_usb(node);
-    }
-    tracing::info!(
-        "no DualSense on the Bluetooth service or on a hidraw node — \
-         adaptive triggers off for this session"
-    );
-    None
-}
 
 pub(super) fn run_inner() -> Result<()> {
     // Stops webOS's launcher intercepting Back/Guide as its own shortcut (see `gamepad.rs`'s
@@ -205,8 +167,8 @@ pub(super) fn run_inner() -> Result<()> {
     };
 
     // Owned above the loop, not re-declared per iteration: `ControllerDeviceAdded` fires only
-    // once per physical (re)connection, so a pad opened earlier must carry across screens.
-    let mut controller: Option<GameController> = None;
+    // once per physical (re)connection, so pads opened earlier must carry across screens.
+    let mut pads = pads::Pads::default();
     // Why the *last* stream attempt bounced to the menu, shown on the fresh Home screen.
     let mut menu_status: Option<String> = None;
     // Same, but for a toast popup (e.g. the host closed the session) instead of the
@@ -230,7 +192,7 @@ pub(super) fn run_inner() -> Result<()> {
                 &mut console_gl,
                 &mut events,
                 &game_controller,
-                &mut controller,
+                &mut pads,
                 &identity,
                 menu_toast.take().or_else(|| menu_status.take()),
             )?
@@ -240,7 +202,7 @@ pub(super) fn run_inner() -> Result<()> {
                 &mut console_gl,
                 &mut events,
                 &game_controller,
-                &mut controller,
+                &mut pads,
                 &identity,
                 ui_mode,
                 menu_status.take(),
@@ -380,55 +342,43 @@ pub(super) fn run_inner() -> Result<()> {
                 Vec::new()
             };
 
-            // Pad audio (`0xD1`): a pad's render caps ride its arrival, so the session-default
-            // DualSense still needs one declared at start. Only toward a host that has the plane —
-            // an older host reads arrival flags as the bare pad index.
-            let pad_audio_caps = if connected.client.host_caps() & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0 {
-                // The speaker lane needs a transport that can play it, and there are two: a paired
-                // pad takes `0x36` reports on the Luna bus, a wired one has its own 4-channel card.
-                let speaker_route = crate::platform::webos::dualsense::find_address().is_some()
-                    || crate::platform::webos::usb_audio::card_present();
-                crate::session::pad_audio::caps_for(&settings, speaker_route)
-            } else {
-                0
-            };
-            let haptics = (pad_audio_caps != 0).then(crate::session::pad_audio::Envelope::new);
+            // Pad audio (`0xD1`): each pad's render caps ride its arrival. Only toward a host that has
+            // the plane — an older host reads arrival flags as the bare pad index.
+            let pad_audio = (connected.client.host_caps() & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0
+                && crate::session::pad_audio::wanted(&settings))
+            .then(|| Arc::new(crate::session::pad_audio::Envelopes::default()));
             let mut pad_audio_thread = None;
-            if let Some(envelope) = &haptics {
-                connected.client.set_pad_audio_caps(0, pad_audio_caps);
-                if settings.gamepad_type().is_dualsense() {
-                    if let Some(ev) = gamepad::arrival_event(settings.gamepad_type(), 0, pad_audio_caps) {
-                        for _ in 0..ARRIVAL_SENDS {
-                            connected.send_input(&ev);
-                        }
-                    }
-                }
+            if let Some(envelopes) = &pad_audio {
                 match crate::session::pad_audio::spawn(
                     connected.client.clone(),
                     connected.stop.clone(),
-                    envelope.clone(),
+                    envelopes.clone(),
                 ) {
                     Ok(handle) => pad_audio_thread = Some(handle),
                     Err(e) => tracing::warn!("pad audio off: {e:#}"),
                 }
             }
-            // A wired pad plays both lanes on its own card. Started only when no paired pad is around:
-            // that one carries the lanes over Bluetooth, and two writers would fight for the coils.
-            let usb_audio_thread = match (&haptics, crate::platform::webos::dualsense::find_address()) {
-                (Some(envelope), None) => {
-                    crate::platform::webos::usb_audio::spawn(envelope.clone(), connected.stop.clone())
-                }
-                _ => None,
+            // Every pad starts on the handshake's kind; each one that is really another declares
+            // itself, and so does any pad past the first under an explicit pick.
+            let kind_setting = if gamepad_auto {
+                store::GamepadType::Auto
+            } else {
+                settings.gamepad_type()
             };
             // Every Bluetooth pad's input arrives in 77.5 ms batches unless its link is held out of
             // sniff — see `pad_link`. Dropped with the session, which hands the links back.
             let pad_link = crate::platform::webos::pad_link::PadLink::start();
-            // See `open_ds_feedback`. The envelope rides along so a Bluetooth pad plays the coil lane
-            // itself (tier A); it is harmless on the spawn route, which never claims it.
-            let mut ds_feedback = open_ds_feedback(settings.gamepad_type(), haptics.clone());
-            // The pad kind the host currently builds for pad 0: the handshake default until a
-            // controller plugged in mid-stream declares another one.
-            let mut declared_pad = settings.gamepad_type();
+            // The connect wait polled SDL's queue without looking at pads.
+            pads.sync(&game_controller);
+            let pad_routes = pads::PadRoutes::default();
+            pads.publish_routes(&pad_routes);
+            for slot in pads.iter_mut() {
+                slot.begin_session(settings.gamepad_type());
+            }
+            let ids: Vec<u32> = pads.iter().map(|slot| slot.id).collect();
+            for id in ids {
+                pad_session::bring_up(&connected, &mut pads, id, kind_setting, &settings, pad_audio.as_ref());
+            }
 
             let mut scroll_acc = mouse::ScrollAccumulator::default();
             // Every button the client synthesizes rather than forwards: the remote's OK gestures and
@@ -440,12 +390,17 @@ pub(super) fn run_inner() -> Result<()> {
             // the compositor sees Ctrl/Alt/Shift and warps its pointer mid-click; mouse nodes follow
             // Capture: on = exclusive relative grab, off = compositor keeps the pointer to aim with.
             let input = connected.input();
+            let routes = pad_routes.clone();
             let hid = crate::platform::webos::evdev::HidInput::start(true, settings.cursor_capture(), move |report| {
                 use crate::platform::webos::evdev::HidReport;
                 match report {
                     HidReport::Input(source, ev) => input.send(source, ev),
                     HidReport::Release(source) => input.release(source),
-                    HidReport::Rich(rich) => input.send_rich(rich),
+                    HidReport::Rich(rich, uniq) => {
+                        if let Some(rich) = pads::route_rich(&routes, rich, uniq) {
+                            input.send_rich(rich);
+                        }
+                    }
                 }
             });
             // Tells the remote's keys from a pad's echo, off the remote's own nodes.
@@ -506,17 +461,14 @@ pub(super) fn run_inner() -> Result<()> {
                 "Stop streaming",
                 crate::app::screens::confirm::Tone::Danger,
             );
-            // Gamepad routes to the disconnect dialog — see `DisconnectChord`.
-            let mut chord = DisconnectChord::default();
             // The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
             let mut ring = pf_console_ui::Ring::new();
-            let mut dial = PadDial::default();
             let mut ring_was_open = false;
             let mut ring_drawn = 0u64;
             let mut ring_drawn_at = Instant::now();
             let native_mode = connected.client.mode();
             // A dial tap of Guide or QAM still owes its release: `(bit, due)`.
-            let mut tap_up: Option<(u32, Instant)> = None;
+            let mut tap_up: Option<(u32, u8, Instant)> = None;
             let mut ring_stats = false;
             // Short Back tap forwards Esc; a held Back becomes webOS's EXIT gesture, polled below.
             // Seeded like the colour keys above — see there.
@@ -589,53 +541,37 @@ pub(super) fn run_inner() -> Result<()> {
                             break 'running StreamOutcome::Quit;
                         }
                         Event::ControllerDeviceAdded { which, .. } => {
-                            if controller.is_none() && !gamepad::is_remote_at(&game_controller, which) {
-                                match game_controller.open(which) {
-                                    Ok(c) => {
-                                        tracing::info!("controller connected: {}", c.name());
-                                        controller = Some(c);
-                                    }
-                                    Err(e) => tracing::warn!("controller open failed: {e}"),
-                                }
-                            }
-                            // Outside the open, as in the menu loop: only the first pad becomes
-                            // `controller`, but a later one is still what `detect_type` names.
                             // Under `Automatic` the handshake settled the pad kind from whatever was
                             // attached at connect time — usually nothing — so a pad arriving now has
-                            // to declare itself or the host keeps driving its default Xbox pad. An
-                            // explicit pick needs none of this: the session default already is it.
-                            let kind = if gamepad_auto {
-                                gamepad::detect_type(&game_controller).unwrap_or_default()
-                            } else {
-                                declared_pad
-                            };
-                            if kind != declared_pad {
-                                let caps = if kind.is_dualsense() { pad_audio_caps } else { 0 };
-                                if let Some(ev) = gamepad::arrival_event(kind, 0, caps) {
-                                    tracing::info!("pad 0 is {kind:?} (hotplug) — declaring it to the host");
-                                    // Sent by hand rather than by the core's own arrival path, so it
-                                    // carries no retransmit of its own; input rides unreliable
-                                    // datagrams. Re-declaring is idempotent host-side.
-                                    for _ in 0..ARRIVAL_SENDS {
-                                        connected.send_input(&ev);
-                                    }
-                                    declared_pad = kind;
-                                    // Adaptive triggers/lightbar follow the kind the host now builds.
-                                    ds_feedback = kind
-                                        .is_dualsense()
-                                        .then(|| open_ds_feedback(kind, haptics.clone()))
-                                        .flatten();
-                                }
+                            // to declare itself or the host keeps driving its default Xbox pad.
+                            if let Some(id) = pads.add(&game_controller, which).map(|slot| slot.id) {
+                                pad_session::bring_up(
+                                    &connected,
+                                    &mut pads,
+                                    id,
+                                    kind_setting,
+                                    &settings,
+                                    pad_audio.as_ref(),
+                                );
+                                pads.publish_routes(&pad_routes);
                             }
                         }
-                        // Only the pad we hold: the Magic Remote drops and re-adds constantly.
-                        Event::ControllerDeviceRemoved { which, .. }
-                            if controller.as_ref().is_some_and(|c| c.instance_id() == which) =>
-                        {
-                            controller = None;
-                            // An unplugged pad sends no releases, so a held chord would stay armed forever.
-                            chord.clear();
-                            dial.clear();
+                        // Only pads we hold: the Magic Remote drops and re-adds constantly.
+                        Event::ControllerDeviceRemoved { which, .. } => {
+                            if let Some(mut slot) = pads.remove(which) {
+                                pads.publish_routes(&pad_routes);
+                                // A dial tap's owed release would re-create the removed pad on the host.
+                                if tap_up.is_some_and(|(_, pad, _)| pad == slot.index) {
+                                    tap_up = None;
+                                }
+                                // An unplugged pad sends no releases: lift what the host holds, then
+                                // free the index so a replug or another pad can take it.
+                                slot.release_held(&connected);
+                                connected.send_input(&gamepad::remove_event(slot.index));
+                                // Handing a vanished pad back can wait on a Bluetooth reply or a card
+                                // write that will not come; the stream loop must not.
+                                slot.extras.retire();
+                            }
                         }
                         // Dialog open: navigate it only, don't forward input to the host. A key only if
                         // the remote pressed it: a pad's echo would move it a second time.
@@ -753,16 +689,22 @@ pub(super) fn run_inner() -> Result<()> {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::ControllerButtonDown { button, .. } | Event::ControllerButtonUp { button, .. } => {
+                        Event::ControllerButtonDown { which, button, .. }
+                        | Event::ControllerButtonUp { which, button, .. } => {
                             let down = matches!(event, Event::ControllerButtonDown { .. });
                             let open = ring.open();
+                            let Some(slot) = pads.get_mut(which) else {
+                                continue;
+                            };
                             if !open {
-                                chord.set(button, down);
+                                slot.chord.set(button, down);
                             }
                             // Forwarded buttons still reach the host: the hold requirement is what
                             // keeps game input and the disconnect shortcut apart.
-                            match dial.button(gamepad::button_bit(button), down, open) {
-                                PadRoute::Forward => connected.send_input(&gamepad::button_event(button, down, 0)),
+                            match slot.dial.button(gamepad::button_bit(button), down, open) {
+                                PadRoute::Forward => {
+                                    connected.send_input(&gamepad::button_event(button, down, slot.index));
+                                }
                                 PadRoute::Open => {
                                     ring.set_facts(&ring_facts(&settings, &connected, stats_tier, native_mode, true));
                                     ring.input(RingInput::Toggle {
@@ -776,15 +718,20 @@ pub(super) fn run_inner() -> Result<()> {
                                 PadRoute::Drop => {}
                             }
                         }
-                        Event::ControllerAxisMotion { axis, value, .. } => {
+                        Event::ControllerAxisMotion { which, axis, value, .. } => {
                             let open = ring.open();
+                            let Some(slot) = pads.get_mut(which) else {
+                                continue;
+                            };
                             if matches!(axis, sdl2::controller::Axis::LeftX | sdl2::controller::Axis::LeftY) {
-                                if let Some(ev) = dial.left_stick(axis == sdl2::controller::Axis::LeftX, value, open) {
+                                if let Some(ev) =
+                                    slot.dial.left_stick(axis == sdl2::controller::Axis::LeftX, value, open)
+                                {
                                     ring.menu(ev);
                                 }
                             }
                             if !open {
-                                connected.send_input(&gamepad::axis_event(axis, value, 0));
+                                connected.send_input(&gamepad::axis_event(axis, value, slot.index));
                             }
                         }
                         // Magic Remote pointer mode surfaces as plain SDL2 mouse events, forwarded
@@ -862,22 +809,16 @@ pub(super) fn run_inner() -> Result<()> {
                 if ring_open != ring_was_open {
                     ring_was_open = ring_open;
                     if ring_open {
-                        chord.clear();
-                        let held = dial.opened();
-                        for bit in (0..32).map(|i| 1u32 << i).filter(|bit| held & bit != 0) {
-                            connected.send_input(&gamepad::bit_event(bit, false, 0));
-                        }
-                        for axis in PAD_AXES {
-                            connected.send_input(&gamepad::axis_event(axis, 0, 0));
+                        for slot in pads.iter_mut() {
+                            slot.chord.clear();
+                            slot.release_held(&connected);
                         }
                         connected.release_input();
                         buttons.release_held(|ev| connected.send_input(ev));
                     } else {
-                        dial.closed();
-                        if let Some(pad) = controller.as_ref() {
-                            for axis in PAD_AXES {
-                                connected.send_input(&gamepad::axis_event(axis, pad.axis(axis), 0));
-                            }
+                        for slot in pads.iter_mut() {
+                            slot.dial.closed();
+                            slot.resend_sticks(&connected);
                         }
                     }
                 }
@@ -887,7 +828,7 @@ pub(super) fn run_inner() -> Result<()> {
                         &connected,
                         stats_tier,
                         native_mode,
-                        controller.is_some(),
+                        !pads.is_empty(),
                     ));
                 }
                 ring.tick();
@@ -920,10 +861,12 @@ pub(super) fn run_inner() -> Result<()> {
                         }
                         RingCommand::Shortcut(keys) => send_shortcut(&connected, &keys),
                         RingCommand::TapButton(bit) => {
-                            connected.send_input(&gamepad::bit_event(bit, true, 0));
-                            tap_up = Some((bit, Instant::now() + TAP_PRESS));
+                            // Pad 0 may be unplugged while another pad holds the dial.
+                            let pad = pads.first().map_or(0, |slot| slot.index);
+                            connected.send_input(&gamepad::bit_event(bit, true, pad));
+                            tap_up = Some((bit, pad, Instant::now() + TAP_PRESS));
                         }
-                        RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, controller.is_some()),
+                        RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, !pads.is_empty()),
                         // No microphone and no touch surface on a TV. Stream mute needs a zeroed
                         // decoded frame, and NDL's audio plane decodes Opus itself.
                         RingCommand::ToggleMic | RingCommand::CycleTouchMode | RingCommand::ToggleStreamMute => {}
@@ -931,9 +874,9 @@ pub(super) fn run_inner() -> Result<()> {
                 }
                 // Host actions: this client keeps no action cache, so their slots stay dimmed.
                 drop(ring.take_cmds());
-                if let Some((bit, due)) = tap_up {
+                if let Some((bit, pad, due)) = tap_up {
                     if Instant::now() >= due {
-                        connected.send_input(&gamepad::bit_event(bit, false, 0));
+                        connected.send_input(&gamepad::bit_event(bit, false, pad));
                         tap_up = None;
                     }
                 }
@@ -951,9 +894,9 @@ pub(super) fn run_inner() -> Result<()> {
                     buttons.tick(|ev| connected.send_input(ev));
                 }
                 // Chord held long enough — open the dialog, then forget it so it fires once per hold.
-                if !disconnect.is_open() && chord.held_for(EXIT_HOLD) {
+                if !disconnect.is_open() && pads.chord_held(EXIT_HOLD) {
                     tracing::info!("disconnect shortcut held — opening dialog");
-                    chord.clear();
+                    pads.clear_chords();
                     disconnect.open(1);
                 }
                 // EXIT gesture (held Back) opens the dialog; a short tap is Esc, above.
@@ -1058,7 +1001,7 @@ pub(super) fn run_inner() -> Result<()> {
                 // its NDL audio pump. Nothing for this loop to do.
                 //
                 // Unconditional so both feedback planes keep draining with no pad attached.
-                connected.pump_feedback_once(controller.as_mut(), ds_feedback.as_mut(), haptics.as_deref());
+                connected.pump_feedback_once(&mut pads);
                 // Skipped while the dialog owns the canvas. Stats/log share one clear/execute/present
                 // so neither erases the other's tile.
                 //
@@ -1165,23 +1108,16 @@ pub(super) fn run_inner() -> Result<()> {
             connected.release_input();
             text_input.stop();
 
-            // Trigger resistance is firmware state that outlives the session — hand the pad back
-            // first or a game that ended with R2 stiff leaves it stiff on the TV home screen.
+            // Hand the Bluetooth links back to the TV's sniff policy.
             drop(pad_link);
-            if let Some(mut fb) = ds_feedback.take() {
-                fb.release();
-            }
-            // Rumble is likewise pad state, not stream state.
-            if let Some(pad) = controller.as_mut() {
-                let _ = pad.set_rumble(0, 0, 0);
+            // Trigger resistance is firmware state that outlives the session — hand every pad back
+            // first or a game that ended with R2 stiff leaves it stiff on the TV home screen. Dropping
+            // the extras also stops each wired card writer. Rumble is likewise pad state.
+            for slot in pads.iter_mut() {
+                slot.extras = pad_session::Extras::default();
+                let _ = slot.pad.set_rumble(0, 0, 0);
             }
             if let Some(handle) = pad_audio_thread.take() {
-                connected.stop.store(true, Ordering::Relaxed);
-                let _ = handle.join();
-            }
-            // The wired writer blocks in `snd_pcm_writei`, so it wakes at most a chunk (5 ms) after
-            // the stop flag — the card is closed on the way out, which is what releases the pad.
-            if let Some(handle) = usb_audio_thread {
                 connected.stop.store(true, Ordering::Relaxed);
                 let _ = handle.join();
             }
@@ -1246,7 +1182,7 @@ pub(super) fn run_inner() -> Result<()> {
     Ok(())
 }
 
-/// What the dial's slots read this frame. Pad 0 is the only pad this client forwards.
+/// What the dial's slots read this frame. Controller mouse targets pad 0.
 fn ring_facts(
     settings: &store::Settings,
     connected: &crate::session::Connected,

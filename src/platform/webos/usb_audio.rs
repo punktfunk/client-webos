@@ -76,23 +76,39 @@ fn describe(fns: &Fns, rc: c_int) -> String {
     unsafe { CStr::from_ptr(msg) }.to_string_lossy().into_owned()
 }
 
-/// The ALSA card index of an attached `DualSense`, if the kernel enumerated one.
+/// The ALSA card index of the `DualSense` at USB path `usb_path` (`Hidraw::usb_path`).
 ///
 /// `/proc/asound/cards` rather than a sysfs walk, because the jail has no `/sys/class/sound`. Each
 /// card is two lines and the index leads the first; the pad is matched on its description rather
-/// than on the card id, which is the generic string `Controller`.
-fn find_card() -> Option<u32> {
+/// than on the card id, which is the generic string `Controller`. USB audio names the device as
+/// `… at <usb_path>, <speed>`, the same path hid builds the pad's `phys` from, so several wired
+/// pads each find their own card. With no path to match on, only a lone card is unambiguous.
+pub fn find_card(usb_path: Option<&str>) -> Option<u32> {
     let text = std::fs::read_to_string("/proc/asound/cards").ok()?;
-    let mut lines = text.lines();
+    card_in(&text, usb_path)
+}
+
+fn card_in(cards: &str, usb_path: Option<&str>) -> Option<u32> {
+    let is_dualsense = |line: &str| line.to_ascii_lowercase().contains("dualsense");
+    let needle = usb_path.map(|path| format!(" at {path},"));
+    let mut lines = cards.lines();
+    let mut found = Vec::new();
     while let Some(head) = lines.next() {
         let detail = lines.next().unwrap_or_default();
-        let names = format!("{head}\n{detail}").to_ascii_lowercase();
-        if !names.contains("dualsense") {
+        if !is_dualsense(head) && !is_dualsense(detail) {
             continue;
         }
-        return head.split_whitespace().next()?.parse().ok();
+        if let Some(index) = head.split_whitespace().next().and_then(|i| i.parse().ok()) {
+            found.push((index, detail));
+        }
     }
-    None
+    match needle {
+        Some(needle) => found
+            .iter()
+            .find(|(_, detail)| detail.contains(&needle))
+            .map(|(index, _)| *index),
+        None => (found.len() == 1).then(|| found[0].0),
+    }
 }
 
 /// An open playback stream on a wired pad's audio card.
@@ -108,9 +124,8 @@ impl PadSink {
     ///
     /// Deliberately not `Send`: the raw handle belongs to whichever thread writes it, so it is
     /// opened there rather than handed over.
-    pub fn open() -> Result<Self> {
+    pub fn open(card: u32) -> Result<Self> {
         let fns = fns().context("libasound")?;
-        let card = find_card().context("no DualSense audio card in /proc/asound/cards")?;
         let name = CString::new(format!("hw:{card},0"))?;
         let mut pcm: Pcm = std::ptr::null_mut();
         // SAFETY: `name` is NUL-terminated and outlives the call; `pcm` is a live local.
@@ -184,12 +199,6 @@ impl Drop for PadSink {
     }
 }
 
-/// Whether a wired pad's audio card is present, without opening it — the caller needs this before
-/// declaring the speaker lane to the host.
-pub fn card_present() -> bool {
-    find_card().is_some()
-}
-
 /// Frames per write: 5 ms. Short enough that a lane starting mid-chunk is not audibly late,
 /// long enough that the write rate is nowhere near the pad's per-millisecond packet rate.
 const CHUNK_FRAMES: usize = 240;
@@ -203,11 +212,15 @@ const CHUNK_FRAMES: usize = 240;
 pub fn spawn(
     envelope: std::sync::Arc<crate::session::pad_audio::Envelope>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // The pad's own card (`find_card`), and its hidraw node so the routing report reaches this pad.
+    card: u32,
+    node: String,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("pad-usb-audio".into())
         .spawn(move || {
-            let sink = match PadSink::open() {
+            let node = super::hidraw::Hidraw::open_wired(&node);
+            let sink = match PadSink::open(card) {
                 Ok(sink) => {
                     tracing::info!("pad audio: wired lanes on the pad's own card (hw:{},0)", sink.card);
                     sink
@@ -223,7 +236,7 @@ pub fn spawn(
             // Route the pad's audio to its speaker. Its own handle rather than the feedback
             // thread's: routing belongs to whoever plays the lane, and the pad may have no
             // feedback sender at all (a host that sends no effects still sends audio).
-            match super::hidraw::Hidraw::find_dualsense() {
+            match node {
                 Some(node) => {
                     if let Err(e) = node.write_report(&super::dualsense::build_usb_speaker_setup()) {
                         tracing::warn!("pad audio: speaker routing not set ({e:#}); expect the jack, not the speaker");
@@ -271,5 +284,24 @@ impl<'a> UsbOwnership<'a> {
 impl Drop for UsbOwnership<'_> {
     fn drop(&mut self) {
         self.0.release_usb();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two wired pads: each must find its own card by USB path, never the first one listed.
+    #[test]
+    fn a_pad_finds_its_own_card() {
+        const CARDS: &str = " 0 [Controller     ]: USB-Audio - DualSense Wireless Controller
+                      Sony Interactive Entertainment DualSense Wireless Controller at usb-xhci-hcd.1.auto-1, high speed
+ 1 [Controller_1   ]: USB-Audio - DualSense Wireless Controller
+                      Sony Interactive Entertainment DualSense Wireless Controller at usb-xhci-hcd.1.auto-2, high speed
+";
+        assert_eq!(card_in(CARDS, Some("usb-xhci-hcd.1.auto-2")), Some(1));
+        assert_eq!(card_in(CARDS, Some("usb-xhci-hcd.1.auto-1")), Some(0));
+        assert_eq!(card_in(CARDS, Some("usb-xhci-hcd.1.auto-3")), None);
+        assert_eq!(card_in(CARDS, None), None, "two cards and no path is ambiguous");
     }
 }
