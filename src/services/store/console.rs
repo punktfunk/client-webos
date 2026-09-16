@@ -15,9 +15,11 @@
 //! Only one UI is live at a time (that is what the flip means), so this owns the document while
 //! the console is up and [`ConsoleStore::snapshot`] hands it back when the console closes.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use pf_client_core::presets::SettingsOverlay;
 use pf_client_core::trust;
 use pf_console_ui::SettingsStore;
 
@@ -110,6 +112,15 @@ impl SettingsStore for ConsoleStore {
             .profiles
             .iter()
             .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
+    }
+
+    fn preset_overrides(&self) -> HashMap<String, SettingsOverlay> {
+        let state = self.state.lock().expect(POISONED);
+        state
+            .profiles
+            .iter()
+            .map(|p| (p.id.clone(), p.overrides.clone()))
             .collect()
     }
 

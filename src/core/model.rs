@@ -571,10 +571,8 @@ pub enum LogLevelOverride {
 
 /// Slider range, in 5 Mbps steps.
 pub const BITRATE_MIN_KBPS: u32 = 10_000;
-/// The one bitrate ceiling this client has. It bounds the manual slider AND, through `main`,
-/// `punktfunk_core::abr`'s automatic wire-budget climb (`PUNKTFUNK_ABR_MAX_MBPS`) and the startup
-/// link-capacity probe's burst target (`PUNKTFUNK_ABR_PROBE_KBPS`) — an Automatic session that
-/// could climb past what the slider allows would just be a second, hidden setting.
+/// The manual slider's ceiling. Automatic keeps 70 % of what the startup probe delivers, which
+/// passes this only above 286 Mbps delivered, past the G5's measured ~245 Mbps airlink.
 pub const BITRATE_MAX_KBPS: u32 = 200_000;
 
 /// 70% of measured goodput (headroom for FEC, loss).

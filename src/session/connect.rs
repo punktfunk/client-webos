@@ -103,6 +103,8 @@ pub struct ConnectParams {
     /// Requested capture mode; the host clamps it and echoes the result in `client.mode()`.
     pub mode: Mode,
     pub bitrate_kbps: u32,
+    /// Ceiling for Automatic; `0` = no limit.
+    pub abr_max_kbps: u32,
     pub hdr_enabled: bool,
     pub audio_channels: u8,
     /// This client's TLS identity, `(cert_pem, key_pem)`.
@@ -237,6 +239,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // `HOST_CAP_GAMEPAD_STATE`.
         params.gamepad_type.to_core(),
         params.bitrate_kbps,
+        params.abr_max_kbps,
         negotiated.video_caps,
         // Requested only — the host clamps to what it can capture, and
         // `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`,
@@ -248,6 +251,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // The standard coupling on every session: libopus here decodes either, and NDL's plane
         // takes only this one. A host that answers legacy is re-encoded (`session::audio`).
         punktfunk_core::audio::AudioLayout::Standard,
+        // The kit offers no Picture fit row on the TV; `Fit` keeps the Hello unchanged.
+        punktfunk_core::video_fit::VideoFit::Fit,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         negotiated.display_hdr,
@@ -275,6 +280,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         params.pin,
         Some(params.identity.clone()),
         params.timeout,
+        // No ABR memory kept per host yet, so Automatic starts at the host's echo.
+        None,
         // Uncancelable: the connect has its own thread and the caller joins it.
         None,
     )

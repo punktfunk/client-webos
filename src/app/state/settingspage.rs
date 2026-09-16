@@ -10,6 +10,8 @@
 //! The scope switcher edits either the global document or one profile's overlay; a profile
 //! row that differs from the global wears the dot, and Secondary on it clears the override.
 
+use std::collections::HashMap;
+
 use pf_client_core::presets::{SettingsOverlay, StreamPreset};
 use pf_client_core::trust;
 use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
@@ -144,9 +146,11 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
             }
         }
         Page::Display => {
-            push(Row::Kit(K::Resolution), Some("Resolution"));
+            push(Row::Kit(K::Aspect), Some("Resolution"));
+            push(Row::Kit(K::Resolution), None);
             push(Row::Kit(K::Refresh), None);
             push(Row::Kit(K::Bitrate), Some("Quality"));
+            push(Row::Kit(K::BitrateCap), None);
             push(Row::Kit(K::Codec), None);
             push(Row::Kit(K::Hdr), None);
             if !profile {
@@ -195,9 +199,10 @@ fn page_rows(page: Page, scope: &Scope) -> Rows {
 /// The overlay field a shared row pins in profile scope — `None` for a global-only row.
 fn overlay_field(id: RowId) -> Option<&'static str> {
     Some(match id {
-        RowId::Resolution => "resolution",
+        RowId::Resolution | RowId::Aspect => "resolution",
         RowId::Refresh => "refresh_hz",
-        RowId::Bitrate => "bitrate_kbps",
+        // The kit pins the rate and its limit as one pair.
+        RowId::Bitrate | RowId::BitrateCap => "bitrate_kbps",
         RowId::Codec => "codec",
         RowId::Hdr => "hdr_enabled",
         RowId::PresentPriority => "present_priority",
@@ -219,9 +224,9 @@ const LOAD_BEARING_PIN: &str = "mouse_mode";
 /// Whether `o` pins the field behind `id`.
 fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
     match id {
-        RowId::Resolution => o.width.is_some() || o.height.is_some() || o.match_window.is_some(),
+        RowId::Resolution | RowId::Aspect => o.width.is_some() || o.height.is_some() || o.match_window.is_some(),
         RowId::Refresh => o.refresh_hz.is_some(),
-        RowId::Bitrate => o.bitrate_kbps.is_some(),
+        RowId::Bitrate | RowId::BitrateCap => o.bitrate_kbps.is_some(),
         RowId::Codec => o.codec.is_some(),
         RowId::Hdr => o.hdr_enabled.is_some(),
         RowId::PresentPriority => o.present_priority.is_some(),
@@ -241,6 +246,7 @@ fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
 struct PageStore {
     settings: trust::Settings,
     profiles: Vec<(String, String)>,
+    overrides: HashMap<String, SettingsOverlay>,
 }
 
 impl pf_console_ui::SettingsStore for PageStore {
@@ -252,6 +258,10 @@ impl pf_console_ui::SettingsStore for PageStore {
 
     fn presets(&self) -> Vec<(String, String)> {
         self.profiles.clone()
+    }
+
+    fn preset_overrides(&self) -> HashMap<String, SettingsOverlay> {
+        self.overrides.clone()
     }
 
     fn known_hosts(&self) -> trust::KnownHosts {
@@ -347,11 +357,20 @@ impl App {
         }
     }
 
+    /// Each preset's overrides by id: the kit notes a row a host's bound preset overrides.
+    fn preset_overrides(&self) -> HashMap<String, SettingsOverlay> {
+        self.profiles
+            .iter()
+            .map(|p| (p.id.clone(), p.overrides.clone()))
+            .collect()
+    }
+
     /// Run `f` with the console's screen context over `settings`.
     fn with_engine<R>(&self, settings: &mut trust::Settings, f: impl FnOnce(&mut Ctx<'_>) -> R) -> R {
         let store = PageStore {
             settings: settings.clone(),
             profiles: self.profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect(),
+            overrides: self.preset_overrides(),
         };
         let library = pf_console_ui::LibraryShared::default();
         let pads = self.kit_pads();
@@ -364,8 +383,9 @@ impl App {
             pads: &pads,
             deck: false,
             fallback_ui: true,
-            // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave.
+            // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
             pyrowave_ok: false,
+            av1_ok: false,
             device_name: "webOS TV",
             t: 0.0,
         };
@@ -442,6 +462,7 @@ impl App {
         let overlay = self.scope_profile().map(|p| p.overrides.clone());
         let rows = self.settings_page_rows();
         let profiles: Vec<(String, String)> = self.profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+        let overrides = self.preset_overrides();
         let core = self.settings_ui.settings.clone();
         let priority = settings.present_priority();
         self.with_engine(&mut settings, |ctx| {
@@ -450,7 +471,7 @@ impl App {
                 .map(|(i, &(row, header))| {
                     let mut spec = match row {
                         Row::Kit(id) => {
-                            let mut spec = engine::row_spec(id, ctx, &profiles);
+                            let mut spec = engine::row_spec(id, ctx, &profiles, &overrides);
                             if let Some(lock) = self.tv_lock(id, &core) {
                                 spec = spec.locked(lock);
                             } else if id == RowId::PadType && self.dualsense_limited() {
@@ -835,9 +856,11 @@ impl App {
 fn absence(id: RowId) -> Option<&'static str> {
     Some(match id {
         // On a page — see `page_rows`.
-        RowId::Resolution
+        RowId::Aspect
+        | RowId::Resolution
         | RowId::Refresh
         | RowId::Bitrate
+        | RowId::BitrateCap
         | RowId::Codec
         | RowId::Hdr
         | RowId::PresentPriority
@@ -864,6 +887,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         RowId::Decoder
         | RowId::Chroma444
         | RowId::TenBitSdr
+        | RowId::VideoFit
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
