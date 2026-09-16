@@ -248,6 +248,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // The standard coupling on every session: libopus here decodes either, and NDL's plane
         // takes only this one. A host that answers legacy is re-encoded (`session::audio`).
         punktfunk_core::audio::AudioLayout::Standard,
+        // The kit offers no Picture fit row on the TV; `Fit` keeps the Hello unchanged.
+        punktfunk_core::video_fit::VideoFit::Fit,
         negotiated.video_codecs,
         negotiated.preferred_codec,
         negotiated.display_hdr,

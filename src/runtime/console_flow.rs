@@ -80,8 +80,9 @@ pub(super) fn run(
         // "Controller-optimized UI" row is gated on saying so — turning it off there is the
         // way back to the cursor menus.
         fallback_ui: true,
-        // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave.
+        // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
         pyrowave_ok: false,
+        av1_ok: false,
         store: Some(store.clone()),
         platform: Platform::WebOS,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
