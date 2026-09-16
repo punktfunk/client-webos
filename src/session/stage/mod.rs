@@ -529,7 +529,7 @@ mod tests {
         Harness { stage, clock, fed }
     }
 
-    /// Wraps FakeSink to keep a handle on stamps post-ownership transfer.
+    /// Wraps `FakeSink` to keep a handle on stamps post-ownership transfer.
     struct RecordingSink {
         inner: FakeSink,
         recorder: Arc<Mutex<Vec<u64>>>,

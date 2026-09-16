@@ -15,9 +15,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use punktfunk_core::quic;
 
-/// A feed refused because the pipeline hasn't finished loading — distinct from a decode error
-/// because the response differs: a decode error is answered with a flush, and flushing a decoder
-/// that has not finished loading takes the session's audio out for good (see `session::stage`).
+/// Feed refused: pipeline loading. Distinct from decode error; flushing an unloaded decoder
+/// kills the audio plane (see `session::stage`).
 #[derive(Debug)]
 pub struct NotReady;
 
@@ -29,22 +28,20 @@ impl std::fmt::Display for NotReady {
 
 impl std::error::Error for NotReady {}
 
-/// What a video backend can be asked to do. Every `false` here is a stage behaviour that must
-/// switch off, not a call that may fail — the alternative is per-backend `match`es scattered
-/// across the pipeline, which is what this replaces.
+/// Video backend capabilities. Every `false` disables a stage behaviour; avoids per-backend
+/// matches scattered across the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoSinkCaps {
-    /// The feed takes a presentation timestamp. `false` on NDL v1, which presents in feed order.
+    /// Feed carries a presentation timestamp (`false` on NDL v1).
     pub pts: bool,
-    /// Access units may be fed in pieces as they arrive (slice-progressive delivery). Needs a
-    /// timestamp that can be repeated across the pieces, so it implies [`Self::pts`].
+    /// Slice-progressive delivery. Requires repeatable PTS, implies [`Self::pts`].
     pub partial_au: bool,
-    /// The decoder holds a render queue that can be dropped on the floor.
+    /// Decoder has a droppable render queue.
     pub flush: bool,
 }
 
 impl VideoSinkCaps {
-    /// Nothing beyond a feed: the narrowest backend shape (NDL v1).
+    /// Narrowest backend: bare feed (NDL v1).
     pub const FEED_ONLY: Self = Self {
         pts: false,
         partial_au: false,
@@ -52,9 +49,8 @@ impl VideoSinkCaps {
     };
 }
 
-/// A monotonic clock a sink presents against. NDL has its own, unrelated to the
-/// host's capture clock and to wall-clock — mapping between them is `session::timeline`'s job, and
-/// this is the only thing it needs from a backend.
+/// Monotonic clock for presentation pacing. NDL's is unrelated to host capture or wall-clock;
+/// mapping is `session::timeline`'s job.
 pub trait MediaClock: Send + Sync {
     /// Nanoseconds since the decoder loaded.
     fn now_ns(&self) -> u64;
@@ -62,22 +58,19 @@ pub trait MediaClock: Send + Sync {
 
 /// One loaded video decoder.
 pub trait VideoSink: Send {
-    /// For the log line and the stats overlay.
     fn name(&self) -> &'static str;
 
     fn caps(&self) -> VideoSinkCaps;
 
-    /// Hand one access unit (or one piece of one) to the decoder. `pts_ns` is in this sink's own
-    /// clock domain and ignored by a sink whose caps say it takes no timestamp.
+    /// Feed one AU (or one piece). PTS is in this sink's clock; ignored if caps deny timestamps.
     fn feed(&self, au: &[u8], pts_ns: u64) -> Result<()>;
 
-    /// Drop whatever is queued. A no-op where [`VideoSinkCaps::flush`] is false.
+    /// Drop the render queue. No-op where [`VideoSinkCaps::flush`] is false.
     fn flush(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Frames queued for presentation, or `None` where the backend can't say — which is not the
-    /// same answer as an empty queue, and the stages treat it differently.
+    /// Queued frames, or `None` if backend can't report. `None` ≠ empty; stages treat differently.
     fn queue_depth(&self) -> Option<u32> {
         None
     }
@@ -91,35 +84,28 @@ pub trait VideoSink: Send {
         None
     }
 
-    /// The audio plane this load produced, where the backend has one and the load was accepted.
-    /// It is an [`AudioSink`] too, so a route that rides it needs nothing else.
+    /// Audio plane for this load (also an [`AudioSink`]; route needs nothing else).
     fn audio_plane(&self) -> Option<Arc<dyn AudioPlane>> {
         None
     }
 
-    /// Whether this decoder has failed in a way no re-anchor can undo, so the stage should stop
-    /// feeding it and the session should end rather than run on a picture that will never return.
-    /// `false` on a backend with no such notion, which is then simply never fatal.
+    /// Decoder failed unrecoverably (no re-anchor works). Ends session if true.
     fn is_dead(&self) -> bool {
         false
     }
 }
 
-/// What an audio sink takes. Declared by the sink; the stage above produces exactly this and
-/// nothing converts afterwards.
+/// Audio format a sink declares. Stage produces exactly this; no conversion after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
     /// Opus the sink decodes: the wire's stereo as-is, or 5.1 re-encoded into NDL's layout.
     Opus { channels: u8 },
-    /// Interleaved f32 in punktfunk's own channel order — what libopus decodes to, so this is the
-    /// format that costs no conversion at all.
+    /// Interleaved f32 in punktfunk's channel order (libopus output). No conversion needed.
     PcmF32 { channels: u8, sample_rate: u32 },
 }
 
 impl AudioFormat {
-    /// Channels this sink puts on a speaker. Nothing is ever folded into it: a session asks the
-    /// host for a layout the selected route carries (`model::AudioRoutePref::max_channels`), so a
-    /// mismatch here is a bug, not a case to mix down.
+    /// Channels to speaker. Never folded (route is pre-negotiated to match). Mismatch is a bug.
     pub fn channels(self) -> u8 {
         match self {
             Self::Opus { channels } | Self::PcmF32 { channels, .. } => channels,
@@ -137,51 +123,41 @@ pub enum Samples<'a> {
 /// — and `session::audio`'s stage is written against this rather than against either of them, so
 /// adding a third is one implementation and no pipeline change.
 pub trait AudioSink: Send + Sync {
-    /// For the log line and the stats overlay.
     fn name(&self) -> &'static str;
 
-    /// What this sink takes. The stage produces it; nothing converts on the way in.
     fn format(&self) -> AudioFormat;
 
-    /// Feed one packet, stamped in the host's capture clock. A sink that paces on a timeline of
-    /// its own maps it; one that just plays what it is given ignores it.
+    /// Feed packet stamped in host capture clock. Timeline sinks map it; others ignore it.
     fn feed(&self, samples: Samples<'_>, host_pts_ns: u64) -> Result<()>;
 
-    /// Queue depth in ms where the sink knows one, for the stats overlay.
+    /// Queue depth in ms, or `None` if sink can't report.
     fn depth_ms(&self) -> Option<i64> {
         None
     }
 }
 
-/// A hardware audio plane belonging to a video load — NDL's, in practice.
+/// Hardware audio plane for a video load (NDL, in practice).
 ///
-/// It is part of the *video* sink's world because the picture depends on it: NDL paces the
-/// picture against a fed plane, so a plane starved of packets is a video stutter, not an audio
-/// fault (docs/NOTES.md § "NDL's audio plane").
+/// The picture depends on it: NDL paces only when the plane exists and is primed
+/// (docs/NOTES.md § "NDL's audio plane"). Does not need continuous feeding after prime.
 pub trait AudioPlane: AudioSink {
-    /// How far the plane's stamps run ahead of its clock, in ms — the depth NDL paces the
-    /// PICTURE on, and so the figure a stutter report is read against. Sagging towards zero is
-    /// the signature.
+    /// Lead of plane stamps over its clock (ms). Negative means plane is starved; on software
+    /// route this is normal, not a fault.
     fn lead_ms(&self) -> i64;
 
-    /// Keep the plane fed until `stop`, so the picture stays paced. Blocks; the caller gives it a
-    /// thread. `yields_to_real` leaves the plane to whatever pump is feeding it and fills in only
-    /// once that stops.
+    /// Run plane's thread until `stop`. Carry load prime until load confirms; keep checks off the
+    /// feed path. Blocks; caller provides thread. `yields_to_real`: metronome yields to real stream.
     fn run_keepalive(&self, stop: &AtomicBool, yields_to_real: bool);
 
-    /// Hold `ms` of queue depth beyond the plane's own default, so it keeps pace with a picture
-    /// the presentation cushion moved later. No-op on a plane with no lead to move.
-    ///
-    /// Must be a figure that is FIXED for the session: a plane whose stamps are clamped monotonic
-    /// cannot give depth back once it has taken it.
+    /// Hold extra queue depth (ms) to pace picture against presentation cushion. FIXED per session;
+    /// monotonic stamps can't give depth back once taken. No-op if plane has no lead to move.
     fn set_extra_lead_ms(&self, _ms: i64) {}
 
-    /// Whether the session's REAL audio may ride this plane, as opposed to only a keepalive.
+    /// Whether real audio may ride this plane (vs. keepalive only).
     ///
-    /// A plane can exist without being proven: a backend may accept the request and confirm it
-    /// later, or never. Keeping it fed costs nothing if it turns out not to be there, but routing
-    /// the session's only audio onto it does — that is a silent session — so the two questions are
-    /// asked separately and the route takes the conservative one.
+    /// Plane may exist unproven: backend accepts but confirms later or never. Feeding costs nothing
+    /// if it fails, but routing real audio to an unproven plane silences the session. Conservative
+    /// verdict: separate questions.
     fn accepts_stream(&self) -> bool {
         true
     }

@@ -20,10 +20,10 @@ pub struct Pacing {
     late_stamps: u64,
     /// Baseline window: source, mapped, emitted cadence.
     trace: CadenceTrace,
-    /// Previous mapped value, for trace deltas. Separate from monotonic floor last_base_ns.
+    /// Previous mapped value, for trace deltas. Separate from monotonic floor `last_base_ns`.
     last_due_ns: Option<i64>,
     last_emitted_ns: Option<u64>,
-    /// Player clock when open picture was mapped; for span measurement in note_submitted.
+    /// Player clock when open picture was mapped; for span measurement in `note_submitted`.
     map_clock_ns: Option<u64>,
     /// Tightest deadline margin since last read, µs; taken (cleared) on read.
     min_slack_us: Option<i32>,

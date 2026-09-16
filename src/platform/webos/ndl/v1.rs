@@ -38,8 +38,7 @@ use crate::platform::webos::device;
 const PLANE_WIDTH: i32 = 1920;
 const PLANE_HEIGHT: i32 = 1080;
 
-/// Letterbox/pillarbox the stream's aspect into the fixed plane. Called once at open; never again
-/// from the app.
+/// Letterbox/pillarbox the stream's aspect into the fixed plane (once at open).
 fn fit_video(fns: &ffi::V1, width: i32, height: i32) {
     let (x, y, w, h) = if width <= 0 || height <= 0 {
         (0, 0, PLANE_WIDTH, PLANE_HEIGHT)
@@ -52,14 +51,14 @@ fn fit_video(fns: &ffi::V1, width: i32, height: i32) {
             ((PLANE_WIDTH - w) / 2, 0, w, PLANE_HEIGHT)
         }
     };
-    if let Err(e) = fns.video_set_area(x, y, w, h) {
-        tracing::warn!("NDL v1 SetArea({x},{y},{w},{h}): {e:#}");
+    // Only log on success; SetArea failure leaves the plane where open put it.
+    match fns.video_set_area(x, y, w, h) {
+        Ok(()) => tracing::info!("NDL v1 plane: {w}x{h}+{x}+{y} for a {width}x{height} stream"),
+        Err(e) => tracing::warn!("NDL v1 SetArea({x},{y},{w},{h}): {e:#}"),
     }
-    tracing::info!("NDL v1 plane: {w}x{h}+{x}+{y} for a {width}x{height} stream");
 }
 
-/// v1's frame-done callback, echoing back the feed's `userdata`. Only a "pipeline is alive"
-/// signal: with no PTS there is nothing to time the frame index against.
+/// Frame-done callback. Presence signal only; no PTS input to timestamp against.
 extern "C" fn on_frame(userdata: c_ulonglong) {
     if PLAYING.bump_first() {
         tracing::info!("NDL v1 pipeline confirmed a frame through (frame {userdata})");
@@ -79,8 +78,7 @@ impl NdlV1Video {
     /// Open the v1 video plane for a `width`x`height` H.264 stream.
     pub fn load(app_id: &str, width: i32, height: i32, codec: NdlCodec) -> Result<Self> {
         ensure_not_poisoned()?;
-        // Defence in depth: `session::connect` never advertises HEVC here, so H.265 means its
-        // guard was bypassed — and feeding HEVC to this decoder is a black screen, not an error.
+        // Guard against non-H.264: HEVC to v1 is black screen, not error.
         if codec != NdlCodec::H264 {
             bail!("NDL v1 decodes H.264 only (asked for {codec:?}) — see platform::webos::ndl::v1");
         }
@@ -104,18 +102,6 @@ impl NdlV1Video {
             open_instant: Instant::now(),
             frames_fed: AtomicU64::new(0),
         })
-    }
-
-    /// Feed one access unit. No PTS: v1 presents frames as they are fed (see the module docs),
-    /// so the caller's timestamp has nowhere to go.
-    pub fn play(&self, au: &[u8]) -> Result<()> {
-        let frame = self.frames_fed.fetch_add(1, Ordering::Relaxed);
-        let _ffi = lock_ffi();
-        self.fns.video_play(au, frame)?;
-        // Same reveal gate as v2, and not left to `on_frame` alone: a model that never delivers
-        // the callback would hold the menu up until `runtime::stream`'s reveal timeout.
-        mark_frame_fed_logged("NDL v1", self.open_instant);
-        Ok(())
     }
 }
 
@@ -142,7 +128,14 @@ impl VideoSink for NdlV1Video {
         VideoSinkCaps::FEED_ONLY
     }
 
+    /// No PTS: v1 presents frames as they are fed (see the module docs), so the caller's
+    /// timestamp has nowhere to go.
     fn feed(&self, au: &[u8], _pts_ns: u64) -> Result<()> {
-        self.play(au)
+        let frame = self.frames_fed.fetch_add(1, Ordering::Relaxed);
+        let _ffi = lock_ffi();
+        self.fns.video_play(au, frame)?;
+        // Don't rely on on_frame alone; callback loss would block menu until reveal timeout.
+        mark_frame_fed_logged("NDL v1", self.open_instant);
+        Ok(())
     }
 }

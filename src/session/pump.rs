@@ -475,7 +475,7 @@ pub fn spawn_audio_feed(
         .context("spawn audio thread")
 }
 
-/// Joins audio thread with standard teardown timeout. SDL route only; no ndl::poison() needed.
+/// Joins audio thread with standard teardown timeout. SDL route only; no `ndl::poison()` needed.
 pub fn join_audio_feed(handle: std::thread::JoinHandle<()>) -> bool {
     join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT, "audio-feed", || ())
 }
