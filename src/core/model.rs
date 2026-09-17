@@ -711,8 +711,9 @@ impl HdrDisplay {
     #[must_use]
     pub fn hdr_meta(self) -> punktfunk_core::quic::HdrMeta {
         punktfunk_core::quic::HdrMeta {
-            // G, B, R order (ST.2086), 1/50000 chromaticity units — BT.2020 primaries.
-            display_primaries: [[8_500, 39_850], [6_550, 2_300], [35_400, 14_600]],
+            // G, B, R order (ST.2086), 1/50000 chromaticity units — P3-D65, the gamut LG panels
+            // cover. BT.2020 would claim colours the panel cannot show, so nothing maps into it.
+            display_primaries: [[13_250, 34_500], [7_500, 3_000], [34_000, 16_000]],
             white_point: [15_635, 16_450], // D65
             max_display_mastering_luminance: u32::from(self.peak_nits) * 10_000,
             min_display_mastering_luminance: self.min_luminance_units(),
