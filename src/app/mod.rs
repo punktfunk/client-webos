@@ -42,7 +42,7 @@ use crate::ui;
 /// How much a focused grid card grows. Bigger than the modal widgets' pop (they sit
 /// in a fixed column where any spill reads as a layout shift); a card has the grid gap
 /// around it to grow into.
-pub(crate) const CARD_GROWTH: f32 = 0.045;
+pub(crate) const CARD_GROWTH: f32 = 0.07;
 pub(crate) const LAUNCH_GROWTH: f32 = 3.5;
 pub(crate) const CARD_POP: Duration = Duration::from_millis(300);
 pub(crate) const CARD_POP_SHRINK: f32 = 0.14;

@@ -210,13 +210,7 @@ pub fn zoom_scale(frac: f32, growth: f32) -> f32 {
     1.0 + growth * frac
 }
 
-/// Scale up from (1.0 - shrink) to full size. "Pop in" counterpart to `zoom_rect`.
-pub fn pop_in_rect(base: Rect, frac: f32, shrink: f32) -> Rect {
-    scale_about(base, base, pop_in_scale(frac, shrink))
-}
-
-/// The factor [`pop_in_rect`] scales by at `frac` — for a piece composited onto a
-/// popping tile, which has to fold the same factor into its own transform.
+/// The factor a "pop in" scales by at `frac`: from (1.0 - shrink) up to full size.
 pub fn pop_in_scale(frac: f32, shrink: f32) -> f32 {
     if frac >= 1.0 {
         1.0
