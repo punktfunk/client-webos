@@ -243,14 +243,29 @@ mod refusal_tests {
     #[test]
     fn only_an_unbroken_streak_ages() {
         let streak = RefusalStreak::default();
-        assert_eq!(streak.len(S), std::time::Duration::ZERO, "nothing fed yet is not a refusal");
+        assert_eq!(
+            streak.len(S),
+            std::time::Duration::ZERO,
+            "nothing fed yet is not a refusal"
+        );
         streak.note(false, S);
         streak.note(false, 5 * S);
-        assert_eq!(streak.len(11 * S).as_secs(), 10, "aged from the FIRST refusal, not the last");
-        assert!(streak.len(11 * S) <= DEAD_AFTER_REFUSED, "the ceiling itself is not yet dead");
+        assert_eq!(
+            streak.len(11 * S).as_secs(),
+            10,
+            "aged from the FIRST refusal, not the last"
+        );
+        assert!(
+            streak.len(11 * S) <= DEAD_AFTER_REFUSED,
+            "the ceiling itself is not yet dead"
+        );
         assert!(streak.len(12 * S) > DEAD_AFTER_REFUSED);
         streak.note(true, 12 * S);
-        assert_eq!(streak.len(30 * S), std::time::Duration::ZERO, "one accepted frame clears it");
+        assert_eq!(
+            streak.len(30 * S),
+            std::time::Duration::ZERO,
+            "one accepted frame clears it"
+        );
         streak.note(false, 31 * S);
         assert!(streak.len(32 * S) < DEAD_AFTER_REFUSED, "a fresh streak starts over");
     }
