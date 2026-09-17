@@ -443,6 +443,7 @@ impl App {
                         false
                     }
                     Row::CalibrateHdr => hdr_on,
+                    Row::Kit(RowId::TenBitSdr) if hdr_on => false,
                     Row::Kit(id) => engine::row_on(id, pf_console_ui::Platform::WebOS) && engine::row_applies(id, ctx),
                     _ => true,
                 };
@@ -506,7 +507,7 @@ impl App {
                             }
                         }
                         Row::MultiSlice => RowSpec::toggle("Sliced frames", core.multi_slice())
-                            .with_note("Sends each picture in pieces, lowering delay. Some TVs cannot decode them"),
+                            .with_note("Lower delay. Some TVs cannot decode them"),
                         // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
                         Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
                         Row::Pad => match self.detected_gamepad_type {
