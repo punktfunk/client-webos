@@ -6,8 +6,8 @@ desktop/game streaming. Targets webOS 5.x+ (NDL v1 fallback for 3.5-4.x), built 
 
 ## Commands
 
-[go-task](https://taskfile.dev), `task --list`. Bare targets run natively (how CI runs);
-`docker:*` wraps the cross-toolchain, which is what you want locally.
+[go-task](https://taskfile.dev), `task --list`. Bare targets run natively (CI);
+`docker:*` wraps the cross-toolchain (local dev).
 
 | Task | What it does |
 | --- | --- |
@@ -15,7 +15,7 @@ desktop/game streaming. Targets webOS 5.x+ (NDL v1 fallback for 3.5-4.x), built 
 | `task docker:lint` / `fmt` | clippy / `cargo fmt` |
 | `task docker:test` | run the unit tests (the only task that RUNS them; `lint` only type-checks) |
 | `task docker:package` | build + `dist/*.ipk` |
-| `task docker:deploy` | run the app in a container over VNC — UI work needs no TV |
+| `task docker:deploy` | run the app plus a punktfunk host in one container, over VNC — UI work needs no TV |
 | `task deploy TELEMETRY=auto` | install to the TV, stream logs here (`TELEMETRY_LEVEL=debug\|info\|warn\|error`) |
 
 CI lints with `-D warnings` and clippy is load-bearing — run `docker:lint`, not just `check`.
@@ -31,56 +31,40 @@ focus map, **no sdl2**) and `services` (portable I/O: store, discovery, mTLS, ar
 boundary — input, NDL video, audio, evdev) ← `app` (the `App` state machine and its painters) ←
 `runtime` (the two top-level loops).
 
-- **Everything draws on the console kit** (`pf_console_ui`: `theme`, `widgets`, `icons`), on the
-  shell's GL context (`console::gl`), immediate mode, once per frame. `app::draw::<screen>` is a
-  painter with one `layout` that the pointer hit tests in `app::pointer` call too, so what is drawn
-  is what is hit. Sizes are the kit's design units scaled by `Frame::k`; Home's grid and sidebar
-  keep their pixel geometry in `app::view::{home,sidebar}` because the focus map navigates it.
-  `runtime::overlay` draws what sits over a stream (stats, log tail, toast, confirm dialogs) the
-  same way, over a transparent clear.
-- **`app`** splits per screen by concern: `state::<screen>` (events, transitions),
-  `view::<screen>` (copy and geometry), `draw::<screen>` (the painter). `app::render` holds
-  `prepare_grid` (the O(visible) cover window) and `state`. `App` owns almost nothing directly:
-  `nav`, `jobs` (every background receiver, one `drain_jobs`), `library`, `hosts`, `settings_ui`,
-  `screens::slots` (per-screen payloads) and `render`. Every field is `pub(crate)`; `runtime` writes
-  through named setters.
-- **`console`** hosts the shared gamepad shell (`pf-console-ui`) on the same GL context. Linux-only:
-  the prebuilt Skia archive exists for armv7 and aarch64, so on macOS/Windows the module is absent
-  and `runtime::console_flow` is a stub.
-- **`runtime`** alternates a menu phase and `stream`, on `StreamOutcome::ReturnToMenu` vs `Quit`.
-  The menu is `ui_flow` (this client's screens) or `console_flow` (the shared shell), picked per
-  entry by `Settings::console_ui`. Both reload the settings document on entry.
+- **Everything draws on the console kit** (`pf_console_ui`), immediate mode per frame.
+  `app::draw::<screen>` painter uses one `layout` for both hit-testing and render.
+  Sizes scale by `Frame::k`; Home's grid/sidebar keep pixel geometry in `app::view::{home,sidebar}`.
+  `runtime::overlay` draws stream overlays (stats, log, toast, dialogs) over transparent clear.
+- **`app`** splits per screen: `state::<screen>`, `view::<screen>`, `draw::<screen>`.
+  `app::render` holds `prepare_grid` and state. `App` owns `nav`, `jobs`, `library`, `hosts`,
+  `settings_ui`, `screens::slots`, `render` (all `pub(crate)`, written via setters).
+- **`console`** hosts the shared gamepad shell on the same GL context (Linux-only; Skia prebuilt
+  for armv7/aarch64; macOS/Windows stub out `runtime::console_flow`).
+- **`runtime`** alternates menu and stream on `StreamOutcome`. Menu is `ui_flow` or `console_flow`
+  per `Settings::console_ui`; both reload settings on entry.
 
-Add a screen: a confirm is a `Confirm` in `app::screens::confirm` plus a title in
-`app::draw::dialog::title_of`; a row list is a `ListCard` arm in `App::list_card` (rows as
-`FocusRow`, mapped by `app::draw::list::row_spec`); anything else gets its own `app::draw::<screen>`
-with a `layout` and joins `app::draw::ported`. The `app::screens` tables are exhaustive over
-`Screen`, so the compiler asks.
+Add a screen: confirm = `app::screens::confirm` + title in `app::draw::dialog::title_of`.
+Row list = `ListCard` arm in `App::list_card` + rows via `app::draw::list::row_spec`.
+Other = own `app::draw::<screen>` with layout, joins `app::draw::ported`.
+`app::screens` tables are exhaustive over `Screen`.
 
 ## Invariants worth knowing before you edit
 
-- **The grid is O(visible), not O(library)**, at every layer: covers are requested in a scroll
-  window and evicted outside a hysteresis window (only when that window moves); the drawn range,
-  the focus map and pointer hit-testing are all arithmetic, never a scan. A path that walks
-  `self.games` per frame, per keypress or per pointer motion is a regression.
-- `focus_window` must always contain the current focus, or `FocusMap::navigate` finds no origin and
-  focus silently freezes.
-- **The kit's list widget mirrors `nav`'s cursor, never the reverse.** `App::kit_list_visual` feeds
-  it the event for the look (recoil, dip, slip); the meaning is the App's handler.
+- **The grid is O(visible), not O(library)**: covers, focus, hit-testing are arithmetic.
+  Never walk `self.games` per frame or input.
+- `focus_window` must always contain current focus, or focus silently freezes.
+- **The kit's list widget mirrors `nav`'s cursor, never the reverse.**
+  Visual feedback (recoil, dip, slip) is `App::kit_list_visual`; meaning is the handler.
 - **NDL is `dlopen`'d, never linked** — a `DT_NEEDED` breaks webOS 4 startup before `main`.
-- **`settings.json` is the shared schema, stored whole.** Settings are `pf_client_core::trust::
-  Settings` (this TV's rows under `webos.*`, read through `core::settings::TvSettings`) and each
-  host is `trust::KnownHost` flattened into `core::model::KnownHost`. Never rebuild either from
-  parts: a field this client does not model is another client's, and dropping it resets that
-  client's row on the next save. There is no migration path — a document this build cannot read is
-  replaced by defaults.
-- **A test behind the arm gate never runs**: `task test` builds the host target, and an armv7 test
-  binary cannot execute on a runner. Real logic goes in `services::store::shared` (ungated,
-  tested); only glue goes behind the gate.
-- Video decodes through NDL DirectMedia (opaque decode+present, two generations picked by
-  `device::ndl_generation()`); audio is client-side Opus unless offload is on. `core::caps`
-  publishes the resulting limits and has three readers that must agree.
+- **`settings.json` is the shared schema, stored whole.** TV settings = `pf_client_core::trust::
+  Settings` (webos.* rows via `core::settings::TvSettings`); hosts = `trust::KnownHost` flattened
+  to `core::model::KnownHost`. Never rebuild from parts — unmapped fields belong to other clients.
+  Dropping a field resets that client's row. No migration: unreadable docs → defaults.
+- **Gated tests never run** (`task test` builds host only; armv7 can't run on CI).
+  Real logic in `services::store::shared` (ungated, tested); glue behind the gate.
+- Video: NDL DirectMedia (opaque decode+present, two generations via `device::ndl_generation()`).
+  Audio: client-side Opus, or offload. `core::caps` publishes limits; three readers must align.
 
-**Before any platform, perf or A/V work, read `docs/NOTES.md`** — soft-float, glibc shims, the SDL
-fork, NDL's audio-plane pacing requirement, and a long list of measured blind alleys. Debug real
-behaviour on the TV early; code-only theories about this hardware are usually wrong.
+**Before platform, perf, or A/V work, read `docs/NOTES.md`** — soft-float, glibc shims, SDL fork,
+NDL audio pacing, measured blind alleys. Debug on the TV early; code theories about this hardware
+are usually wrong.

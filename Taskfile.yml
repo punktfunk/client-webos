@@ -1,8 +1,8 @@
 # build/check/package/lint run on host (Linux aarch64+Rust only; CI). docker:* wraps for local dev.
 # webOS-specific plumbing in taskfiles/toolchain.yml keeps this file short.
+# Release builds are fat LTO natively and in CI, thin in Docker; RELEASE_LTO=fat|thin|false overrides.
 version: '3'
 
-# Suppress command echo to reduce noise and token usage.
 silent: true
 
 # TV_HOST and friends come from a gitignored .env — see .env.example.
@@ -11,8 +11,7 @@ dotenv: ['.env']
 env:
   # CMake workaround for vendored libopus (audiopus_sys via punktfunk-core quic feature).
   CMAKE_POLICY_VERSION_MINIMUM: '3.5'
-  # Prebuilt Skia for armv7 (rust-skia ships x86_64/aarch64 only). Without this, skia-bindings
-  # silently builds from source (~1 hour); check target/<triple>/<profile>/build/skia-bindings-*/output for "DOWNLOAD AND INSTALL SUCCEEDED".
+  # Prebuilt Skia for armv7; skia-bindings builds from source (~1 hour) without it.
   SKIA_BINARIES_URL: 'https://git.unom.io/unom/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
 
 includes:
@@ -29,11 +28,11 @@ vars:
   APP_ID: io.unom.punktfunk.client-webos
   TV_DEVICE: webos-tv
   SSH_KEY: '{{.SSH_KEY | default "$HOME/.ssh/id_rsa"}}'
-  RELEASE_LTO: '{{.RELEASE_LTO | default "fat"}}'
   NDK_DIR: .toolchains/arm-webos-linux-gnueabi_sdk-buildroot
   SYSROOT: '{{.NDK_DIR}}/arm-webos-linux-gnueabi/sysroot'
   TARGET: armv7-unknown-linux-gnueabi
-  RUST_IMAGE: rust:bookworm
+  # One image for all container tasks (shared cargo/target volumes). trixie for glibc 2.41 (host packages).
+  RUST_IMAGE: rust:trixie
   PKG_VERSION:
     sh: |
       if [ -n "${PKG_VERSION:-}" ]; then
@@ -41,7 +40,7 @@ vars:
       elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME:-}" != "beta" ]; then
         echo "${GITHUB_REF_NAME#v}"
       else
-        # Version tags only: the rolling `beta` tag sits on main's tip.
+        # Rolling `beta` tag sits on main's tip; use version tags for releases.
         LATEST=$(git describe --tags --abbrev=0 --match '[0-9]*' --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || echo 0.0.1)
         SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
         echo "${LATEST}+git.${SHA}"
@@ -51,18 +50,22 @@ tasks:
   build:
     desc: >-
       Cross-compile release binary on host (Linux aarch64 with Rust only; CI uses this,
-      `docker:build` for local dev). Fat LTO; RELEASE_LTO=thin builds faster.
+      `docker:build` for local dev).
     deps: [toolchain:all]
+    vars:
+      # Default fat; docker:build passes thin via -e to avoid env clobber.
+      LTO: '{{.RELEASE_LTO | default "fat"}}'
     env:
-      # Bakes package version into binary (core::VERSION) so UI build marker matches .ipk.
-      # Cargo.toml stays 0.0.1; docker:build receives via -e.
+      # Bakes into binary (core::VERSION); Cargo.toml stays 0.0.1.
       PKG_VERSION: '{{.PKG_VERSION}}'
+      CARGO_PROFILE_RELEASE_LTO: '{{.LTO}}'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '{{if eq .LTO "fat"}}1{{else}}16{{end}}'
     cmds:
       - rustup target add {{.TARGET}}
       - cargo build --release --target {{.TARGET}}
 
   check:
-    desc: Quick cross-target `cargo check`, no Docker (used by CI)
+    desc: Cross-target cargo check without Docker (CI entry point)
     deps: [toolchain:all]
     cmds:
       - rustup target add {{.TARGET}}
@@ -73,7 +76,7 @@ tasks:
       Run unit tests on host target. armv7 cross build cannot execute on runner, and lint only
       type-checks. Needs native SDL2, fontconfig, FreeType; docker:test brings its own.
     env:
-      # rust-skia upstream (our mirror carries armv7 only).
+      # Use rust-skia upstream (our mirror is armv7-only).
       SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
     cmds:
       - cargo test --bins
@@ -89,7 +92,7 @@ tasks:
 
   package:
     desc: >-
-      Build and package dist/*.ipk (CI only). Fat LTO; RELEASE_LTO=thin builds faster.
+      Build and package dist/*.ipk (CI only).
       PROBES=1 ships pfprobe for on-device SSH diagnostics.
     deps: [build, toolchain:ares-package]
     cmds:
@@ -104,12 +107,10 @@ tasks:
       - cargo fmt
 
   docker:build:
-    desc: Cross-compile release binary in Docker (local dev entry point). Fat LTO; RELEASE_LTO=thin builds faster.
+    desc: Cross-compile release binary in Docker (local dev entry point)
     cmds:
       - task: toolchain:docker-run
-        vars:
-          TARGET_TASK: build
-          RELEASE_LTO: '{{.RELEASE_LTO}}'
+        vars: {TARGET_TASK: build}
 
   docker:check:
     desc: Quick cross-target cargo check in Docker (local dev entry point)
@@ -132,13 +133,12 @@ tasks:
         vars: {TARGET_TASK: lint}
 
   docker:package:
-    desc: Build and package dist/*.ipk in Docker (local dev entry point). Fat LTO; RELEASE_LTO=thin builds faster.
+    desc: Build and package dist/*.ipk in Docker (local dev entry point)
     cmds:
       - task: toolchain:docker-run
         vars:
           TARGET_TASK: package
           PROBES: '{{.PROBES}}'
-          RELEASE_LTO: '{{.RELEASE_LTO}}'
 
   register-device:
     internal: true
@@ -206,52 +206,31 @@ tasks:
   docker:deploy:
     desc: >-
       Like deploy but to container: virtual 1080p over VNC at http://localhost:6080/vnc.html,
-      logs to terminal.
+      logs to terminal. A punktfunk host installs itself in the same container in the background
+      and prints its console URL and password when it is up; the client reaches it at 127.0.0.1.
     cmds:
       - task: toolchain:docker-run
         vars:
           TARGET_TASK: >-
-            preview PROFILE={{.PROFILE | default "preview"}}
-            WEBOS_SDK={{.WEBOS_SDK}}
+            preview WEBOS_SDK={{.WEBOS_SDK}}
             TELEMETRY_LEVEL={{.TELEMETRY_LEVEL | default "debug"}}
           EXTRA_APT: libsdl2-dev libfontconfig-dev libfreetype-dev xvfb x11vnc novnc websockify netcat-openbsd
-          EXTRA_DOCKER: -p 127.0.0.1:6080:6080 -v punktfunk-webos-client-home:/root
+          EXTRA_DOCKER: >-
+            -p 127.0.0.1:6080:6080 -p 47992:47992
+            -v punktfunk-webos-client-home:/root
+            -v punktfunk-webos-host-config:/home/pf/.config/punktfunk
 
-  docker:host:
-    desc: Run a punktfunk host in a container
-    cmds:
-      - |
-        set -eu
-        TTY=""
-        [ -t 0 ] && TTY="-it"
-        exec docker run --rm $TTY --platform linux/amd64 \
-          -p 47990:47990 -p 47992:47992 \
-          -p 9777:9777/udp -p 47999:47999/udp \
-          -v punktfunk-webos-host-apt-cache:/var/cache/apt/archives \
-          -v punktfunk-webos-host-apt-lists:/var/lib/apt/lists \
-          -v punktfunk-webos-host-config:/home/pf/.config/punktfunk \
-          -v {{.ROOT_DIR}}/scripts/host.sh:/host.sh:ro \
-          ubuntu:24.04 /host.sh
-
+  # Entry point inside the docker:deploy container (task CLI, so not internal).
   preview:
-    vars:
-      PROFILE: '{{.PROFILE | default "preview"}}'
-      TELEMETRY_LEVEL: '{{.TELEMETRY_LEVEL | default "debug"}}'
     env:
+      # Pinned: the real value carries the git SHA, and `core::VERSION` reads it through
+      # option_env!, so every commit would invalidate the crate and re-link.
+      PKG_VERSION: 0.0.1+preview
       SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
+      TELEMETRY_LEVEL: '{{.TELEMETRY_LEVEL | default "debug"}}'
+      WEBOS_SDK: '{{.WEBOS_SDK}}'
     cmds:
-      - |
-        set -eu
-        export DISPLAY=:0
-        Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp &
-        until [ -e /tmp/.X11-unix/X0 ]; do sleep 0.1; done
-        x11vnc -forever -shared -nopw -quiet -rfbport 5900 \
-          -threads -nonap -wait 10 -defer 5 -noxdamage &
-        websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
-        echo "preview: http://localhost:6080/vnc.html" >&2
-        nc -lk 9000 &
-        cargo run --bin punktfunk-webos --profile {{.PROFILE}} -- \
-          '{"telemetry":"127.0.0.1:9000","telemetry_level":"{{.TELEMETRY_LEVEL}}","webos_sdk":"{{.WEBOS_SDK}}"}'
+      - ./scripts/preview.sh
 
   clean:
     desc: Remove dist/, .toolchains/, target/, and Docker volumes
