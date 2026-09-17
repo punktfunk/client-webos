@@ -12,9 +12,7 @@ use std::os::unix::io::RawFd;
 
 use punktfunk_core::quic::RichInput;
 
-use super::{
-    abs_range, abs_resolution, bit, device_vendor, HidReport, InputEventRaw, ABS_X, EV_ABS, EV_SYN, SYN_REPORT,
-};
+use super::{abs_range, abs_resolution, bit, device_vendor, InputEventRaw, ABS_X, EV_ABS, EV_SYN, SYN_REPORT};
 
 /// A claimed pad node, decoded. Never both at once — they are separate nodes — which is why this
 /// is one enum on [`super::Device`] rather than two `Option`s that must not overlap.
@@ -39,7 +37,7 @@ impl Pad {
 
     /// Decodes one read burst. A pad node shares none of the mouse/keyboard decode — different
     /// axes, different wire plane — so it takes the whole burst on its own path.
-    pub(super) fn read(&mut self, buf: &[u8], size: usize, sink: &impl Fn(HidReport)) {
+    pub(super) fn read(&mut self, buf: &[u8], size: usize, sink: &impl Fn(RichInput)) {
         match self {
             Self::Touchpad(pad) => read_touch(pad, buf, size, sink),
             Self::Motion(sensors) => read_sensors(sensors, buf, size),
@@ -48,7 +46,7 @@ impl Pad {
 
     /// Sends what the burst accumulated. Touch contacts already went out per `SYN_REPORT` (a
     /// gesture is a stream of positions, not one level), so only motion has anything pending.
-    pub(super) fn flush(&mut self, sink: &impl Fn(HidReport)) {
+    pub(super) fn flush(&mut self, sink: &impl Fn(RichInput)) {
         if let Self::Motion(sensors) = self {
             flush_sensors(sensors, sink);
         }
@@ -58,7 +56,7 @@ impl Pad {
     /// pad unplugged (or a reader stopped) mid-gesture would otherwise leave the finger down on
     /// the host's virtual pad with nothing left to release it. Motion needs no equivalent — a
     /// dropped sample is an attitude the host keeps, not a stuck input.
-    pub(super) fn release(&mut self, sink: &impl Fn(HidReport)) {
+    pub(super) fn release(&mut self, sink: &impl Fn(RichInput)) {
         let Self::Touchpad(pad) = self else {
             return;
         };
@@ -70,7 +68,7 @@ impl Pad {
             finger.active = false;
             finger.dirty = false;
             if let Some(contact) = contact(i, finger, x_range, y_range) {
-                sink(HidReport::Rich(contact));
+                sink(contact);
             }
         }
     }
@@ -269,7 +267,7 @@ fn normalize(x: i32, y: i32, x_range: (i32, i32), y_range: (i32, i32)) -> Option
 /// events, and sending between them would put half the samples on a stale axis. Only contacts a
 /// report actually touched are sent, so a resting finger costs one burst of decode and no
 /// datagrams at all.
-fn read_touch(pad: &mut Touchpad, buf: &[u8], size: usize, sink: &impl Fn(HidReport)) {
+fn read_touch(pad: &mut Touchpad, buf: &[u8], size: usize, sink: &impl Fn(RichInput)) {
     for chunk in buf.chunks_exact(size) {
         // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
         let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
@@ -305,7 +303,7 @@ fn read_touch(pad: &mut Touchpad, buf: &[u8], size: usize, sink: &impl Fn(HidRep
                         continue;
                     };
                     finger.sent = finger.active;
-                    sink(HidReport::Rich(contact));
+                    sink(contact);
                 }
             }
             _ => {}
@@ -316,8 +314,8 @@ fn read_touch(pad: &mut Touchpad, buf: &[u8], size: usize, sink: &impl Fn(HidRep
 /// One contact for the wire, or `None` when the node gave no usable axis range ([`normalize`]).
 ///
 /// A lift's coordinates are whatever the contact last had, which is what the host wants — the
-/// release still has to land where the finger was. `pad` is 0 throughout: this client drives a
-/// single pad.
+/// release still has to land where the finger was. `pad` is 0 here; the caller routes it to the
+/// slot of the controller this node belongs to.
 fn contact(finger_idx: usize, finger: &Finger, x_range: (i32, i32), y_range: (i32, i32)) -> Option<RichInput> {
     let (x, y) = normalize(finger.x, finger.y, x_range, y_range)?;
     Some(RichInput::Touchpad {
@@ -357,7 +355,7 @@ fn read_sensors(sensors: &mut Sensors, buf: &[u8], size: usize) {
 /// report scale (~20), so forwarding them verbatim rails every axis on the slightest movement.
 /// The divide also quantizes a resting pad's bias jitter to a clean zero, which the skip below
 /// then stops sending.
-fn flush_sensors(sensors: &mut Sensors, sink: &impl Fn(HidReport)) {
+fn flush_sensors(sensors: &mut Sensors, sink: &impl Fn(RichInput)) {
     if !std::mem::take(&mut sensors.dirty) {
         return;
     }
@@ -374,9 +372,10 @@ fn flush_sensors(sensors: &mut Sensors, sink: &impl Fn(HidReport)) {
     }
     sensors.sent = Some(axes);
     let [gx, gy, gz, ax, ay, az] = axes;
-    sink(HidReport::Rich(RichInput::Motion {
+    // Pad 0 until routed, as in `contact`.
+    sink(RichInput::Motion {
         pad: 0,
         gyro: [gx, gy, gz],
         accel: [ax, ay, az],
-    }));
+    });
 }

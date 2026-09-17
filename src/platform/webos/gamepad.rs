@@ -55,7 +55,7 @@ pub fn detect_type(subsystem: &sdl2::GameControllerSubsystem) -> Option<crate::s
 /// Maps an SDL controller name to the kind to present. Names come from SDL's controller
 /// database (`SDL_GameControllerNameForIndex`), so they are stable strings like
 /// "`DualSense` Wireless Controller" rather than raw USB product strings.
-fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
+pub fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
     use crate::services::store::GamepadType;
     let name = name.to_ascii_lowercase();
     // Edge before plain: the Edge's SDL name contains "dualsense" too, so testing the
@@ -128,6 +128,19 @@ pub fn arrival_event(kind: crate::services::store::GamepadType, pad: u8, audio_c
         // the caller passes 0 for any host or pad kind that has no lane to render.
         flags: punktfunk_core::input::encode_gamepad_arrival(pad, audio_caps),
     })
+}
+
+/// Pad `pad` is gone: the host tears down its virtual device and frees the index. The core stamps
+/// the removal's seq.
+pub fn remove_event(pad: u8) -> InputEvent {
+    InputEvent {
+        kind: InputKind::GamepadRemove,
+        _pad: [0; 3],
+        code: 0,
+        x: 0,
+        y: 0,
+        flags: punktfunk_core::input::encode_gamepad_remove(pad, 0),
+    }
 }
 
 /// SDL2's `Axis` enum → punktfunk's `AXIS_*` wire id.

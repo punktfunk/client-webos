@@ -19,7 +19,7 @@ pub(super) fn run_ui_flow(
     gl: &mut Option<ConsoleGl>,
     events: &mut sdl2::EventPump,
     game_controller: &sdl2::GameControllerSubsystem,
-    controller: &mut Option<GameController>,
+    pads: &mut pads::Pads,
     identity: &(String, String),
     display_mode: sdl2::video::DisplayMode,
     initial_status: Option<String>,
@@ -51,8 +51,9 @@ pub(super) fn run_ui_flow(
     let mut app = App::new(identity.clone(), kit_fonts.clone());
     // The kit widgets step on real time, like the shell's do.
     let mut last_frame = Instant::now();
-    // Re-poll pad type (ControllerDeviceAdded fires once per connect, not per menu entry).
-    app.set_gamepad_type(gamepad::detect_type(game_controller));
+    // Re-poll pads (ControllerDeviceAdded fires once per connect, not per menu entry).
+    pads.sync(game_controller);
+    app.set_pads(pads.detected());
     // Seeded here for the same reason: the hotplug events fire once per connect, and this
     // entry may follow one. Refreshed on both arms below.
     let mut pad_connected = gamepad::any_pad_connected(game_controller);
@@ -111,9 +112,9 @@ pub(super) fn run_ui_flow(
         crate::app::screens::confirm::Tone::Danger,
     );
     let mut exit_held = false;
-    // Controller routes to the quit dialog the same way it routes to the disconnect
-    // dialog while streaming — see `DisconnectChord`.
-    let mut chord = DisconnectChord::default();
+    // Controllers route to the quit dialog the same way they route to the disconnect
+    // dialog while streaming — see `DisconnectChord`, held per pad.
+    pads.clear_chords();
     let mut quit_dialog_was_active = false;
     // The page a frosted modal card sits on, sharp and blurred, held across frames — see the
     // frame block.
@@ -150,9 +151,9 @@ pub(super) fn run_ui_flow(
         }
         // Controller quit shortcut: held long enough on Home,
         // then forgotten so it fires once per hold rather than repeatedly while held.
-        if !quit_dialog.is_open() && matches!(app.nav.screen, Screen::Home) && chord.held_for(EXIT_HOLD) {
+        if !quit_dialog.is_open() && matches!(app.nav.screen, Screen::Home) && pads.chord_held(EXIT_HOLD) {
             tracing::info!("quit shortcut held — opening quit dialog");
-            chord.clear();
+            pads.clear_chords();
             open_quit_dialog(&mut quit_dialog, &mut input, &app);
             dirty = true;
         }
@@ -274,44 +275,32 @@ pub(super) fn run_ui_flow(
                 }
                 Event::ControllerDeviceAdded { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
-                    if controller.is_none() {
-                        match game_controller.open(which) {
-                            Ok(c) => {
-                                tracing::info!("controller connected: {}", c.name());
-                                *controller = Some(c);
-                            }
-                            Err(e) => tracing::warn!("controller open failed: {e}"),
-                        }
+                    if pads.add(game_controller, which).is_some() {
+                        app.set_pads(pads.detected());
                     }
-                    // Outside the open: only the first pad becomes `controller`, but a second one
-                    // plugged in after it can still be the pad `detect_type` names.
-                    app.set_gamepad_type(gamepad::detect_type(game_controller));
                     continue;
                 }
                 Event::ControllerDeviceRemoved { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
-                    // Magic Remote enumerates as controller; check instance_id to avoid losing the real pad.
-                    if controller.as_ref().is_some_and(|c| c.instance_id() == which) {
-                        // Unplugged pads send no releases; clear armed chords and held directions.
-                        chord.clear();
+                    // Magic Remote enumerates as controller; only pads we hold count.
+                    if pads.remove(which).is_some() {
+                        // Unplugged pads send no releases; clear held directions.
                         input.clear_nav_repeat();
-                        // Still-attached pads send no Added event.
-                        *controller = (0..game_controller.num_joysticks().unwrap_or(0))
-                            .filter(|&i| game_controller.is_game_controller(i))
-                            .filter_map(|i| game_controller.open(i).ok())
-                            .find(|c| !gamepad::is_tv_remote(&c.name()));
+                        app.set_pads(pads.detected());
                     }
-                    app.set_gamepad_type(gamepad::detect_type(game_controller));
                     continue;
                 }
                 _ => {}
             }
             // Track chord state for the quit shortcut without consuming the event — the
             // buttons still flow through `handle_ui_event` for normal menu navigation.
-            match event {
-                Event::ControllerButtonDown { button, .. } => chord.set(button, true),
-                Event::ControllerButtonUp { button, .. } => chord.set(button, false),
-                _ => {}
+            if let Event::ControllerButtonDown { which, button, .. } | Event::ControllerButtonUp { which, button, .. } =
+                event
+            {
+                if let Some(slot) = pads.get_mut(which) {
+                    slot.chord
+                        .set(button, matches!(event, Event::ControllerButtonDown { .. }));
+                }
             }
             // The quit dialog owns input while open — navigate it only, don't let the
             // event reach the menu underneath (same split as the streaming loop).

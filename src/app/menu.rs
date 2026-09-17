@@ -5,7 +5,7 @@
 use crate::core::caps::video_caps;
 use crate::core::event::MenuEvent;
 use crate::core::settings::TvSettings;
-use crate::services::store::{AudioRoutePref, CodecPref, ExitAction, GamepadType, LogLevelOverride, Settings};
+use crate::services::store::{AudioRoutePref, CodecPref, ExitAction, LogLevelOverride, Settings};
 use crate::ui::focus::Dir;
 
 /// This app's input vocabulary mapped onto `ui`'s spatial one. `ui` navigates by
@@ -159,9 +159,8 @@ pub(crate) fn lock_caption(lock: RowLock, webos_major: Option<u32>) -> String {
     }
 }
 
-/// `detected` is the attached pad per `gamepad::detect_type` — `None` with nothing attached
-/// (or an unrecognized pad), which is what locks the Gamepad row.
-pub(crate) fn row_lock(row: SettingsRow, settings: &Settings, detected: Option<GamepadType>) -> Option<RowLock> {
+/// `pad_attached` is whether any controller is open, which is what unlocks the Gamepad row.
+pub(crate) fn row_lock(row: SettingsRow, settings: &Settings, pad_attached: bool) -> Option<RowLock> {
     let caps = video_caps();
     match row {
         SettingsRow::Hdr if !caps.hdr => Some(RowLock::NoHdr),
@@ -173,7 +172,7 @@ pub(crate) fn row_lock(row: SettingsRow, settings: &Settings, detected: Option<G
         // pick could widen it, and naming one would send the user somewhere that cannot help.
         SettingsRow::Audio if channel_options_up_to(caps.max_channels).len() < 2 => Some(RowLock::StereoOnly),
         SettingsRow::Audio if audio_channel_options(settings).len() < 2 => Some(RowLock::RouteStereoOnly),
-        SettingsRow::Gamepad if detected.is_none() => Some(RowLock::NoGamepad),
+        SettingsRow::Gamepad if !pad_attached => Some(RowLock::NoGamepad),
         SettingsRow::GamepadUi | SettingsRow::GamepadUiMode if !CONSOLE_UI_BUILT => Some(RowLock::NoShell),
         // The mode decides nothing while the switch above it is off. Greyed, not hidden: the
         // dependency is the point, and it sits directly under the row that lifts it.

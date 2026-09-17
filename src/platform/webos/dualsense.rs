@@ -139,18 +139,8 @@ fn crc32_le(bytes: impl IntoIterator<Item = u8>) -> u32 {
     !crc
 }
 
-/// The pad's Bluetooth address, in the form `hid/internal/sendData`'s `address` wants.
-///
-/// Read from `/proc/bus/input/devices`' `U: Uniq=` line, which `hid-playstation` sets to the
-/// pad's MAC. A `DualSense` publishes three input devices (pad, motion sensors, touchpad) all
-/// sharing one `Uniq`, so the first match is the right one. `None` for a USB-connected pad
-/// (no `Uniq`), which is correct — this path is Bluetooth-only.
-pub fn find_address() -> Option<String> {
-    let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
-    address_in(&devices)
-}
-
-/// The Bluetooth address of an attached `DualSense`, or `None` when the only one is wired.
+/// A `DualSense` record's Bluetooth address, in the form `hid/internal/sendData`'s `address`
+/// wants, or `None` when that record is a wired pad.
 ///
 /// **`Uniq` is not the discriminator.** `hid-playstation` reads the pad's Bluetooth MAC out of its
 /// pairing-info feature report over USB as well, so a wired pad publishes exactly the same address
@@ -158,16 +148,108 @@ pub fn find_address() -> Option<String> {
 /// them: `0005` is Bluetooth, `0003` is USB. Everything this address reaches — `sendData` and the
 /// whole audio lane — goes through `bluetooth2`, which a wired pad is not on, so
 /// handing one back would claim the coils for a transport that cannot carry them.
-fn address_in(devices: &str) -> Option<String> {
-    dualsense_blocks(devices)
-        .filter(|block| block.lines().any(|l| l.trim_end().starts_with("I: Bus=0005")))
-        .find_map(|block| {
+fn bluetooth_address(block: &str) -> Option<String> {
+    block
+        .lines()
+        .any(|l| l.trim_end().starts_with("I: Bus=0005"))
+        .then(|| uniq_in(block))
+        .flatten()
+}
+
+/// Where one pad's HID output goes.
+pub enum Link {
+    /// `hid/internal/sendData` to this address.
+    Bluetooth(String),
+    Usb(crate::platform::webos::hidraw::Hidraw),
+}
+
+/// The link for the `DualSense` SDL opened at `path` (`SDL_GameControllerPath`) with `serial`,
+/// so each of several pads gets its own effects. `None` when no route is found.
+///
+/// SDL's evdev backend names `/dev/input/eventN`, matched to its `/proc/bus/input/devices` record
+/// by handler; its HIDAPI backend names the hidraw node itself and reports the MAC as serial.
+/// With nothing to match on, a lone `DualSense` is still unambiguous.
+pub fn link_for(path: Option<&str>, serial: Option<&str>) -> Option<Link> {
+    use crate::platform::webos::hidraw::Hidraw;
+    let serial_mac = serial.and_then(mac_from_serial);
+    if let Some(node) = path.filter(|p| p.starts_with("/dev/hidraw")) {
+        return Hidraw::open_wired(node)
+            .map(Link::Usb)
+            .or_else(|| serial_mac.or_else(|| Hidraw::uniq_of(node)).map(Link::Bluetooth));
+    }
+    let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
+    let blocks: Vec<&str> = dualsense_blocks(&devices).collect();
+    let event = path.and_then(|p| p.rsplit('/').next());
+    let by_handler = event.and_then(|event| {
+        blocks.iter().copied().find(|block| {
             block
                 .lines()
-                .find_map(|l| l.strip_prefix("U: Uniq="))
-                .map(|u| u.trim().to_ascii_lowercase())
-                .filter(|u| !u.is_empty())
+                .find_map(|l| l.strip_prefix("H: Handlers="))
+                .is_some_and(|h| h.split_whitespace().any(|t| t == event))
         })
+    });
+    let mac = match by_handler {
+        Some(block) => uniq_in(block)?,
+        None => {
+            let mut macs: Vec<String> = blocks.iter().copied().filter_map(uniq_in).collect();
+            macs.sort_unstable();
+            macs.dedup();
+            serial_mac.or_else(|| (macs.len() == 1).then(|| macs.swap_remove(0)))?
+        }
+    };
+    // Whether this is the only wired DualSense attached: the one case a node that cannot report
+    // its MAC is still unambiguously this pad's.
+    let mut wired_macs: Vec<String> = blocks
+        .iter()
+        .copied()
+        .filter(|block| bluetooth_address(block).is_none())
+        .filter_map(uniq_in)
+        .collect();
+    wired_macs.sort_unstable();
+    wired_macs.dedup();
+    let only_wired = wired_macs == [mac.as_str()];
+    let mine: Vec<&str> = blocks
+        .into_iter()
+        .filter(|block| uniq_in(block).as_deref() == Some(mac.as_str()))
+        .collect();
+    if let Some(address) = mine.iter().copied().find_map(bluetooth_address) {
+        return Some(Link::Bluetooth(address));
+    }
+    // Wired: the HID device's own hidraw child, else the node reporting this MAC, else a lone node
+    // that reports no MAC while this is the only wired pad.
+    let from_sysfs = mine
+        .iter()
+        .find_map(|block| block.lines().find_map(|l| l.strip_prefix("S: Sysfs=")))
+        .and_then(|sysfs| std::fs::read_dir(format!("/sys{}/hidraw", sysfs.split("/input/input").next()?)).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .find_map(|name| Hidraw::open_wired(&format!("/dev/{name}")));
+    if let Some(node) = from_sysfs {
+        return Some(Link::Usb(node));
+    }
+    let mut wired = Hidraw::wired();
+    // A node reporting another MAC is another pad; the lone node stands in only when it cannot say.
+    let index = wired
+        .iter()
+        .position(|(_, uniq)| uniq.as_deref() == Some(mac.as_str()))
+        .or_else(|| (only_wired && matches!(wired.as_slice(), [(_, None)])).then_some(0))?;
+    Some(Link::Usb(wired.swap_remove(index).0))
+}
+
+/// A record's `U: Uniq=`, lowercased.
+fn uniq_in(block: &str) -> Option<String> {
+    block
+        .lines()
+        .find_map(|l| l.strip_prefix("U: Uniq="))
+        .map(|u| u.trim().to_ascii_lowercase())
+        .filter(|u| !u.is_empty())
+}
+
+/// SDL's HIDAPI `DualSense` serial is the MAC as `aa-bb-cc-dd-ee-ff`; `bluetooth2` wants `aa:bb:…`.
+pub(crate) fn mac_from_serial(serial: &str) -> Option<String> {
+    punktfunk_core::wol::parse_mac(serial.trim())?;
+    Some(serial.trim().to_ascii_lowercase().replace('-', ":"))
 }
 
 /// The `/proc/bus/input/devices` records of every connected `DualSense`. One pad publishes three
@@ -235,7 +317,7 @@ pub fn hid_playstation_bound() -> bool {
 /// The uncached probe behind [`hid_playstation_bound`].
 fn probe_hid_playstation_bound() -> bool {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
-    // Bound for the same reason as in `find_address`.
+    // Bound for the same reason as in `bluetooth_address`.
     let bound = dualsense_blocks(&devices)
         // The evdev node's `Sysfs=` line points at `<hid-device>/input/inputN`; the driver
         // binding lives on the HID device itself, one level up.
@@ -260,7 +342,7 @@ pub struct Feedback {
 
 impl Feedback {
     /// Starts a feedback sender for the pad at Bluetooth `address`, or `None` when the
-    /// platform can't support it (no `luna-send-pub`). Resolve `address` via [`find_address`].
+    /// platform can't support it (no `luna-send-pub`). Resolve `address` via [`link_for`].
     pub fn new(address: String, coils: Option<Arc<Envelope>>) -> Option<Self> {
         if !crate::platform::webos::luna::available() {
             return None;
@@ -738,9 +820,9 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     let mut frames = [[0i8; 2]; COIL_REPORT_FRAMES];
     let mut coil_sends: u32 = 0;
     loop {
-        // The set has told us it has no HID write path for this address. Nothing this loop can
+        // The set has told us it has no HID write path for this pad's address. Nothing this loop can
         // build will land, so stop writing rather than spend the bus on reports that all fail.
-        if bus.is_some() && ls2::REPLIES.device_unavailable() {
+        if bus.as_ref().is_some_and(ls2::Bus::device_unavailable) {
             tracing::info!("DualSense feedback: set has no HID write path for the pad; lane off");
             break;
         }
@@ -949,6 +1031,10 @@ mod tests {
         assert!(out[0].abs() < 1e-3 && out[1].abs() < 1e-3);
         assert!((out[last] - end).abs() < 1e-3);
         assert!((out[last + 1] + end).abs() < 1e-3);
+    }
+
+    fn address_in(devices: &str) -> Option<String> {
+        dualsense_blocks(devices).find_map(bluetooth_address)
     }
 
     /// A wired pad publishes the same `Uniq` as a paired one, so only `I: Bus=` tells them apart.
