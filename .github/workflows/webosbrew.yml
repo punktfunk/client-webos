@@ -1,4 +1,4 @@
-name: webOS Homebrew
+name: Homebrew
 
 on:
   workflow_call:
@@ -73,8 +73,6 @@ jobs:
       - name: Verify .ipk against firmware symbol data
         run: |
           set -uo pipefail
-          # webOS 4.x+ only.
-          # Markdown so the same text reads as a table in the job summary.
           webosbrew-ipk-verify dist/*.ipk --fw-releases '>=4' \
             --details --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
@@ -93,7 +91,7 @@ jobs:
             --link "https://github.com/${GITHUB_REPOSITORY}" \
             --root false \
             --output "dist/${APP_ID}.manifest.json"
-          # gen-manifest only knows the local file name; point ipkUrl at the release asset.
+          # Rewrite ipkUrl to point to the release asset.
           if [ -n "$TAG" ]; then
             URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$IPK")"
             jq --arg url "$URL" '.ipkUrl = $url' "dist/${APP_ID}.manifest.json" > "$RUNNER_TEMP/m.json"

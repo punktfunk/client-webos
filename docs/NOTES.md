@@ -6,45 +6,27 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 
 - Cross target `armv7-unknown-linux-gnueabi` (tier-2) + webosbrew toolchain. Linux-aarch64-only; CI native, dev Docker.
 - `.cargo/config.toml` wires linker to `scripts/cc-shim.sh` (passes `--sysroot` explicitly).
-- **Soft-float was single biggest perf fix** (~300ms → ~30ms per render). Non-`hf` target spec disables hardware FP codegen despite VFP3/NEON existing. Fix: `target-feature=+neon,+vfp3,-soft-float` + `target-cpu=cortex-a73` in `.cargo/config.toml`. Changes *codegen* only, not FFI ABI.
-- **glibc shims required** (`src/platform/webos/glibc_compat_shim.c`): webOS glibc ~2.12 predates `getauxval`/`gettid`/`sendmmsg`. Linked via `cargo:rustc-link-arg`, **must land AFTER libstd** (single-pass linker drops `link-lib=static` too early).
-- **SDL2 must be webosbrew fork** (release-2.30.12-webos.5, not generic SDL2). Only fork has Wayland shell-integration (`QT_WAYLAND_SHELL_INTEGRATION=webos`). On-device system copy is 2.0.10 (too old). Bundle own libSDL2 with `$ORIGIN/../lib` RPATH (set in `build.rs`).
+- **Soft-float was single biggest perf fix** (~300ms → ~30ms render). Non-`hf` target disables hardware FP codegen. Fix: `target-feature=+neon,+vfp3,-soft-float` + `target-cpu=cortex-a73` in `.cargo/config.toml`. Codegen only, not FFI ABI.
+- **glibc shims required** (`src/platform/webos/glibc_compat_shim.c`): webOS glibc ~2.12 lacks `getauxval`/`gettid`/`sendmmsg`. Must land AFTER libstd via `cargo:rustc-link-arg` (single-pass linker drops `link-lib=static` early).
+- **SDL2 must be webosbrew fork** (release-2.30.12-webos.5). Only fork has Wayland shell-integration; on-device system is 2.0.10. Bundle libSDL2 with `$ORIGIN/../lib` RPATH (set in `build.rs`).
 - **cmake/opus**: `punktfunk-core`'s `quic` feature needs CMAKE_POLICY_VERSION_MINIMUM=3.5 (modern CMake refuses vendored libopus's old minimum).
-- **Release builds are fat LTO, one codegen unit** (`Taskfile.yml`/`taskfiles/toolchain.yml`
-  `RELEASE_LTO`). `Cargo.toml`'s profile has said so all along, but the task default was `thin` with
-  16 units, which is what every `docker:build`, `docker:package`, `deploy` and CI package actually
-  shipped — so the cross-crate inlining the hot loops were written for (AEAD decrypt, FEC, QUIC
-  parsing, all in `punktfunk-core`'s dependencies) was never in the binary on the one target whose
-  CPU cannot absorb the difference. `RELEASE_LTO=thin` is still there for a faster local cycle.
-- **libstdc++ is linked statically, never bundled.** A bundled `lib/libstdc++.so.6` is found
-  through the binary's `DT_RPATH`, which outranks the jail's `LD_LIBRARY_PATH`, so every library
-  the process loads gets the SDK's copy — including the TV's own. webOS 11's
-  `libNDL_media_impl.so.1` wants `GLIBCXX_3.4.32`, which that copy lacks, and the app exits at the
-  splash with "Failed to load webOS libraries". Dropping the bundle outright breaks webOS 10 and
-  below (their 6.0.29 lacks `GLIBCXX_3.4.30`). Static is the only one artifact correct on every
-  firmware, and nothing C++ crosses the boundary — SDL, NDL and Luna are all C.
+- **Shipped builds use fat LTO, one codegen unit** (`Cargo.toml`'s `[profile.release]`). Cross-crate inlining (AEAD, FEC, QUIC parsing) required for armv7 hot loops. Docker tasks default thin LTO/16 units for speed; override with `RELEASE_LTO=fat|thin|false`.
+- **libstdc++ is linked statically, never bundled.** Bundled `lib/libstdc++.so.6` via `DT_RPATH` outranks `LD_LIBRARY_PATH`. webOS 11's `libNDL_media_impl.so.1` needs `GLIBCXX_3.4.32` (missing in SDK copy); webOS 10 needs 3.4.30. Static works on every firmware. No C++ crosses boundary — SDL, NDL, Luna are all C.
 
 ## UI preview (container)
 
-`task docker:deploy` runs the app in a container on a virtual 1080p display and serves it over
-VNC (`http://localhost:6080/vnc.html`), so UI work needs no TV. Same image, mounts and cache
-volumes as the cross-build tasks.
+`task docker:deploy` runs the app in a container on a virtual 1080p display, served over VNC (`http://localhost:6080/vnc.html`). UI work needs no TV.
 
-- **Build with the `preview` profile** (release codegen, no LTO). A `dev` build of Skia's callers
-  reads as input lag on top of llvmpipe and the VNC round trip. `PROFILE=dev` if rebuild time
-  matters more.
+- **Build uses `release` profile with Docker's thin LTO** (`scripts/preview.sh`). Host-native build shares `target/release` with cross builds; different profile causes rebuilds. `dev` profile reads as input lag on llvmpipe.
+- **A punktfunk host runs in the same container** (`scripts/host.sh`, backgrounded; prints console URL when up). Client reaches it at `127.0.0.1`. Packages are amd64 under qemu binfmt on arm64; all tasks use `rust:trixie` (glibc 2.41) for shared cargo/target volumes.
 - **No GPU and no mDNS.** llvmpipe means animation timing here is not the TV's, and Docker's "host"
   is the Linux VM, so `services::discovery` sees no LAN multicast — add hosts by hand. Unicast is
   unaffected, so a hand-entered host pairs and speed-tests for real.
-- **Launch params reach the app as the argv[1] JSON SAM sends on a TV**, so `WEBOS_SDK=4.0.0`
-  exercises the NDL v1 path here too. Telemetry lands in the terminal at `TELEMETRY_LEVEL`.
+- **Launch params reach app as argv[1] JSON**, just like SAM on TV. Set `WEBOS_SDK=4.0.0` to test NDL v1 path. Telemetry at `TELEMETRY_LEVEL`.
 
 ## UI rendering
 
-Immediate mode on Skia over the shell's GL context (`console::gl`), drawn with the console kit
-(`pf_console_ui`) — menus, in-stream overlays and the gamepad shell alike. Redraw on change and
-while anything animates; the stream loop keeps its own 33 ms / 500 ms cadence for the overlays and
-clears transparent so NDL's plane shows through.
+Immediate mode on Skia over shell GL context (`console::gl`), drawn with console kit (`pf_console_ui`). Redraw on change/animate; stream loop: 33ms/500ms cadence for overlays, transparent clear for NDL plane.
 
 - **Covers are Skia images built from the art loader's RGBA buffers** (`app::draw::home`), one copy
   when the art lands; Skia uploads on first draw and keeps the texture. The window that requests
@@ -84,26 +66,15 @@ clears transparent so NDL's plane shows through.
   scale and boxes grow while the type inside them doesn't. **The gamepad shell opts out**: the kit's
   design box is `height / 800` and its screens are laid out to fill it, so a correction shortens the
   box and the screens run off the bottom instead of reflowing.
-- ⚠ **The `ui_scale` launch param is deliberately untyped.** It is a launch param rather than a
-  settings row so an unowned panel can be tuned on glass — and a field that rejects the string
-  `ares-launch` sends fails the whole struct, silently costing every other param.
-- ⚠ **The swap interval is vsync in menus and immediate over a stream** (`ConsoleGl::set_swap_interval`,
-  chosen by `console_flow::bring_up`'s `vsync` argument). `gl_swap_window` blocks on the panel, and
-  the menu loop wants that — it is its only sleep. The stream loop must not have it: **the same
-  thread forwards input**, so with vsync on, every toast, dial, stats card and dialog put up to a
-  refresh between a button press and the wire — including the "Connection issues" toast, which by
-  construction appears when latency is already the complaint. It is pushed after every
-  `make_current` rather than once at construction, because the interval belongs to the window
-  SURFACE, which SDL's renderer context shares.
+- ⚠ **The `ui_scale` launch param is deliberately untyped.** Tuning unowned panels on glass requires it. Type rejection silently kills all other params; `ares-launch` sends strings.
+- ⚠ **Swap interval is vsync in menus, immediate over streams.** Menu loop needs blocking sleep; stream loop must not (same thread forwards input). Vsync adds ~16ms per UI action over stream. Pushed after `make_current` — interval is per SURFACE, shared by SDL renderer.
 
 ## Video decode (NDL DirectMedia)
 
 - `libNDL_directmedia.so.1` is the real device library; the NDK sysroot ships a link-time stub.
 - PTS = milliseconds since `NDL_DirectMediaLoad`, not wall-clock.
 - Audio is decoded client-side via Opus unless offload is on — see *NDL's audio plane*.
-- **`core::caps` has three readers that must agree**: `session::connect` (source of truth,
-  advertised on the wire), `ui::settings` (what's offerable) and `Settings::clamp_to_caps`. A
-  backend that changes the limits changes all three.
+- **`core::caps` has three readers that must agree**: `session::connect` (truth), `ui::settings` (offer), `Settings::clamp_to_caps`. Backend changes affect all three.
 - **Decouple decode dimensions from punch-through rect** — else a 1080p stream on a 4K panel
   punches only the top-left quarter.
 - **Loss recovery required** — no periodic IDRs in the stream. `session::pump::video_pump` calls
@@ -112,64 +83,25 @@ clears transparent so NDL's plane shows through.
 - **Freeze-until-reanchor adapted for NDL**: NDL does decode+present in one opaque call (no split),
   so the client reimplements the skip-until-reanchor subset. A forward gap arms `holding`; frames
   are withheld until one arrives with `FLAG_SOF` (IDR) or a recovery anchor.
-- ⚠ **Take the keyframe-request slot only while frames are still SKIPPED, never before asking
-  whether this frame lifts the hold.** The resume frame restarts decoding on its own. Asking first
-  returned `NeedKeyframe` for a frame that was in fact fed, and `submit` reads every non-`Presented`
-  result as "this AU cannot complete" — so on a slice-progressive session (every NDL v2 stream) it
-  dropped the remaining pieces of the very keyframe that resumed the picture and marked the next AU
-  lost: a second freeze immediately after recovery, waiting out the host's 750 ms IDR cooldown.
-- **Count a picture on `Presented`, not on arrival** — otherwise the overlay's fps ticks through a
-  freeze and a play the decoder refused counts as a frame.
-- **Name a hold only once it outlasts a blip** (`HOLD_TOAST_AFTER`, 300 ms, once per hold). An RFI
-  recovery lifts one inside a round trip and the startup capacity probe's own loss clears at the
-  burst's end, so a rising-edge toast fired at the start of every Wi-Fi session.
-- **Multi-slice is opt-in** (`webos.multi_slice`, Settings ▸ Display ▸ TV). Without
-  `VIDEO_CAP_MULTI_SLICE` the host pins `max_slices = 1` for every client on purpose ("single-slice
-  frames for TV-SoC decoders"), which also keeps `USER_FLAG_SLICE_STREAM` from ever engaging. With
-  it the host can emit a picture's slices as they are encoded, which compounds with the
-  slice-progressive delivery already on every v2 session. Off by default because the risk is a
-  wedged hardware decoder rather than a slow one; broadcast HEVC/H.264 is multi-slice, so the
-  caution is generic and not known to apply to LG. **Unmeasured — the toggle exists to measure it.**
+- ⚠ **Request keyframe only while SKIPPED, never before checking hold lift.** Resume frame restarts itself. Early check returned `NeedKeyframe` for already-fed AU, dropping pieces of resume keyframe on v2 (slice-progressive) — second freeze after recovery.
+- **Count on `Presented`, not arrival.** Otherwise fps overlay ticks through freezes and refused plays count as frames.
+- **Name hold only after 300ms** (`HOLD_TOAST_AFTER`, once per hold). RFI and startup probe loss clear inside round trip; rising-edge toast fires on every Wi-Fi session start.
+- **Multi-slice is opt-in** (`webos.multi_slice`, Settings ▸ Display ▸ TV). Without `VIDEO_CAP_MULTI_SLICE`, host pins `max_slices = 1`. With it, host emits slices as encoded (plus v2 slice-progressive). Risk: wedged decoder not slow one; broadcast is multi-slice. **Unmeasured — toggle exists to measure.**
 - HDR mastering metadata can change mid-session — drain `next_hdr_meta` every frame.
-- **`NDL_DirectVideoSetHDRInfo` forces the panel into HDR mode on *any* call** (OLED65CX, webOS 5):
-  it ignores an SDR `transfer`/`primaries` triplet and emits an HDR infoframe regardless, so an
-  SDR/H.264 stream showed in HDR picture mode. `ndl::v2::set_color_info` therefore no-ops when
-  `meta` is `None` (SDR) — only genuine HDR mastering metadata reaches NDL. Cost: NDL can no longer
-  fix a bitstream's missing VUI colour info. HDR is also gated to HEVC end-to-end
-  (`session::connect`: `apply_hdr = host_hdr && codec==H265`).
-- **Re-applying HDR info per packet drops the panel to 60 Hz.** Re-entering HDR mode on every host
-  HDR packet is what made 1440p120+ HDR stutter; apply once and on change only.
+- **`NDL_DirectVideoSetHDRInfo` forces panel to HDR on any call.** Ignores SDR; SDR/H.264 shows in HDR mode. No-op when `meta` is `None`; only real HDR metadata reaches NDL. Costs: no VUI fix, HDR gated to HEVC end-to-end.
+- **Re-entering HDR per packet drops panel to 60Hz.** Applying on every host HDR packet caused 1440p120+ stutter; apply once and on change only.
 
 ## DualSense feedback: hidraw when wired, the Bluetooth service otherwise
 
-**A wired pad gets `/dev/hidraw0`**, `root:jailer` and read-write — the group the app runs in
-(verified from inside the app on a G5, webOS 10.3, non-rooted). The earlier "the jail exposes no
-hidraw at all" was probed with no pad plugged in, and `hid-playstation` only creates a node for a
-device that exists. There is no `/sys/class/hidraw` in the jail, so the node is identified by
-asking it (`HIDIOCGRAWINFO`), not by walking sysfs. A wired pad takes the 48-byte `0x02` report
-with **no CRC** and no throttle — one syscall per write — carrying the same 47-byte common block
-the Bluetooth `0x31` does, which is why every effect works on both. A Bluetooth pad also has a
-hidraw node, but its reports need the `0x31` framing and CRC, so `hidraw.rs` claims `BUS_USB` only
-and Bluetooth stays on the Luna route.
+**Wired pad gets `/dev/hidraw0`**, `root:jailer` read-write (verified non-rooted G5, webOS 10.3). No `/sys/class/hidraw` in jail; identify by `HIDIOCGRAWINFO`. Wired pad: 48-byte `0x02`, no CRC, one syscall/write; same 47-byte block as Bluetooth `0x31`, so all effects work. Bluetooth: needs `0x31` framing+CRC, so `hidraw.rs` claims `BUS_USB` only.
 
 Adaptive triggers work on a **non-rooted** TV, but not through SDL. Verified end-to-end on G5
 (dev-mode install, `DualSense` over Bluetooth): trigger resistance, section walls and lightbar
 colour all confirmed on real hardware.
 
-- **The Bluetooth route is** `luna://com.webos.service.bluetooth2/hid/internal/sendData`, which
-  writes an arbitrary HID output report to the pad. Permitted because `compat.api.json` places it
-  in the **`public`** API group, and `/usr/share/luna-service2/devmode_certificate.json` grants a
-  dev-mode app `["ares.webos.cli", "public"]`. The restricted `devices`/`bluetooth.manage` groups
-  are not needed.
-- **Payload traps** (each cost hours): `reportData` must be an int array **with no `reportId` key**
-  — one extra property fails the whole call with a generic "does not match the expected schema"
-  naming nothing. `setReport` never works (always error 4); only `sendData` does. `getReport`
-  *hangs* on a pad that doesn't answer, so callers need a deadline.
-- **The report must be CRC-signed** exactly as the kernel's `hid-playstation`: 78 bytes (`0x31`,
-  seq<<4, `0x10` tag, 47-byte common block, 24 reserved, CRC32-LE), CRC over the `0xA2` seed byte
-  plus the report body. **A wrong CRC is silently ignored by the pad while the service still
-  answers `returnValue: true`** — the most misleading failure mode here. Don't prepend `0xA2` to
-  `reportData`; the stack adds the HIDP header itself.
+- **Bluetooth route:** `luna://com.webos.service.bluetooth2/hid/internal/sendData`. In `compat.api.json`'s `public` group; dev-mode app gets `["ares.webos.cli", "public"]`. Restricted `devices`/`bluetooth.manage` not needed.
+- **Payload traps:** `reportData` must be int array, no `reportId` key. Extra property fails silently ("schema mismatch"). `setReport` fails (error 4); only `sendData` works. `getReport` hangs; needs deadline.
+- **Report must be CRC-signed** per `hid-playstation`: 78 bytes (`0x31`, seq<<4, `0x10`, 47-byte block, 24 reserved, CRC32-LE over `0xA2` seed+body). Wrong CRC silently ignored; service returns `true` anyway. Don't prepend `0xA2`; stack adds HIDP header.
 - LG backported `hid-playstation` to kernel 5.4, so the pad binds as three input devices
   (pad/motion/touchpad) sharing one `U: Uniq=` MAC — where `dualsense::find_address` reads it.
 - **Rumble does not use either path**: the pad's event node advertises `EV_FF` and is
@@ -183,75 +115,28 @@ colour all confirmed on real hardware.
   spawner produced a **black panel with the frame counter climbing, `dropped=0`, `backlog=0`**:
   decode kept running while the compositor never presented. `dualsense.rs` drops identical states
   and spaces the rest by `MIN_SEND_INTERVAL` (250 ms) on that route.
-- **In-process LS2 works, from the app's binary path only** (`platform::webos::ls2`, verified on
-  G5): `LSRegister(<app id>)` succeeds when the calling executable is
-  `…/applications/<appid>/bin/punktfunk-webos` and `bluetooth2` methods reply in 1–3 ms; the
-  identical binary anywhere else gets `Invalid permissions` — the hub keys permissions on the exe
-  path. `LSRegisterApplicationService` is refused even there. `libluna-service2.so.3` +
-  `libglib-2.0.so.0` are dlopened, so a refusal degrades to the spawn route (16 ms vs 250 ms).
-- **Seeing Luna replies from the dev-mode ssh jail is impossible**: no `/dev/ptmx` (so
-  `script`/`ssh -tt` fail) and `luna-send-pub` writes nothing without a tty, even to a file. Probe
-  from inside the app, or with a small LS2 binary *copied over the app's own binary* (`rm` + `cp` —
-  the installed file is root-owned 755 but its dir is group-writable). That trick also installs a
-  package when `ares-install` fails on `rm -rf /media/developer/temp` (root-owned): call
-  `com.webos.appInstallService/dev/install` with
-  `{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/x.ipk","subscribe":true}` from the
-  app identity.
+- **In-process LS2 works from app binary path only** (`platform::webos::ls2`). `LSRegister(<app id>)` succeeds at `…/applications/<appid>/bin/punktfunk-webos`, replies in 1-3ms; elsewhere: `Invalid permissions`. Hub keys on exe path. `LSRegisterApplicationService` refused everywhere. Both libs dlopened; refusal degrades to spawn (16ms vs 250ms).
+- **Luna replies unreachable from ssh jail:** no `/dev/ptmx` (no `script`/`ssh -tt`); `luna-send-pub` needs tty. Probe from inside app or via LS2 binary copied over app binary (`rm` + `cp` — dir is group-writable). Same trick installs packages when `ares-install` fails: call `com.webos.appInstallService/dev/install` with `{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/x.ipk","subscribe":true}`.
 
-Host side: a game only emits trigger effects when it sees a `DualSense`, so the pad kind in the
-handshake decides whether this feature does anything. Settings' **Controller** row
-(`store::GamepadType`) defaults to `Automatic`, which **mirrors the attached pad**
-(`gamepad::detect_type`) rather than sending wire `GamepadPref::Auto` — that wire value means "host
-decides", and the host decides Xbox 360, which is why a `DualSense` first showed as an Xbox pad
-with no effects. Resolution happens per session (`runtime::resolve_gamepad_type`) and deliberately
-doesn't write back, so the stored preference keeps meaning "match my pad". Host env
-`PUNKTFUNK_TEST_FEEDBACK` makes the host send a scripted lightbar/LED/trigger burst — use it to
-test without a game.
+Host side: games emit triggers only for `DualSense`, so handshake pad kind decides. **Controller** row defaults `Automatic` — mirrors attached pad (`gamepad::detect_type`), not wire `GamepadPref::Auto` (host picks Xbox 360). Per-session resolution; doesn't write back (preference stays "match pad"). Test: `PUNKTFUNK_TEST_FEEDBACK` sends scripted effects without game.
 
 ## DualSense audio over Bluetooth: sniff mode is the whole problem
 
-The pad's speaker and coils take Opus / s8-PCM over the same HID output plane (reports
-`0x32`/`0x36`/`0x39`, see `dualsense.rs`). Every layout sounded choppy until
-`device/internal/stopSniff` was called for the pad: **the TV keeps the HID link in sniff mode**, so
-output reports leave in bursts at the anchor points and the pad's audio buffer starves in between —
-it then replays stale buffer content, which is what "frames out of order" sounded like.
-`stopSniff`/`startSniff` sit in the `public` group. The coil lane alone masked this: a buzz with
-periodic holes still feels like a buzz.
+Pad speaker/coils take Opus/s8-PCM over HID output (reports `0x32`/`0x36`/`0x39`). Sounded choppy until `device/internal/stopSniff` called: TV keeps link in sniff, output leaves in bursts, audio starves. `stopSniff`/`startSniff` in `public` group. Coil masked it.
 
-**Sniff batches input too, for every Bluetooth pad.** In sniff the pad's input reports reach the
-kernel in bursts at the ~77.5 ms anchor (measured on the G5: ~10 bursts a second, gaps of 77.5 ms
-and multiples), so every press waits for the next burst and a tap shorter than one burst arrives as
-press and release together, which the pad-state snapshot folds away. `platform::webos::pad_link`
-holds every Bluetooth joystick out of sniff for the whole stream and hands the links back to the
-TV's policy at the end.
+**Sniff batches input too.** Pad input reaches kernel in ~77.5ms bursts (G5: ~10/s), presses wait for burst, taps shorter than burst arrive together. `platform::webos::pad_link` holds Bluetooth joysticks out of sniff for stream, returns to TV policy at end.
 
-**The two take different payloads.** `stopSniff` wants the address alone; `startSniff` wants HCI
-Sniff Mode's parameters and refuses anything else with `errorCode 144`, a schema error that names
-nothing. The working shape:
+**Different payloads:** `stopSniff` wants address; `startSniff` wants HCI parameters, refuses others with `errorCode 144` (schema error). Working shape:
 
 ```json
 {"address":"…","minInterval":96,"maxInterval":124,"attempt":4,"timeout":1}
 ```
 
-Intervals are 0.625 ms slots and bound how long the pad waits to transmit, so they track the ~77 ms
-anchor the TV's own policy used — the pad drives this app's UI between sessions, and a slower
-power-saving interval would show up as input lag there. Report a refusal from the loop that CAUSED
-it: replies are asynchronous and `REPLIES` is process-wide, so an undispatched one surfaces ~11 ms
-into the next session and reads as its fault.
+Intervals are 0.625ms slots bounding transmit waits (~77ms anchor). Slower interval shows lag in UI. Report refusal from causing loop: replies async, process-wide, undispatched ones surface ~11ms into next session.
 
-Those two are the **only** sniff-related methods in the whole `bluetooth2` API — there is no
-link-policy or QoS call, so nothing persistent can be set and a re-assert is the only lever. One
-`stopSniff` does not hold: the stack slides back into sniff within seconds even while the pad streams
-motion reports. The keeper re-asserts every 250 ms and at once when the pad reader sees a gap over
-50 ms (a motion node reports every ~2.5 ms); a call replies in 1–3 ms. Measured with the keeper:
-~400 reports a second instead of ~10 bursts.
+Only sniff methods in `bluetooth2` API; no link-policy/QoS call (nothing persistent). One `stopSniff` doesn't hold; stack re-enters sniff within seconds. Keeper re-asserts every 250ms, immediately on >50ms gaps (motion ~2.5ms). Replies in 1-3ms. Measured: ~400 reports/s vs ~10 bursts.
 
-**Feed the pad at its own clock, never faster.** One report per 10.667 ms, and the tick must land
-on the next interval in the *future* — advancing by one interval lets a tick whose work overran
-fire again at once, and each catch-up report is one the pad has no room for. Measured 110 reports/s
-against the pad's 93.75 with speech breaking up audibly. Two reports per tick belong to the
-pre-fill alone: keyed on ring depth they never stop, since depth after the pre-fill is clock drift,
-not backlog.
+**Feed pad at its clock, never faster.** One report per 10.667ms, tick lands on next future interval. Overrun tick fires again immediately (catch-up undeliverable). Measured 110 reports/s vs pad's 93.75 broke speech. Pre-fill uses 2 reports/tick; stop when ring depth=target (after pre-fill, depth is clock drift).
 
 ## Pad audio (`0xD1`): both lanes on a Bluetooth pad
 
@@ -267,286 +152,106 @@ run. A game's own rumble still works when no coil frames are arriving. The chain
 to end and `SPEAKER_VOLUME` already sits at `0x64`, the top of the range the pad honours, so
 "quiet" is the title's mix, not headroom we are leaving.
 
-⚠ `Envelope::active()` only asks whether coil frames ARRIVE, not whether they carry anything, and
-it is what suppresses the wire rumble plane. A title streaming near-silence would mute a pad's
-motors for its whole run and give nothing back.
+⚠ `Envelope::active()` checks frame ARRIVAL only, not content. Suppresses wire rumble. Title streaming silence mutes motors, gives nothing back.
 
-The speaker lane is declared too, but **only for a Bluetooth pad** (`find_address`): the `0x36`
-report over the Luna bus is its one transport, and a USB pad has no `Uniq` to find. Verified on a
-G5: speech through the pad speaker is continuous, a sustained pure tone is rougher (every Opus
-frame seam speech would mask).
+Speaker lane declared for Bluetooth pad only (`find_address`): `0x36` report, Luna-only transport. USB pad has no `Uniq`. Verified G5: speech continuous, sustained tone rougher (Opus seams mask speech).
 
-Jail facts for the USB route: **no `/dev/bus/usb`** anywhere, so usbfs/libusb is out; **`/dev/snd`
-is mounted rw** and the app's uid is in `audio`, and PulseAudio (`/var/run/pulse/native`) answers
-`pactl`. Whether a wired pad's 4-channel USB-audio card appears there is untested.
+USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** with app uid in `audio`. PulseAudio answers `pactl`. Wired pad's USB-audio card untested.
 
 ## Known platform limitations (don't retry)
 
-- **Frame rate paces the stream; the panel refresh rate cannot be set.**
-  `webosbrew/SDL-webOS` exposes read-only `SDL_webOSGetRefreshRate` only; there is no set-side
-  webOS API. Nothing resolves the symbol now.
-- **Magic Remote Back requires `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** set before window creation.
-  Arrives as `keycode = 2097155`. Same for Home (`..._KEYS_HOME`) and Guide (`..._KEYS_GUIDE`). The
-  launcher ribbon overlay needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false` or it pops over the app.
-- **Access-policy hints are latched at window creation and are all-or-nothing** — they cannot be
-  scoped to the stream only.
-- **A held Back arrives as the EXIT key, not a long Back — don't time the hold yourself.** webOS
-  does its own long-press detection: a short tap is delivered as the Back key (keycode 2097155, no
-  scancode), but *holding* Back fires webOS's EXIT gesture as a discrete
-  `SDL_SCANCODE_WEBOS_EXIT = 505` press, and the held Back key never reaches the app at all. So poll
-  `WEBOS_EXIT_SCANCODE` (edge-detected like the colour buttons — 505 is outside rust-sdl2's
-  `Scancode` enum) and open the disconnect/quit dialog on its rising edge. A short tap stays plain:
-  forwarded to the host as Esc (stream) or back-nav (menu). Needs `KEYS_EXIT` as well as
-  `KEYS_BACK`, or the gesture SIGTERMs the app instead of delivering 505.
-- **Gamepad disconnect shortcuts must be holds, not presses** (`runtime::input::DisconnectChord`,
-  2 s). Guide, both shoulders, or Start+Back opens the in-stream disconnect dialog — and every one
-  of those buttons is also forwarded as real game input, which is the whole constraint (L1+R1 is a
-  common in-game binding). Chord state is tracked from transitions (SDL reports no held state
-  here), **cleared when it fires or the pad unplugs** — an open dialog swallows controller events
-  and an unplugged pad sends no releases, so without that the buttons stay logically down and the
-  dialog reopens the moment it's dismissed.
-- **A hidden window gets no pointer input.** Keep it mapped and fully transparent `RGBA(0,0,0,0)`
-  each frame so the NDL plane shows through (not `.hide()`).
-- **Two independent cursors** — webOS draws its own pointer, the host draws a second one over the
-  network. Three levers, in the order they matter: `EVIOCGRAB` on the mouse's evdev node (starves
-  the compositor of reports — the load-bearing one), `SDL_webOSCursorVisibility` →
-  `wl_webos_input_manager.set_cursor_visibility`, and `show_cursor` for SDL's own cursor object.
-  - **The compositor's repaint is lazy, in both directions.** `libWebOSCoreCompositor` branches on
-    visibility: visible synthesizes a mouse event, invisible only *marks* the pointer and lets the
-    next pointer event do the drawing. Under the grab no such event arrives, so an arrow already on
-    screen survives the hide until something on an ungrabbed node flushes it; showing is equally
-    stuck. `Cursor::flush` supplies the event with a warp — to screen centre while captured, to the
-    pointer's own position otherwise. This is why `set_cursor_visibility` read as "does nothing" for
-    four attempts; it works, and the timer-based re-assert workarounds built on that misreading are
-    gone.
-  - **`WEBOS_CURSOR_TIMEOUT=0`** in surface-manager's environment, so the compositor's own
-    inactivity auto-hide never fires. Nothing retracts the arrow on its own.
-  - **Don't guard on `is_cursor_showing()`.** `SDL_ShowCursor` reaches the Wayland backend only
-    when its cached `cursor_shown` flips, so a repeat hide is a silent no-op and the query reports
-    "hidden" while the TV visibly draws an arrow.
-  - Motion is **not** scaled. A client-side damping factor only masked the jitter the evdev path
-    below actually fixes.
-- **Absolute pointer input is bounded by the panel; captured streams need relative.** webOS's
-  pointer can't leave the screen, so `MouseMoveAbs` saturates at the edge. "Cursor capture"
-  therefore also switches SDL to relative mode and sends `InputKind::MouseMove` deltas. webOS
-  advertises no `zwp_pointer_constraints_v1`, so the SDL fork emulates relative mode by warping its
-  own pointer to screen centre each motion (`wl_starfish_pointer_set_cursor_position`) — which is
-  what makes the deltas unbounded. `SDL_SetRelativeMouseMode` therefore always returns 0 here.
-- **A real HID mouse must bypass SDL — `/dev/input/event*` is readable from the jail.** Unlike
-  hidraw, the evdev nodes are `root:compositor 0660` and the app's uid carries gid 505
-  (`compositor`) — the same access the pad's `EV_FF` rumble node relies on. Motion arriving via SDL
-  comes from the compositor's pointer, smoothed and resampled for a wrist-waved remote, and jitters
-  in games no matter what the client does with the deltas; `platform::webos::evdev` reads the mouse
-  directly instead. Constraints, each learned the hard way:
-  - **Keyboards are grabbed in both cursor modes, mice only under Capture.** An ungrabbed USB
-    keyboard still reaches surface-manager, which reads modifier+click as a system gesture and
-    warps its pointer to screen centre — with Capture off the TV cursor and the host's then
-    alternate between centre and the real mouse position on every Ctrl/Alt/Shift+click. Grabbing
-    keyboards fixes it without costing the TV pointer, which desktop mode needs to aim.
-  - **A grab is per node, never per event type**, so a combo keyboard+mouse node has its pointer
-    forwarded too or the mouse goes dead.
-  - **Keyboard nodes are `KEY_A`/`KEY_LEFTCTRL` minus a name denylist** (`LGE *`, `CHECK INPUT`, …):
-    LG's virtual remotes advertise a full QWERTY keymap, and grabbing one leaves the TV unnavigable.
-  - **SDL echo suppression differs by mode.** Capture on + HID mouse drops **all** SDL pointer
-    events; Capture off drops only motion, and only within the keyboard's recency window, since its
-    clicks are the real ones.
-  - **webOS 23+ types every pad press as a remote key too** (arrows, OK, Back), and a Wayland key
-    names no device, so SDL cannot tell the echo from the Magic Remote. Measured on a G5 (10.3.1):
-    the pad's presses appear only on its own node, the remote's only on `LGE M-RCU - Builtin [0]`
-    (Back = `KEY_PREVIOUS`), so the stream reads that node ungrabbed and admits a key only when the
-    remote pressed it within 250 ms (`RemoteGate`). Until such a node is opened every key passes.
-    Re-arming SDL's `cloudgame_active` on focus changes did nothing in four A/B runs.
-  - **SDL relative mode must be off** — the fork warps its pointer per motion event, a thousand
-    pointless compositor round-trips a second.
-  - **Device filter is `EV_REL` with `REL_X`/`REL_Y` and *not* an absolute pointer** — test `ABS_X`/
-    `ABS_Y` specifically, since real mice advertise stray absolute axes (a Logitech receiver reports
-    `ABS_VOLUME` for its media keys).
-  - **`EVIOCGRAB` is scoped to `HidInput::set_active`, not held for the reader's life.** The kernel
-    releases the grab the moment our fd closes (including on panic), so a wedged reader costs "no
-    HID input", never a TV-wide dead mouse. The same flag gates whether the reader calls its `sink`,
-    so "grabbed" and "forwarded to the host" can't drift apart.
-  - **Hot-plug rescans are gated on `/dev/input`'s mtime.** Opening a node costs ~40 ms on this TV
-    and ~20 nodes are empty (`ENXIO`), so an unconditional rescan stalls the reader for most of a
-    second.
-- **Colour buttons: Green/Yellow/Blue need raw scancode polling, Red does not.**
-  `SDL_SCANCODE_WEBOS_{RED..BLUE}=486..489` exist in the fork, but only 487..489 ever appear in the
-  keyboard-state array. Red instead arrives like Back does: a plain `KeyDown` carrying **keycode
-  2097169** and `scancode: None`. So poll the other three and match Red as a keycode. There is no
-  `ACCESS_POLICY_KEYS_*` hint for colour keys.
-- **The keyboard Win key is Home-class**: it is gated with the remote's Home under `KEYS_HOME`.
-  Capture both, and relaunch the launcher via luna on the remote-Home keycode so Win reaches the
-  host.
-- **Thread priority boosting was built and removed — don't re-add it.** Renicing hot threads needs
-  `CAP_SYS_NICE` or a large enough `RLIMIT_NICE`, and a Dev-Mode SAM jail grants neither (raising
-  the soft limit to the hard limit needs no privilege, but the hard limit is already too low). The
-  poller that hunted NDL's vendor GStreamer pad threads also cost a 100 ms-interval thread for up
-  to 5 s during connect — the busiest window on a 3-core SoC. All threads run at the same priority.
-- **Don't toggle window show/hide while NDL composites.** It silently kills the process
-  (uncatchable Wayland crash). Test visibility changes in isolation.
+- **Panel refresh rate cannot be set.** `webosbrew/SDL-webOS` read-only `SDL_webOSGetRefreshRate` only; no webOS set API exists.
+- **Magic Remote Back needs `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** before window creation (keycode 2097155). Same for Home/Guide. Launcher ribbon needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false`.
+- **Access-policy hints are all-or-nothing,** latched at window creation; cannot scope to stream only.
+- **Held Back is EXIT key (keycode 2097155 short tap, scancode 505 held).** Don't time; webOS detects long-press. Poll `WEBOS_EXIT_SCANCODE` (edge-detected), open dialog on rising edge. Short stays Esc/back-nav. Needs both `KEYS_EXIT` and `KEYS_BACK`, or gesture SIGTERMs app.
+- **Gamepad shortcuts are 2s holds** (`runtime::input::DisconnectChord`). Guide/shoulders/Start+Back open disconnect — also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
+- **Hidden window gets no pointer input.** Keep mapped, fully transparent `RGBA(0,0,0,0)` so NDL shows through (not `.hide()`).
+- **Two independent cursors** — webOS + host over network. Three levers (order matters): `EVIOCGRAB` on evdev (starves compositor), `SDL_webOSCursorVisibility`, `show_cursor`.
+  - **Compositor repaints lazy both ways.** Visibility branches: visible synthesizes event, invisible marks only. Under grab no event arrives; arrow stuck on screen. `Cursor::flush` warps (center when captured, else position). Timer-based workarounds gone.
+  - **`WEBOS_CURSOR_TIMEOUT=0`** disables compositor auto-hide.
+  - **Don't guard `is_cursor_showing()`.** `SDL_ShowCursor` cached; repeat hide is no-op, query wrong while arrow displays.
+  - Motion unscaled; damping only masked evdev jitter.
+- **Absolute pointer bounded by panel; capture needs relative.** webOS pointer can't leave screen. Capture switches SDL to relative, warps to centre each motion (`wl_starfish_pointer_set_cursor_position`). `SDL_SetRelativeMouseMode` always returns 0.
+- **Real HID mouse bypasses SDL** via `/dev/input/event*` (readable in jail). SDL motion from compositor (smoothed/resampled for remote), jitters in games. `platform::webos::evdev` reads direct. Constraints learned hard way:
+  - **Keyboards grabbed both modes, mice only under Capture.** Ungrabbed reaches surface-manager, modifier+click warps to centre. Grabbing fixes it. TV pointer needed for desktop mode.
+  - **Grab per node, not event type.** Combo nodes forward pointer too.
+  - **Keyboard nodes `KEY_A`/`KEY_LEFTCTRL` minus denylist** (`LGE *`, etc.). Virtual remotes unnavigable if grabbed.
+  - **SDL echo suppression differs:** Capture+HID drops all SDL pointer; Capture off drops motion in keyboard's window (clicks real).
+  - **webOS 23+ pads type as remote keys** (arrows/OK/Back); no device name in Wayland key. Pad presses on own node, remote on `LGE M-RCU - Builtin [0]`. Stream reads ungrabbed, admits key within 250ms (`RemoteGate`).
+  - **SDL relative mode off** — fork warps per motion, thousand compositor round-trips/s.
+  - **Device filter `EV_REL` with `REL_X`/`REL_Y`**, not absolute. Test `ABS_X`/`ABS_Y` specifically (mice report stray axes).
+  - **`EVIOCGRAB` scoped to `set_active`**, not reader lifetime. Kernel releases on fd close (panic safe). Flag gates `sink` call; grabbed/forwarded can't drift.
+  - **Hot-plug rescans gated on `/dev/input` mtime.** Opening ~40ms, ~20 empty nodes; unconditional rescan stalls reader ~1s.
+- **Colour buttons: Green/Yellow/Blue poll scancode, Red is keycode.** Scancodes 487-489 appear in state array; Red arrives as `KeyDown` with keycode 2097169, no scancode. No access policy hint for colours.
+- **Keyboard Win is Home-class:** gated with remote Home under `KEYS_HOME`. Capture both, relaunch launcher via luna on remote-Home keycode to reach host.
+- **Thread priority boosting removed — don't re-add.** Renicing needs `CAP_SYS_NICE` or `RLIMIT_NICE`; SAM jail grants neither. Poller cost 100ms-interval thread 5s during connect (busiest on 3-core). All threads same priority.
+- **Don't toggle window show/hide while NDL composites.** Silently kills process (Wayland crash). Test visibility in isolation.
 
 ## Runtime gotchas (LG CX/G5)
 
-- Apps install to `/media/developer/apps/usr/palm/applications/<appid>/` = `$HOME` (writable dir
-  for logs, `settings.json`, the art cache and the client identity PEMs).
-- `luna-send` over raw ssh **needs `ssh -tt`** (a real PTY) or output is silently swallowed — the
-  task targets go through `ares-install`/`ares-launch`, which don't have this problem.
-- **Black screen despite decode**: launch through the real app lifecycle
-  (`luna-send .../launch`, SAM jailed uid). NDL punch-through only composites for a SAM-managed
-  foreground app.
-- No env vars in a SAM launch, but `params` in `applicationManager/launch` reaches a native app as
-  argv[1] JSON (parsed by `logger::launch`).
-- SDL2/Wayland may report `refresh_rate=0` — clamp to a sensible default.
-- **Game mode / ALLM is rooted-only**: the public bus denies `settingsservice`, so the picture and
-  sound mode change routes through hbchannel root exec and the Settings row is shown only on a
-  rooted TV.
+- Apps install to `/media/developer/apps/usr/palm/applications/<appid>/` = `$HOME`.
+- `luna-send` over raw ssh needs `ssh -tt` (real PTY) or output swallowed; `ares-install`/`ares-launch` work.
+- **Black screen despite decode:** launch via real lifecycle (`luna-send .../launch`, SAM jailed uid). NDL punch-through composites for SAM foreground app only.
+- No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
+- SDL2/Wayland may report `refresh_rate=0`; clamp to default.
+- **Game mode/ALLM rooted-only:** public bus denies `settingsservice`; routes via hbchannel root exec. Settings row shown on rooted TV only.
 
 ## ChaCha20 over AES-GCM
 
-CX/G5 are 32-bit userland on ARMv8-A. RustCrypto's `aes` crate has ARMv8 intrinsics for `aarch64`
-only; 32-bit ARM falls back to software regardless. ChaCha20 (add/rotate/xor, no crypto
-instructions) stays fast. Advertise `VIDEO_CAP_CHACHA20` unconditionally in `session::connect` —
-it's the only cipher this client speaks.
+32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`; 32-bit ARM falls back. ChaCha20 (add/rotate/xor, no intrinsics) stays fast. Advertise `VIDEO_CAP_CHACHA20` unconditionally — only cipher here.
 
 ## Large library handling
 
-- **The cover window is O(visible)**: `app::render::prepare_grid` requests art only for rows within
-  `CARD_PREFETCH_ROWS` of the viewport and evicts outside a deliberately larger `CARD_KEEP_ROWS`
-  (hysteresis stops oscillation), and only when that window moves.
-- **Cover art**: `ArtLoader` request/response (the UI asks for visible covers, forgets scrolled
-  ones). Cached on disk as *encoded* bytes (`$HOME/art-cache/`, write-then-rename). Failed decodes
-  are deleted.
-- Effect at 365 titles: decoded covers drop from 365 to the viewport window (~5 columns).
+- **Cover window is O(visible):** requests art within `CARD_PREFETCH_ROWS` of viewport, evicts outside `CARD_KEEP_ROWS` (hysteresis). Only on window move.
+- **Cover art:** `ArtLoader` request/response (UI asks visible, forgets scrolled). Cached as encoded bytes (`$HOME/art-cache/`, write-then-rename). Failed decodes deleted.
+- 365 titles: decoded drops from 365 to viewport (~5 cols).
 
 ## Audio: two routes, one pipeline (SDL is the default)
 
-`Settings` → **Audio** → **Audio processing** picks the route (`core::model::AudioRoutePref`), and
-both are built on the same pipeline: `session::audio::AudioStage` decodes (or forwards) into
-whatever `core::media::AudioSink` the route selected, and one pump drives it. Adding a third route
-is one `AudioSink` impl.
+**Audio processing** picks route (`core::model::AudioRoutePref`). Both built on `session::audio::AudioStage` pipeline: decodes/forwards to selected `core::media::AudioSink`. One pump drives both. Third route = one `AudioSink` impl.
 
 | Route | Label | Path | Layouts |
 | --- | --- | --- | --- |
 | `Software` (default) | Software (SDL) | libopus here → SDL device, NDL's clock plane on its metronome | up to 7.1 |
 | `NdlOpus` | Offload (NDL) | Opus decoded by the TV; 5.1 re-encoded into NDL's layout first | 2, 5.1 |
 
-**Why software is the default.** NDL paces the picture against a *fed* audio plane, so a plane fed
-from the network inherits the stream's arrival jitter — which is the stutter the silent clock plane
-was introduced to cure. The offload route is shorter and stays selectable for exactly that
-comparison; the overlay names which one ran (`Opus SW` / `Opus HW`).
+**Why software default:** NDL paces picture against fed audio plane; network-fed plane inherits arrival jitter (the stutter silent clock plane cured). Offload shorter, selectable for comparison; overlay names which ran (`Opus SW`/`HW`).
 
-**Offload is also the surround route.** NDL decodes stereo Opus and exactly one 5.1 layout: the
-standard coupling, `(FL,FR)+(RL,RR)` with FC and LFE mono (`AudioLayout::Standard`,
-`ndl::OPUS_51_LAYOUT`). Every session asks the host for it (`Hello::audio_layout`); a host that
-knows it encodes it, and the plane is fed the wire untouched. An older host answers legacy —
-`(FC,LFE)` coupled — and `session::audio` decodes and re-encodes into NDL's layout, one 5 ms packet
-per frame. Some sets accept the load and then play nothing, which no runtime probe detects, so it
-stays a choice rather than the default.
+**Offload is the surround route.** NDL decodes stereo Opus + one 5.1 layout: standard coupling `(FL,FR)+(RL,RR)` mono FC/LFE (`AudioLayout::Standard`, `ndl::OPUS_51_LAYOUT`). Every session asks host; known hosts encode untouched. Legacy hosts answer `(FC,LFE)` coupled; client re-encodes into NDL layout. Some sets load+play nothing (no probe); stays choice not default.
 
-**Surround reaches a receiver only through the Opus plane.** Measured on a G5 into a Denon
-AVC-X3800H over HDMI, with NDL reporting multi-channel PCM `Supported`: the SDL route plays into
-PulseAudio's one hardware sink, `pcm_output`, which is s16le 2ch; and a plane loaded as 6-channel
-PCM confirms and plays, but the AVR reports PCM 2.0. aurora-tv dropped its NDL PCM 5.1 path too.
-Read the AVR, not the ears: a Denon answers `OPINFINS ?` on telnet port 23 with one digit per input
-channel (`2` = present).
+**Surround through Opus plane only.** G5→Denon AVC-X3800H: SDL route plays s16le 2ch via PulseAudio `pcm_output`; PCM plane 6ch confirms+plays but AVR reports 2.0. aurora-tv dropped NDL PCM 5.1. Read AVR, not ears: Denon `OPINFINS ?` on telnet:23 digits per channel.
 
-**The offload route exists only under NDL v2.** v1 (webOS 4 and below) has no audio type at all, so
-`caps::VideoCaps::audio_plane` is false there and `AudioRoutePref::available` collapses to
-`Software` — the row locks, and `Settings::clamp_to_caps` rewrites a document carried over from a v2
-set. The Audio row's layouts follow the *selected* route, so picking Offload offers stereo and 5.1,
-not 7.1.
+**Offload only under NDL v2.** v1 (webOS 4-) has no audio type; `audio_plane` false, route collapses to Software (row locked). Audio row layouts follow selected route; Offload offers stereo+5.1, not 7.1.
 
-**Nothing is ever mixed down, and the layout row is a preference.** `Settings::audio_channels` says
-"5.1 where it can play"; `Negotiated::clamp` is the one place it becomes a width on the wire,
-narrowed by what the selected route carries (`AudioRoutePref::max_channels`). So a layout the route
-can't carry is never encoded, sent or decoded, this client never folds, and the preference survives
-a route change instead of being rewritten out of the document (`menu::audio_row_channels` shows the
-preference held down to the route). A width mismatch at `AudioStage::new` is an error, not a
-downmix.
+**No mixdown; layout row is preference.** `Settings::audio_channels` = "5.1 where possible"; `Negotiated::clamp` narrows by route (`AudioRoutePref::max_channels`). Route can't-carry layouts never encoded/sent/decoded; preference survives route change. Mismatch at `AudioStage::new` is error, not downmix.
 
-- **Sound Out narrows nothing.** `NDL_DirectAudioSupportMultiChannel` says whether multi-channel PCM
-  leaves the set *right now*. It reads "will play" only with Sound Out on Pass Through, and it
-  describes NDL's own PCM path, not the SDL device the software route plays through — so gating the
-  handshake on it turns a 5.1 pick on a default-configured TV into a stereo session. The client asks
-  for the chosen layout and lets webOS fold. `ndl::log_audio_output` logs the answer at connect for
-  sessions wider than stereo: the first line to read when 5.1 sounds like stereo.
-- ⚠ **`NDL_DirectAudioSupportMultiChannel` has an out-parameter**:
-  `int NDL_DirectAudioSupportMultiChannel(int *isSupported)`, returning 0/-1, with the code written
-  through the pointer — `0` unsupported, `1` no device, `2` device but not passthrough, `3` will
-  play. Reading the *return* as the code (as this client did) is both wrong and UB on ARM EABI: the
-  callee writes through whatever `r0` held. The `NDLMultiChannelPCMCallback` codes documented beside
-  it are the same ladder shifted down by one; they are not interchangeable.
-- ⚠ **Optional NDL symbols must be probed after the library is open.** `RTLD_DEFAULT` finds nothing
-  until something has `dlopen`'d `libNDL_directmedia` — and the capability probes run at startup,
-  before any decode session. `ffi::optional_sym` forces `ffi::common()` first; without it every
-  optional symbol reads as absent and the TV silently loses 5.1.
-- ⚠ **NDL's reported `maxBitrate` is unreliable** — it is an SoC tier, not a link limit. Don't cap
-  the stream with it; aurora-tv ignores it on webOS too.
-- **Samples are converted only where NDL needs its own layout.** libopus decodes straight into f32,
-  which is exactly what the SDL device takes; offload forwards stereo Opus untouched and re-encodes
-  only 5.1. There is no second buffer on the SDL route.
-- **The software route's latency is buffering, not decode.** Software Opus is 5% of a core, so the
-  only client-side terms are the ring depth and the device quantum.
-  - **The prime overshoots, and the shed is what takes it back.** The ring is inspected once per
-    callback, so it crosses the target somewhere inside a 10.67 ms period in 5 ms steps — first
-    serve is target+0..15 ms. `JitterPolicy`'s drift shed handles that and every later source of the
-    same drift (host capture clock vs. this DAC) by walking the depth back to target one crossfaded
-    5 ms frame at a time. Letting the policy own priming is cheaper than second-guessing its state
-    machine for one transient.
-  - **The device quantum is logged at open** (`SDL audio device:`). SDL may negotiate something
-    other than the requested 512 frames, and a larger one silently raises the policy's effective
-    target, which is floored at `one callback + 5 ms`. Read that line before concluding anything
-    about this route's latency.
-- **The SDL ring runs `punktfunk_core::audio::JitterPolicy`** (`JitterTuning::AAUDIO`, unmodified),
-  the same de-jitter state machine the Linux, Windows, Android and Apple rings use. Prime to an
-  adaptive target, grow it only on a set that actually underruns, and walk drift back down one
-  crossfaded 5 ms frame at a time. `crossfade_drop` fades BOTH corrections — the smooth shed and the
-  hard-cap trim.
-  - ⚠ **This was removed once and restored deliberately.** The removal was credited with "~35 ms of
-    floor", and that was wrong: the old local preset was 25/90 ms and the fixed prime that replaced
-    it was also 25/90, so no floor was ever saved. What was lost was jitter resilience — the
-    adaptive floor and the crossfaded shed (replaced by an uncrossfaded drop of up to 65 ms, an
-    audible click) — on the fleet's worst link. Do not delete it again without numbers from
-    `audio playback (SDL device)`.
-  - **The preset is `AAUDIO` rather than a local copy.** Field for field it already *is* what the
-    local tuning was, with the old `deprime_after: 5` **callbacks** now expressed as
-    `deprime_ms: 60` (a callback count means a different span on every device). AAudio's rationale
-    (raw callback, client owns the buffer, Wi-Fi power-save bunching arrives as underruns) is this
-    TV's situation exactly.
-  - **The A/V sync loop is not wired.** `set_sync_target` is never called, which core documents as
-    reproducing unsynchronised behaviour exactly. It never steered here anyway, and the video
-    reference this platform can build is biased low by NDL's unobservable decode+panel term.
-  - **Read `target_ms` in the debug line.** It is the adaptive floor's current answer, and the one
-    figure that says whether this set needed more than the 25 ms base. `sheds` vs `trims` separates
-    "drift corrected inaudibly" from "the link outran the headroom".
+- **Sound Out narrows nothing.** `NDL_DirectAudioSupportMultiChannel` = multi-channel PCM leaves set now. "Will play" only with Pass Through; describes NDL PCM, not SDL device. Gating breaks 5.1 to stereo on defaults. Client asks chosen layout, webOS folds. `ndl::log_audio_output` at connect for width>stereo.
+- ⚠ **`NDL_DirectAudioSupportMultiChannel` has out-parameter:** code written through `int *isSupported` (0=unsupported, 1=no device, 2=no passthrough, 3=will play). Reading return value is wrong+UB on ARM EABI; callee writes through `r0`. `NDLMultiChannelPCMCallback` codes shifted down by one; not interchangeable.
+- ⚠ **Probe optional NDL symbols after dlopen.** `RTLD_DEFAULT` finds nothing until `libNDL_directmedia` opened; probes run at startup before session. `ffi::optional_sym` forces `ffi::common()` first; without it TV loses 5.1 silently.
+- ⚠ **NDL's `maxBitrate` unreliable** — SoC tier, not link limit. Don't cap stream; aurora-tv ignores it too.
+- **Samples converted only where NDL needs layout.** libopus → f32 (SDL takes f32); offload forwards stereo untouched, re-encodes 5.1 only. No second buffer on SDL route.
+- **Software route latency is buffering, not decode.** Software Opus = 5% core; only terms ring depth+device quantum.
+  - **Prime overshoots; shed walks back.** Ring inspected once/callback (10.67ms period, 5ms steps — first serve target+0..15ms). `JitterPolicy` shed walks depth to target one crossfaded 5ms frame/time. Policy owns priming; cheaper than second-guessing state machine.
+  - **Device quantum logged at open** (`SDL audio device:`). SDL may negotiate ≠512 frames; larger silently raises target (floored at callback+5ms). Read that line before latency conclusions.
+- **SDL ring runs `punktfunk_core::audio::JitterPolicy`** (`JitterTuning::AAUDIO`, unmodified). De-jitter state machine (Linux/Windows/Android/Apple). Prime to adaptive target, grow on underrun only, walk drift down one crossfaded 5ms/time. `crossfade_drop` fades both (shed+trim).
+  - ⚠ **Removed once, restored deliberately.** "~35ms floor" claim wrong (old 25/90ms preset, fixed prime also 25/90 — no save). Lost was resilience: adaptive floor+crossfaded shed (replaced by uncrossfaded 65ms click) on worst link. Don't delete without `audio playback (SDL device)` numbers.
+  - **Preset is `AAUDIO`, not local copy.** Same tuning; old `deprime_after: 5` callbacks → `deprime_ms: 60` (callback count varies per device). AAudio rationale (raw callback, client buffer, Wi-Fi bunching) = TV exactly.
+  - **A/V sync loop unwired.** `set_sync_target` never called (reproduces unsynchronised). Never steered; video reference biased low by unobservable NDL decode+panel.
+  - **Read `target_ms` in debug line.** Adaptive floor current answer; says if set needed >25ms base. `sheds` vs `trims` separates "drift inaudible" from "link outran headroom".
 
-**Blind alleys, so they aren't re-tried:**
-- ⚠ **The NDL PCM plane was built, measured and removed.** A third route decoded Opus here and fed
-  NDL's `NDL_AUDIO_TYPE_PCM` plane. Fed on arrival it made the plane's depth — the thing NDL paces
-  the PICTURE on — a function of network jitter, and the field report was intermittent lag. A paced
-  ring in front of it fixed that, and what was left was a **small** latency win for a route that
-  could never carry 7.1, whose `"6-channel"` interleave order was inferred and never verified on a
-  set. Not worth a third hardware path: for stereo the offload route is shorter still, and for
-  anything wider software is the only route that plays it.
-- **`sdl2::audio::AudioQueue` cannot carry a de-jitter policy** — `queue_audio`/`size`/`clear` and
-  nothing else, no partial drop. That is why the pull callback stayed.
-- **Do not put the audio drain back on the main loop.** It was there because `AudioQueue` is
-  `!Send`, which put the audio cadence behind the UI's software rasterizer.
-- **Do not shrink `DEVICE_BUFFER_FRAMES` below 512** to chase latency: a smaller quantum on this SoC
-  buys more wakeups and more missed callbacks.
-- **Do not split `lock_ffi` per plane** without device evidence. No NDL entry point is documented as
-  thread-safe; the contention between the video feed and the audio bursts is real but a second guard
-  is a guess about vendor internals.
-- **Do not fold the clock plane's keep-alive into the audio pump.** Its cadence is 20 ms and the
-  pump parks up to 100 ms on an empty transport; one thread would mean a starved plane, i.e. the
-  stutter the plane exists to prevent.
+**Blind alleys, so don't re-try:**
+- ⚠ **NDL PCM plane built, measured, removed.** Third route decoded Opus → NDL's `NDL_AUDIO_TYPE_PCM`. Fed on arrival, plane depth (NDL paces picture on it) = network jitter function; field: intermittent lag. Paced ring helped, small latency win for can't-carry-7.1 route (interleave inferred, unverified). Not worth third path.
+- **`sdl2::audio::AudioQueue` can't carry de-jitter** — `queue_audio`/`size`/`clear` only. Pull callback stayed.
+- **Don't put audio drain on main loop.** `AudioQueue` is `!Send`; audio cadence behind UI rasterizer.
+- **Don't shrink `DEVICE_BUFFER_FRAMES` below 512.** Smaller quantum buys more wakeups, misses.
+- **Don't split `lock_ffi` per plane** without device evidence. No NDL entry is thread-safe; contention real but second guard guesses vendor internals.
+- **Don't fold clock plane keep-alive into audio pump.** Cadence 20ms; pump parks 100ms empty. One thread = starved plane = the stutter it prevents.
 
 ## A/V sync
 
-The host stamps `pts_ns` on every audio datagram, and with audio on NDL's plane **NDL does the
-synchronisation**: both planes are stamped in one timeline. The client-side `AvSync` estimator went
-with the jitter ring it existed to steer — there is no ring depth left to move.
+Host stamps `pts_ns` on audio datagrams; NDL does sync with plane audio (one timeline). Client `AvSync` estimator gone with jitter ring — no depth to move.
 
-What still matters:
+What matters:
 
 - NDL is submit-only (`NDL_DirectVideoPlay` reports nothing about presentation), so glass time can
   only be estimated and the decode+panel constant after the render queue drains is not observable
@@ -554,43 +259,20 @@ What still matters:
 - ⚠ **Use `frame.pts_ns`, never the paced value**, wherever a host-clock comparison is made. Both
   are in scope at the submit site with near-identical names; the paced one has been mapped into
   NDL's player clock by `session::timeline::Pacing`.
-- ⚠ **NDL can fail the whole load asynchronously, and then never recovers.** Seen on a CX: load
-  state `0x12` with `errorCode 600`, after which every `NDL_DirectVideoPlay` returns -1, the clock
-  plane's `NDL_DirectAudioPlay` fails too (so the thread that paces the picture exits for good) and
-  NDL reports `UNLOADCOMPLETED` on its own. There is no in-session reload path, and a re-anchor does
-  nothing for a lost pipeline, so the client spun on failed feeds with a frozen picture while the
-  QUIC session stayed perfectly healthy. `ndl::fatal()` latches that state, `VideoSink::is_dead`
-  carries it up backend-blind, and the stream loop ends the session. What PROVOKES the 600 is still
-  unknown.
+- ⚠ **NDL fails load asynchronously, never recovers.** CX: state `0x12` `errorCode 600`, then all `Play` returns -1, clock plane `AudioPlay` fails (pacer thread exits), NDL reports `UNLOADCOMPLETED`. No in-session reload; re-anchor does nothing. Client spun on failed feeds, frozen, QUIC healthy. `ndl::fatal()` latches, `VideoSink::is_dead` carries up, stream loop ends session. 600 provocation unknown.
 
 ## NDL's audio plane: why every load has one
 
-⚠ **NDL only paces the picture when the load HAS an audio plane and that plane is PRIMED.** On a
-video-only load it ignores presentation timestamps entirely and presents at feed cadence, which
-beats against a 120 Hz panel — the long-standing "smooth at 1080p, randomly smooth above it"
-stutter. Measured on a CX: frames stamped ~60 ms ahead of the player clock still left
-`render_buffer_length` at 0-1 and still stuttered, and the same session with an audio plane was
-smooth.
+⚠ **NDL paces picture only when load HAS audio plane PRIMED.** Video-only ignores PTS, presents at feed cadence vs 120Hz panel — "smooth 1080p, random above" stutter. CX: frames ~60ms ahead still `render_buffer_length` 0-1, stuttered; same+audio plane smooth.
 
-**It does NOT need that plane to keep being fed** (CX, 2026-09-16). With the plane left 136 seconds
-stale — across an idle stretch where the host sent no frames either — the picture paced normally
-and the deadline margins were slightly better than with a metronome running. This is why the
-silent metronome is gone: the load prime is what matters, which is also aurora's structure (one
-empty Opus frame at `LoadMedia`, `ndl_player.c:225-227`, and nothing after). Evidence is one set;
-`ndl_plane_feed=continuous` restores the metronome without a rebuild.
+**Plane doesn't need feeding** (CX, 2026-09-16). 136s stale plane — idle, no host frames — picture paced normally, margins better than metronome. Load prime matters (aurora: one Opus frame at `LoadMedia`, nothing after). One set; `ndl_plane_feed=continuous` restores metronome.
 
-So **every accepted V2 load asks for a stereo audio plane**, and what rides it is a separate
-question:
+**Every V2 load asks for stereo audio plane;** what rides it is separate:
 
-- **Software decode** (the default) — `platform::webos::audio` decodes the real audio to SDL and
-  the NDL plane carries only its load prime. `NdlVideo::run_clock_plane` still runs, but it now
-  only watches (the unconfirmed-plane check) unless a launch param restores the metronome.
-- **Hardware Opus decode** (Audio processing → Offload, opt-in) — the audio pump feeds the real
-  stream, stamped on the video timeline; no SDL device is opened.
+- **Software decode** (default) — `platform::webos::audio` decodes real audio→SDL; plane carries load prime only. `NdlVideo::run_clock_plane` watches (unconfirmed-plane check) unless launch param restores metronome.
+- **Hardware Opus decode** (Audio processing→Offload, opt-in) — pump feeds real stream on video timeline; no SDL device opened.
 
-`run_clock_plane` runs on **both** routes (`session::pipeline::spawn_plane_threads`), and with the
-metronome retired its remaining job is the unconfirmed-plane check, kept off the feed path. The
-dead-capture filler went with the metronome: a starved plane turned out not to freeze the picture.
+`run_clock_plane` runs both (`session::pipeline::spawn_plane_threads`). Metronome retired, only job is unconfirmed-plane check. Dead-capture filler gone: starved plane doesn't freeze picture.
 
 A set that refuses the audio plane outright ends up video-only at the load and gives up pacing with
 it; the session log names which route it took. **NDL v1 has no Opus audio type at all**, so webOS 4
@@ -603,368 +285,119 @@ but not this one).
 
 ### Wiring the plane
 
-Byte-exact with `mariotaku/ss4s` `ndl/webos5`: `NdlAudioConfig.sample_rate` in **kHz** (`48.0`, not
-`48000.0`), the stereo `opus_empty_frame_211 = {0xec,0xff,0xfe}` decoder prime, and combined
-audio+video in one load. Struct layouts (`NDL_DIRECTMEDIA_AUDIO_OPUS_INFO_T`, `..._DATA_INFO_T`)
-match `webosbrew/webos-userland` field-for-field, including the explicit trailing `_padding` — the
-whole struct is memcpy'd into a fixed-size union arm, so **any implicit padding in a `repr(C)`
-struct handed to NDL is uninitialized stack on the wire**.
+Byte-exact with `mariotaku/ss4s` `ndl/webos5`: `sample_rate` in kHz (`48.0` not `48000.0`), stereo `opus_empty_frame_211 = {0xec,0xff,0xfe}` prime, combined load. Struct layouts match `webosbrew/webos-userland` field-for-field inc. trailing `_padding` — memcpy'd into union arm, so implicit padding in `repr(C)` = uninitialized stack.
 
-⚠ **Keep NDL init lazy inside `load()`.** An ss4s-style warm init at startup produces "player is not
-loaded" on the first load.
+⚠ **NDL init lazy inside `load()`.** Warm init at startup causes "not loaded" on first load.
 
-⚠ **`LOADCOMPLETED` is not reported against the same thing on every set, so it cannot be the test
-for the audio plane before a frame is fed** (measured, issue #188). A 2025 QNED (webOS 10, `k24n`)
-reports it **26 ms after the first access unit reaches the decoder, and never before**: its
-video-only load misses the 2 s `LOAD_COMPLETE_TIMEOUT`, then confirms the instant `ensure_loaded`
-gives up and feeds. A CX reports it ~40 ms after the load with no frame at all. The old code judged
-the plane inside the load wait, where nothing can feed a frame — the pumps do not spawn until
-`session::connect` returns — so on the QNED every session read a healthy plane as refused, fell back
-to video-only, and ran unpaced. That is #188's delay; longer waits don't help.
+⚠ **`LOADCOMPLETED` not same thing every set, can't test plane before frame fed** (#188). 2025 QNED (webOS 10) reports it 26ms after first AU reaches decoder, never before: video-only misses 2s timeout, confirms when `ensure_loaded` gives up and feeds. CX ~40ms with no frame. Old code judged plane inside wait (pumps don't spawn until `session::connect` returns), QNED sessions read healthy plane as refused, fell back video-only, unpaced. That's #188 delay.
 
-So the plane is **asked for and then kept, confirmed or not**. `AUDIO_PRIME_BUDGET` (500 ms) buys
-only the fast confirmation a CX gives; a load that does not answer inside it is taken anyway and the
-metronome carries on feeding the plane, which on an ingest-gated set is what eventually produces the
-callback. `run_clock_plane` is therefore **deliberately not gated on `LOADCOMPLETED`** — it is the
-prime's continuation, and gating it would leave the plane unfed from the end of the prime until the
-first video frame. On the QNED that is seconds, and it covers the ~100 ms of ingest that sets NDL's
-standing present cushion.
+Plane **asked for, kept confirmed or not.** `AUDIO_PRIME_BUDGET` (500ms) buys fast CX confirmation only; unconfirmed load taken, metronome feeds (ingest-gated sets eventually callback). `run_clock_plane` **not gated on `LOADCOMPLETED`** — prime's continuation; gating leaves unfed from prime-end to first frame. QNED seconds, covers ~100ms ingest NDL standing cushion.
 
-⚠ **There is no mid-session verdict and no in-session re-load.** One was written for #188 and
-reverted: it could not be right, because the plane question is resolution-independent (NDL's
-`VideoInfo` carries no framerate at all) while #188 is 4K120-HDR-only on a set where 4K60 and
-1440p120 are fine. It also had to re-apply HDR metadata to the new pipeline, which is the mode-drop
-documented under *Video decode* — the fallback could cause what it was meant to fix. A load whose
-audio config the pipeline rejects outright still fails at the load and falls back there, which is
-the only fallback that exists.
+⚠ **No mid-session verdict, no in-session re-load.** One written for #188 reverted: couldn't be right (plane question resolution-independent, NDL `VideoInfo` no framerate; #188 4K120-HDR-only on set where 4K60/1440p120 fine). Re-apply HDR to new pipeline = mode-drop (fallback could break it). Rejected configs fail at load+fallback there — only fallback exists.
 
-What survives of the verdict is the **log line**: `v2::PLANE_CONFIRM_GRACE` (750 ms past the first
-accepted frame) is where an unconfirmed plane gets named. That window is the one place the two
-readings separate — before a frame, "no callback" is both a healthy ingest-gated set *and* a
-pipeline that rejected the Opus config asynchronously and accepts every frame into a decoder that
-never runs. Nothing is recovered, deliberately: a set that does this has not been measured, and
-acting on the guess is what #188 already cost. If that WARN shows up in a report, THAT is the set to
-build a fallback for.
+**Log line survives:** `v2::PLANE_CONFIRM_GRACE` (750ms past first frame) names unconfirmed plane. Window where two readings separate — before frame, "no callback" = healthy ingest-gated *or* rejected Opus config, accepts all frames to decoder that never runs. Nothing recovered deliberately: unmeasured set, guess costs #188. WARN in report = set to build fallback for.
 
-The route is picked from the PROVEN plane (`AudioPlane::accepts_stream`), not from one that was
-merely asked for: an unconfirmed plane paces the picture perfectly well, but the session's only
-audio must not ride one that may never work, and the route cannot be re-picked once the stream is
-running. Only a session that means to put REAL audio there pays for the answer: `plane_budget`
-charges the offload route `AUDIO_PROVE_BUDGET` (2 s) and every other session the short one, since on
-an ingest-gated set the extra wait is pure black screen. A downgrade off offload is worse than either
-route on its own — `max_channels` has already clamped the handshake to stereo on the strength of the
-request — so the `audio path:` line names it explicitly. Both load waits bail early on
-`ndl::fatal()`. Every path that loses the plane warns that the picture will not be paced; grep the
-log for that line before theorising about any later delay.
+Route picked from PROVEN plane (`AudioPlane::accepts_stream`), not asked-for: unconfirmed paces picture fine, but real audio can't ride maybe-never. Route can't re-pick mid-stream. Only real audio pays for answer: offload charges `AUDIO_PROVE_BUDGET` (2s), others short one (ingest-gated = pure black). Downgrade off offload worse than either (handshake clamped to stereo) — `audio path:` names it. Both waits bail early on `ndl::fatal()`. All losing-plane paths warn picture unpaced; grep log before theorizing delay.
 
-The REAL audio feed gates on the `LOADCOMPLETED` latch itself, never on `feed_unblocked`: that flag
-is the VIDEO feed's gate and latches optimistically once frames have to flow regardless. Real audio
-on a plane NDL has not confirmed costs the session its sound outright — whereas silence on one is
-free, which is why the two feeds gate differently.
+Real audio feed gates on `LOADCOMPLETED` latch, not `feed_unblocked` (video gate, latches optimistic). Real audio on unconfirmed plane costs session sound; silence free — feeds gate differently.
 
-The load blocks `session::connect` between the handshake and the first `next_frame`, so anything
-timing a launch has to cover it. `app::hero` is fine (its `FIRST_FRAME_WAIT` only starts once
-connect returns, under a 30 s `HERO_LOADING_MAX` backstop), but `hdr_pattern`'s `PRESENT_DEADLINE`
-runs from `Playback::start` and must stay above the whole sequence.
+Load blocks `session::connect` between handshake and first `next_frame`. Anything timing launch must cover it. `app::hero` fine (`FIRST_FRAME_WAIT` after connect, 30s max); `hdr_pattern` `PRESENT_DEADLINE` from `Playback::start`, must exceed sequence.
 
-⚠ **The prime's stamps and the player clock share one origin — `load_instant` is the load CALL**,
-where NDL's PTS domain starts. It used to be stamped *after* the load wait, so the two domains
-differed by the load's duration D and every consumer carried a correction for it — worst, the
-offload route's real lead became `PLANE_LEAD_MS − D`, i.e. ≈ 0 on a CX. One origin removes them
-all. `last_real_feed_ms` is seeded with the clock at construction, not 0, since it already reads D.
+⚠ **Prime stamps and player clock share origin — `load_instant` is load CALL**, where NDL PTS starts. Used to stamp after wait, domains differed by D, every consumer corrected — offload real lead `PLANE_LEAD_MS − D` ≈ 0 on CX. One origin removes all. `last_real_feed_ms` seeded at construction, not 0.
 
-⚠ **The silent metronome's cushion is `METRONOME_LEAD_MS` (80 ms), not `PLANE_LEAD_MS` (40 ms), and
-the arithmetic must be done in one domain.** 80 ms is the depth 4K120 5.1 smoothness was actually
-confirmed on (`plane_lead` read 120 on a CX only because it was taken against a lagging clock), so
-the constant is pinned there rather than falling out of how long a TV took to load. Under 80 is the
-known stutter risk; over it is cheap — a silent plane costs no lip sync — so it IS the knob for a
-set still stuttering at high refresh: walk it UP against `plane_lead`. The offload route's *fill*
-still targets `PLANE_LEAD_MS` plus whatever extra lead the Smoothness buffer asked for
-(`set_plane_extra_lead_ms`), which must match what `play_audio` targets or resuming real packets
-floor onto the fill's ceiling.
+⚠ **Metronome cushion `METRONOME_LEAD_MS` (80ms), not `PLANE_LEAD_MS` (40ms); one domain.** 80ms is depth 4K120 5.1 confirmed on (CX `plane_lead` 120 only vs lagging clock). Pinned there, not from TV load time. Under 80 = stutter risk; over = cheap (no lip sync). Knob for high-refresh stutter: walk UP vs `plane_lead`. Offload *fill* targets `PLANE_LEAD_MS` plus Smoothness extra (`set_plane_extra_lead_ms`), must match `play_audio` or real packets floor onto ceiling.
 
-⚠ **The prime is what completes the load.** An audio-enabled load does not report `LOADCOMPLETED`
-until its audio plane has received a packet — but the pumps that would send one don't spawn until
-`session::connect` returns. That deadlock read as a whole session of black picture with working
-sound, no error anywhere. `NdlVideo::prime_audio` feeds bursts of empty frames through the load
-window itself; on a CX that turns "never" into `LOADCOMPLETED` in ~40 ms. The prime's highest stamp
-seeds `last_audio_pts_ms`, so the first real packets are floored rather than read as a rewind.
+⚠ **Prime completes load.** Audio-enabled load doesn't report `LOADCOMPLETED` until plane received packet — but pumps don't spawn until `session::connect` returns. Deadlock = black picture, working sound, no error. `NdlVideo::prime_audio` feeds empty bursts through load window; CX turns "never" to `LOADCOMPLETED` in ~40ms. Prime's highest stamp seeds `last_audio_pts_ms`, first real packets floored not rewound.
 
-⚠ **Never flush a pipeline that has not finished loading — it kills audio for the session.**
-`NDL_DirectVideoFlushRenderBuffer` before `LOADCOMPLETED` takes the audio plane out permanently;
-video recovers and gives no sign. `ensure_loaded` returns a typed not-loaded error and the sink
-holds + requests a keyframe **without** flushing. Nothing is queued at that point anyway.
-`NDL_DirectAudioPlay` returns 0 either way — there is no error to find on the audio side.
+⚠ **Never flush before LOADCOMPLETED — kills audio permanently.** Flush before done takes audio plane out; video recovers silent. `ensure_loaded` not-loaded error, sink holds+keyframe request without flush. Nothing queued. `NDL_DirectAudioPlay` returns 0 either way — no audio-side error.
 
-⚠ **A hold must never be the response to `NotLoadedYet` alone.** Making it trigger
-freeze-until-reanchor skipped the `play()` call that holds the feed-anyway escape, and the session
-deadlocked into a black first frame — worst on a static desktop, where no new IDR arrives on its own.
+⚠ **Hold must never respond to `NotLoadedYet` alone.** Freeze-until-reanchor skipped `play()` escape call, deadlock black first frame — worst static desktop. No new IDR.
 
-⚠ **Never drain NDL's queue with a feed hold.** An emptied present cushion breaks pacing for the
-rest of the session; trim the stamps instead (#188).
+⚠ **Never drain NDL queue with hold.** Emptied cushion breaks pacing whole session; trim stamps instead (#188).
 
-⚠ **Audio stamps must never go backwards — NDL reads a rewind as a mute for the rest of the
-session**, and does not resync. `NdlVideo::play_audio` and `NdlVideo::burst_silence` are the only
-feed points, both serialised under `lock_ffi` and both flooring at `last_audio_pts_ms` — the floor
-must be read under that guard, or a packet measured against an older ceiling blocks on the lock and
-then hands NDL the stale stamp.
+⚠ **Audio stamps never backwards — NDL mutes rest of session.** Only feed points: `play_audio`, `burst_silence`. Both serialized under `lock_ffi`, both floor at `last_audio_pts_ms`. Read floor under guard or stale packet-ceiling race gives NDL stale stamp.
 
-⚠ **The audio plane stamps off the PLAYER clock, not the host's.** It used to map the host capture
-PTS through a shared session clock, with a per-latch skew lifting each resumed run above the ceiling.
-That **ratchets**: a freeze-until-reanchor stalls the mapped timeline while packets keep arriving,
-the resumed run lands below the ceiling it already reached, and the only monotonic repair is to add
-lead — which nothing in the session can ever pay back. Field case (CX, offload on): five re-anchors
-inside four seconds walked the plane from 78 ms to 124 ms of lead. Audio is now stamped
-`player_clock + PLANE_LEAD_MS` and the host PTS is ignored (`AudioSink::feed` takes it and drops
-it): a wall clock advances at the same rate whatever the host PTS does across a freeze, so
-`last_audio_pts_ms` is left with nothing to do but absorb reordering. The clock plane targets the
-same figure, so the two feeders share the ceiling without either driving it.
+⚠ **Audio plane stamps off PLAYER clock, not host's.** Used to map host PTS through session clock, per-latch skew lifting resumed runs. **Ratchets:** freeze stalls timeline, packets arrive, resumed run below reached ceiling, only monotonic fix is add lead (unpayable). Field: CX offload 5 re-anchors, 78ms→124ms lead. Now stamped `player_clock + PLANE_LEAD_MS`, host PTS ignored: wall clock advances regardless freeze, `last_audio_pts_ms` absorbs reordering. Clock plane targets same, feeders share ceiling.
 
-⚠ **The ratchet was real and was NOT the mute.** Measured after the change, under a deliberately
-saturated airlink (276 Mb/s of competing download against a 188 Mb/s stream): 32 re-anchors,
-`plane_lead` pinned at 37-40 ms, stamps provably monotonic and evenly spaced — and the audio still
-died permanently. Do not spend another round on stamp arithmetic.
+⚠ **Ratchet was real, not the mute.** Measured after change, saturated link (276 Mb/s competing vs 188 Mb/s stream): 32 re-anchors, `plane_lead` 37-40ms, stamps monotonic+even — audio died anyway. Don't re-try stamp arithmetic.
 
-⚠ **The loss hold no longer flushes, and THIS is what was muting the plane** (confirmed on device).
-It was the last structural difference from `ss4s`, which never flushes mid-stream — its only
-recovery is unload+load, and it does not lose its Opus plane. Every flush stops the pipeline: each
-one used to be followed by `NDL load state: PLAYING (0x1a)`, a transition NDL only makes from
-not-playing. Confirmation (CX, same storm as above): 16 re-anchors, holds up to 2 s, **not one
-`PLAYING` transition in the whole log**, `plane_lead` 38-40 ms flat, and audio intact — where the
-identical storm against the flushing build killed it permanently.
-`NDL_DirectVideoFlushRenderBuffer` is safe to call and reports success; what it costs you is the
-audio plane, silently, for the rest of the session. The decode-error path still flushes, where the
-pipeline has actually errored; loss is a network event and NDL's queue holds good frames the hold is
-about to present anyway. `last_base_ns` survives the pacing reset accordingly: without a flush the
-pipeline still holds everything fed before it, and a run restarting from 0 would walk the video
-stamp backwards.
+⚠ **Loss hold doesn't flush, THIS mutes plane** (confirmed device). Last ss4s diff (never flushes mid-stream — only unload+load recovery, keeps Opus plane). Every flush stops pipeline; used to follow with `PLAYING (0x1a)` transition. CX same storm: 16 re-anchors, 2s holds, not one `PLAYING` in log, `plane_lead` 38-40ms flat, audio intact vs flushing build killed it. `NDL_DirectVideoFlushRenderBuffer` safe+success; costs audio plane silently rest of session. Decode-error path flushes (actually errored); loss is network, NDL queue holds good frames hold about to present. `last_base_ns` survives pacing reset: no flush = pipeline holds pre-fed, restart from 0 walks stamp backwards.
 
-A loss hold is also **lifted by a reanchor alone** — waiting for anything more left holds open past
-their cause.
+Loss hold lifted by reanchor alone — waiting more leaves holds open.
 
-This is where `mariotaku/ss4s` ended up too, from the other direction: `734e643` added a thread
-feeding empty Opus frames through gaps, then `ef0c0ae` deleted the whole mechanism and moved both
-planes onto `CLOCK_MONOTONIC - mediaLoadedTime`. moonlight-tv#493 ("Stream loses audio after network
-hiccup") is the unfixed version of this failure — same symptom, Opus route only, PCM never
-reproduces it, only a full restart recovers.
+This is where `mariotaku/ss4s` ended up too: `734e643` added thread feeding empty Opus through gaps, then `ef0c0ae` deleted it, moved both planes onto `CLOCK_MONOTONIC - mediaLoadedTime`. moonlight-tv#493 ("Stream loses audio after network hiccup") is unfixed version — same symptom, Opus only, PCM never reproduces, full restart needed.
 
-⚠ The audio-enabled load returns success even on a TV that then plays nothing, so **no runtime probe
-can distinguish the two**. If a model regresses, the `NDL load state:` log says whether the pipeline
-ever started, and turning Audio processing back to Software is the way out of the hardware-decode
-half.
+⚠ Audio-enabled load returns success even when plays nothing — no probe distinguishes. Regression: `NDL load state:` log says if pipeline started. Out of hardware-decode: Audio processing→Software.
 
 ## Cadence pacing and the present cushion
 
-The video feed is copy-free — core reassembles one contiguous `Vec` (which `NDL_DirectVideoPlay`
-requires) and the sink passes that pointer straight through, no Annex-B rewrite, no client-side
-queue. Pacing is therefore only about *when* bytes are released.
+Video feed copy-free — core reassembles contiguous `Vec` (NDL requires), sink passes pointer through; no Annex-B rewrite, no queue. Pacing = when bytes release.
 
-`session::timeline::Pacing` wraps **`punktfunk_core::phase::CadenceClock`** (the same loop the
-desktop/Android/Apple presenters pace on, so every client computes the same statistic): a type-2
-loop over `ready − pts` whose cushion is `2 × measured MAD`, floored at 0.5 ms and **capped at one
-frame interval** — that ceiling is core's invariant, not a knob. `snapping()` tuning, whose
-rationale ASSUMES the sink latches to the panel's grid so the snap-up already carries ~half a
-refresh of slack. **That assumption is unverified on NDL** — no claim of it exists anywhere in
-upstream ss4s, aurora's software grid observes no display phase, and NDL's own scheduling is not
-documented. Until it is measured, read the tuning
-as a design assumption rather than firmware behaviour.
+`session::timeline::Pacing` wraps `punktfunk_core::phase::CadenceClock` (desktop/Android/Apple loop, all clients same stat): type-2 loop `ready − pts`, cushion `2 × MAD` (0.5ms floor, one-frame cap — core invariant). `snapping()` assumes sink latches panel grid (~half-refresh slack). **Unverified on NDL** — ss4s/aurora claim nothing, NDL scheduling undocumented. Read tuning as design assumption not behavior until measured.
 
-The mapping it replaced (a fixed anchor `base = player0 + (host_pts - host0)` plus a one-off lead
-trim) is gone. It carried no rate term, so two free-running crystals walked the session's real lead
-away over minutes with nothing to pull it back, and its whole jitter margin was 4 ms — below the
-arrival spread of an ordinary link, so the latest-arriving frames of every window were stamped in
-the past. On a CX at 1440p120 it stamped ~17% of frames late against the loop's ~7%. That
-combination is the "stutters here, looks fine on the host's own monitor" report.
+Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone. No rate term — free-run crystals walked lead away over minutes, 4ms jitter margin (below link spread). CX 1440p120: ~17% frames late vs loop's ~7%. "Stutters here, smooth on host monitor" report.
 
-- ⚠ **It smooths the offset, never the timestamps.** Core tests that
-  (`preserves_source_cadence`): a game genuinely rendering at 45 fps still looks exactly as
-  irregular as it is. Only the transport's contribution is removed.
-- What no client-side work can fix: a stream rate that is not the panel rate or an exact divisor of
-  it. 60 on 120 is fine; 50 on 60 is arithmetic.
-- **Optional extra headroom is the Smoothness preference** (`PresentPriority`): it **adds** 1-3
-  source frame periods **on top of** the adaptive cushion, and needs a timestamp clock plus an
-  accepted audio plane (NDL v2) or it falls back to lowest latency with a warning.
-  ⚠ It used to SUBSTITUTE the fixed budget for the adaptive one, which made the first step a no-op
-  wherever the adaptive figure was already at its ceiling — at 120 Hz that is any link with more
-  than ~4 ms of MAD, i.e. most of them, and it is why the setting read as doing nothing. Additive,
-  every step is worth a whole period. The knob is the only way past core's one-period cap.
-- ⚠ **The cushion's ceiling is the STREAM mode's interval, never the panel's.** The two agree on
-  most panels but are different quantities: the cushion bounds how long a frame may be HELD, so it
-  must follow the cadence the host produces (core's own test says so). A 120 fps stream on a 60 Hz
-  panel would otherwise license twice the hold the source can justify.
-- **One picture folds ONCE.** Slice-progressive delivery repeats an AU's host PTS across its pieces
-  at increasing arrival times, so mapping per piece teaches the loop the AU's *tail* arrival and
-  inflates measured jitter by the AU's own transmission time. `VideoStage::au_base_ns` holds the
-  stamp while the AU is open — which is also what makes every piece of one AU carry the same
-  timestamp, as NDL (start-code boundaries, no AU flag) needs.
-- **Folded at arrival**, which is where core wants it, so the estimate sees the arrival process the
-  transport actually produced. `snapping()` permanently: re-tuning to `free_running()` needs VRR
-  measured live off on-glass stamps this platform does not have. `note_off_cadence` IS wired here, though
-  nothing on the wire marks a frame off-cadence: this client infers it from two consecutive AUs
-  carrying the same host PTS (a compositor header stamp, a driver burst), because folding a
-  zero-interval sample would teach the loop an arrival gap the source never had. It returns
-  `ready + cushion`, which is also the only answer that advances — the anchored stamp would repeat
-  the previous picture's, and NDL truncates both to one millisecond.
-- **Re-anchor triggers**: the freeze-until-reanchor hold, via `reset_timeline`. The source interval
-  is snapshotted at pipeline build, so if mid-session mode changes ever become a real path here,
-  that snapshot is the thing to fix.
-- **The stamp sequence is clamped monotonic per run** (`last_base_ns`), because the cushion can
-  shrink between frames and NDL reads a rewind as a permanent session mute. It is the one invariant
-  here whose violation costs a session its audio outright.
-- `late_stamps` — frames whose actual stamp was already behind the player clock, i.e. the judder,
-  counted — is reported as `pacing:` on the video heartbeat and `Pace` on the overlay.
-- **A/V offset is `plane_lead − cushion`** (`av=` on the heartbeat, `av ±N ms` on the overlay),
-  differenced in the video pump, which already holds both halves. Both planes stamp on NDL's one
-  `elapsed_ns` clock, so the subtraction is legal: audio sits a fixed `PLANE_LEAD_MS` ahead of it,
-  the picture its mapped cushion ahead. Positive is sound behind picture. ⚠ Offered ONLY where real
-  audio rides the plane — on the software route the plane carries the silent metronome, which costs
-  no lip sync, and the figure would be a fiction. ⚠ Stamp domain: NDL's decode and panel transit are
-  not observable from the app and bias the picture later, so the true offset is smaller than this
-  reads. Trend and sign, never calibration. ⚠ The Smoothness buffer does NOT move it: the same budget
-  is handed to the plane (`NdlVideo::set_plane_extra_lead_ms`), so both halves shift together and
-  the figure stays at `PLANE_LEAD_MS − adaptive cushion`. Left unmatched it would have walked
-  straight through zero — Smooth 2 at 60 Hz is already 33 ms against a 40 ms plane lead — and sound
-  ahead of the picture is the more audible direction.
-- ⚠ **No diagnostic may take NDL's FFI lock.** `render_buffer_length` sits behind the same guard as
-  the picture's own `video_play`, so a figure queried for the overlay would stall the next feed on
-  the video thread. The backpressure control path already samples the depth every `BACKLOG_SAMPLE`
-  (500 ms); `backlog=` on the heartbeat and the overlay read **that** sample, never a query of their
-  own. The figure is therefore up to one interval old, and goes stale for the length of a hold
-  (sampling is suspended while holding) — `holding` is published beside it and says so. Every other
-  per-frame figure (`feed_us`, `late_submit`, `min_slack`) is gated on `timed`; the only ungated
-  clock read on the feed path is the pacing input itself.
-- ⚠ **Live counters belong on the stats overlay, not in the log.** A periodic dump of them buries
-  the events worth reading (holds, plane refusals, slow feeds), so the `pacing:`/`video:` lines sit
-  at TRACE — one step below the `TELEMETRY_LEVEL=debug` a deploy usually runs at. Everything they
-  carry is on the overlay live: `pace cushion · jitter · late · slack`, `av stamp`, `plane_lead`,
-  `backlog`. Raise to TRACE only when the screen is not in front of you.
-- **`cushion` is the only overlay figure that moves with the presentation setting.** `jitter` is the
-  measured residual and is independent of the cushion by construction; `late` is cumulative from
-  session start. Watching either to see whether Smoothness is doing anything reports nothing — that
-  is what made the setting look inert.
-- **`min_slack` is the complete-AU deadline margin** (`Pacing::note_submitted`,
-  a minimum rather than a mean, so one bad frame stays visible, taken and re-armed on the line that
-  prints it — the take IS the re-arm, so reading it anywhere else shortens the window). The loop folds an AU's FIRST
-  piece only — deliberately, since re-mapping per piece teaches it the tail arrival — so it never
-  sees when a slice-progressive picture COMPLETED. Persistently negative `min_slack` while `jitter`
-  reads healthy is the signature of a large AU finishing against a deadline its first piece set.
-  Slice-progressive fires above ~25 Mb/s (core emits an early part only past a completed FEC block,
-  ≈22 KB), and keyframes always split, so this is reachable at ordinary settings. Read it against
-  `parts=` on the video line: `parts=0` means the whole lever is inert on that mode. ⚠ Only ever
-  populated while the feed is timed (`report_decode_latency || diagnostics`), so it is a diagnostic,
-  never a steering signal — a control loop built on it would silently run open-loop.
-- ⚠ **The stamp is ceiled to whole ms in BOTH intents**, where the rounding used to live inside the
-  Smoothness branch. NDL truncates either way, so rounding down spent cushion; generalizing it is a
-  (sub-millisecond) behaviour change to Lowest latency that rode in on a Smoothness fix.
+- ⚠ **Smooths offset, never timestamps.** Game at 45fps stays irregular (core `preserves_source_cadence`). Only transport removed.
+- Can't fix: stream rate ≠ panel rate or divisor. 60 on 120 OK; 50 on 60 arithmetic.
+- **Smoothness preference** (`PresentPriority`): **adds** 1-3 source periods on adaptive cushion. Needs timestamp clock+accepted v2 audio plane, else fallback+warning.
+  ⚠ Used to SUBSTITUTE fixed for adaptive (no-op at ceiling — 120Hz >~4ms MAD = most). Additive now; every step worth period. Only way past core's one-period cap.
+- ⚠ **Cushion ceiling is STREAM interval, not panel's.** Usually agree but different: bounds frame HOLD time, must follow host cadence. 120fps stream on 60Hz panel would license double-hold source can't justify.
+- **Picture folds ONCE.** Slice-progressive repeats AU PTS across pieces at rising arrivals; per-piece mapping teaches loop tail arrival, inflates jitter by AU duration. `VideoStage::au_base_ns` holds stamp while AU open (every piece same timestamp for NDL). Folded at arrival (core wants it), estimate sees transport process. `snapping()` permanent (VRR needs live on-glass stamps, don't have). `note_off_cadence` wired; infer off-cadence from same-PTS AUs (compositor stamp, driver burst) — folding zero-interval teaches false gap. Returns `ready + cushion` (only advancing answer — anchored repeats, NDL truncates 1ms).
+- **Re-anchor triggers:** freeze-until-reanchor hold, via `reset_timeline`. Source interval snapshotted at build; if mid-session mode change becomes path, fix snapshot.
+- **Stamp sequence clamped monotonic per run** (`last_base_ns`): cushion shrinks between frames, NDL mutes on rewind. Only invariant whose break costs audio.
+- `late_stamps` (frames stamped behind player clock, judder) reported as `pacing:` heartbeat/`Pace` overlay.
+- **A/V offset = `plane_lead − cushion`** (`av=` heartbeat, `av ±Nms` overlay). Video pump holds both; both timestamp NDL's `elapsed_ns` (legal). Audio fixed `PLANE_LEAD_MS` ahead, picture mapped cushion ahead. Positive = sound behind. ⚠ Only where real audio (software plane = silent metronome, fiction). ⚠ Stamp domain: NDL decode+panel unobservable, bias picture later, true offset smaller. Trend/sign, never calibration. ⚠ Smoothness doesn't move it: same budget handed to plane (`set_plane_extra_lead_ms`), both shift, stays `PLANE_LEAD_MS − cushion`. Unmatched walks through zero (Smooth 2/60Hz = 33ms vs 40ms lead); sound ahead is more audible.
+- ⚠ **No diagnostic takes NDL FFI lock.** `render_buffer_length` behind same guard as `video_play`; query stalls next feed. Backpressure path samples depth every `BACKLOG_SAMPLE` (500ms); `backlog=` reads that sample, not own query. Figure up to one interval old, stale during hold (sampling suspended) — `holding` says so. Other per-frame (`feed_us`, `late_submit`, `min_slack`) gated on `timed`; only ungated clock read is pacing input.
+- ⚠ **Live counters on overlay, not log.** Periodic dump buries events (holds, refusals, slow feeds). `pacing:`/`video:` at TRACE (below usual `debug`). Overlay has all: cushion/jitter/late/slack, av stamp, plane_lead, backlog. Raise to TRACE offline only.
+- **`cushion` only figure moving with presentation setting.** `jitter` = measured residual (independent), `late` = cumulative from start. Watching either shows nothing (inert-looking setting).
+- **`min_slack` = complete-AU deadline margin** (`Pacing::note_submitted`, minimum not mean, one bad frame visible; taken/re-armed on print line — re-arm IS take, read elsewhere shortens window). Loop folds AU FIRST piece only (deliberate, tail arrival re-map), never sees slice-progressive COMPLETED. Negative `min_slack` while healthy `jitter` = large AU vs first-piece deadline. Slice-progressive >~25 Mb/s (core past FEC block ≈22KB), keyframes split, reachable ordinary. Read vs `parts=` video line: `parts=0` = inert. ⚠ Populated only while timed (`report_decode_latency || diagnostics`), diagnostic not steering — loop built on it silently open-loop.
+- ⚠ **Stamp ceiled to whole ms in BOTH intents.** Rounding used to live in Smoothness branch. NDL truncates, rounding down spends cushion; generalizing is sub-ms behavior change to Lowest latency via Smoothness fix.
 
-**Slice-progressive feed (on, every NDL v2 session).** Without it the decoder sees byte 0 of a frame
-only once that frame's LAST datagram lands; at 200 Mbps a keyframe is many datagrams and the tail of
-that reassembly wait is pure latency. `session::stage::parts` implements core's contract — parts in
-order, an `offset` mismatch or a new `first` over an open AU means that AU died — and reports the
-break as loss, which puts the sink into freeze-until-reanchor and asks for a keyframe. Per-frame
-reference points (the decode report, the audio latch) are skipped on a piece that is not the AU's
-last, since a piece is not a presentable frame.
+**Slice-progressive feed (on, every NDL v2 session).** Without it decoder sees byte 0 only when last datagram lands; 200Mbps keyframe is many datagrams, tail reassembly = pure latency. `session::stage::parts` implements core contract — parts ordered, `offset` mismatch or new `first` = AU died — reports as loss, freeze-until-reanchor, keyframe request. Per-frame reference (decode, audio latch) skipped if not AU last (piece ≠ frame).
 
-⚠ **NDL has no `PARTIAL_FRAME` flag and no AU-boundary flag at all** — it takes raw Annex-B and must
-be finding boundaries by start code, which is the whole reason to expect a fragmented feed to work,
-and the whole reason it might not. Clamped to NDL v2 (v1's feed carries no timestamp to repeat
-across pieces). Failure mode is visible corruption plus `frame parts:` warnings; there is no toggle,
-so a regression means reverting `Negotiated::clamp`'s `frame_parts`.
+⚠ **NDL has no `PARTIAL_FRAME`/AU-boundary flag** — takes raw Annex-B, finds boundaries by start code (reason fragmented works/might not). NDL v2 only (v1 no timestamp repeat). Corruption+`frame parts:` warnings; no toggle, regression = revert `frame_parts`.
 
-⚠ **Real audio on the plane must carry a lead, or the PICTURE stutters.** The plane's queue depth is
-what NDL's audio renderer paces the video plane against. The offload route makes real packets the
-only feed, and fed straight off the wire they stamp at ≈ the player clock: depth ≈ 0, renderer at
-the edge of underrun, picture stutters on network jitter. Fixed by `PLANE_LEAD_MS` (40 ms), added to
-every real stamp in `play_audio`; the clock plane's fill targets the same figure so neither pushes
-the other's ceiling. NDL takes no depth argument, so a stamp in the future is the only way to ask
-for one. Cost is lip sync, `PLANE_LEAD_MS` behind the picture — walk it down on device against
-`lead` on the overlay's audio line and `plane_lead=` on the video heartbeat, the only places the
-depth is observable.
+⚠ **Real audio on plane must carry lead or PICTURE stutters.** Plane queue depth paces video; offload = real packets only, wire-fed ≈ player clock, depth ≈ 0, renderer edge-underrun, stutter on jitter. Fixed by `PLANE_LEAD_MS` (40ms) added to every stamp in `play_audio`; clock plane targets same, neither pushes ceiling. NDL no depth arg; stamp-future only way. Cost: lip sync `PLANE_LEAD_MS` behind. Walk down vs `lead` overlay audio line/`plane_lead=` heartbeat (only observable places).
 
-- Unknowns, in order: the depth NDL holds on that plane (it is not `render_buffer_length` and there
-  is no query), and whether offload beats software on a set where offload works at all. Both routes
-  are named on the overlay (`Opus SW` / `Opus HW`) and in the `audio path:` log line precisely so a
-  report says which one produced the numbers.
-- Not tried yet: **phase-locked capture** (core has the protocol — `report_phase` +
-  `CLIENT_CAP_PHASE_LOCK` — and the host aligns its capture tick to the client's panel grid, which
-  *reduces* latency instead of buffering against it, but it needs a real vblank anchor and NDL is
-  submit-only); an **adaptive `PLANE_LEAD_MS`** on the offload route.
+- Unknowns: NDL plane depth (not `render_buffer_length`, no query), offload vs software where offload works. Both named overlay (`Opus SW`/`HW`) and log for reporting.
+- Not tried: **phase-locked capture** (core has protocol — `report_phase`+`CLIENT_CAP_PHASE_LOCK` — host aligns capture to panel grid, reduces latency not buffer, needs vblank anchor; NDL submit-only), **adaptive `PLANE_LEAD_MS`** offload.
 
 ## ABR startup probe
 
-**"Automatic" bitrate fires a capacity burst ~2 s into every session, and unbounded on Wi-Fi that
-can cost the session its video entirely** — not a slow start but a flow that never establishes.
-Measured on G5: a "successful" 2 Gbps probe still reported `send_dropped=20211`, i.e. the link
-hammered far past what it can carry (~245 Mbps airlink ceiling). Capped, the same link reports
-`send_dropped=0-167` and stream starts are reliable.
+**"Automatic" fires capacity burst ~2s into session, unbounded on Wi-Fi can cost video entirely** — not slow start, flow never establishes. G5: "successful" 2Gbps probe = `send_dropped=20211` (link hammered past ~245 Mb/s airlink ceiling). Capped, same link `send_dropped=0-167`, reliable starts.
 
-Don't read a slow *start* as this bug — a host compositor coming up has its own startup time. The
-signal that matters is packet drops on the probe and video that never arrives at all.
+Don't read slow start as bug — host compositor has own startup. Matters: probe packet drops+no video.
 
-**The cap is this client's.** `main.rs`'s `set_abr_env` sets `PUNKTFUNK_ABR_PROBE_KBPS` to 320 Mbps
-before anything spawns a thread (`setenv` isn't thread-safe, and core reads it while building its
-data-plane pump) — the connection test's proven-safe target, high enough to clear core's 70 %
-margin and far below the mode-derived ~1.8 Gbps 4K120 target. `PUNKTFUNK_ABR_MAX_MBPS` clamps the
-learned ceiling to the settings slider's 200 Mbps maximum. Host/network signals own the climbs and
-descent; NDL contributes only measured feed backpressure.
+**Cap is client's.** `main.rs` `set_abr_env` sets `PUNKTFUNK_ABR_PROBE_KBPS` to 320Mbps before threads (`setenv` thread-unsafe, core reads while building pump) — connection test proven-safe, clears core 70% margin, far below ~1.8Gbps 4K120 target. `PUNKTFUNK_ABR_MAX_MBPS` clamps learned ceiling to slider's 200Mbps. Host/network owns climbs; NDL contributes measured backpressure.
 
-Blind alleys, so they aren't re-tried:
+Blind alleys:
 
-- `bitrate_kbps == 0` (Automatic) arms **both** the AIMD controller and this probe — the client
-  cannot separate them.
-- `PUNKTFUNK_ABR_PROBE=0` disables the probe but leaves the climb ceiling at the negotiated start
-  rate (~20 Mbps), which core's own comment calls a box "Automatic could NEVER climb out of".
-- Running our own capped probe instead does **not** work: `request_probe` completes, but
-  `abr.set_ceiling` is only called from core's own probe path, so the ceiling never moves. There is
-  no public bitrate/ceiling setter on `NativeClient`.
-- Pinning a fixed bitrate also disarms the probe, but costs mid-session adaptation entirely.
+- `bitrate_kbps == 0` (Automatic) arms both AIMD+probe — can't separate.
+- `PUNKTFUNK_ABR_PROBE=0` disables probe, leaves ceiling at negotiated start (~20 Mbps) — "Automatic could NEVER climb out" (core comment).
+- Own capped probe doesn't work: `request_probe` completes but `set_ceiling` only from core probe path, ceiling never moves. No public setter on `NativeClient`.
+- Fixed bitrate disarms probe, costs mid-session adaptation.
 
 ## Reconnect
 
-A session that ends with `PunktfunkEndReason::Lost` (idle timeout, reset, network) is dialled again
-up to `RECONNECT_ATTEMPTS` (3) times with the same target and settings, a toast up over the emptied
-plane; the host lingers a dropped session for exactly this. Back, the EXIT gesture or a quit gives a
-dial up. Any other end (game exited, host ended, host error, our own stop) goes to the menu. A
-session that streamed a minute earns the budget back.
+Session ending `PunktfunkEndReason::Lost` (idle timeout, reset, network) re-dials up to `RECONNECT_ATTEMPTS` (3) with same target/settings, toast over emptied plane; host lingers for this. Back/EXIT/quit dials. Other ends (game exit, host end, error, stop) → menu. Session ≥1 minute earns budget back.
 
 ## Network speed test quirks
 
-Burst is 320 Mbps / 3 s (not 3 Gbps / 5 s) — the UI thread shares a 3-core Cortex-A9, and an
-unbounded firehose starves the app. 320 still detects any ceiling that would change the clamped
-recommendation (>~285 Mbps); a 400 Mbps burst only raises the shed overshoot (51 % packet loss vs
-38 % at 320). The probe must advertise `VIDEO_CAP_CHACHA20` like a real session (core's
-`bytes_received` increments *after* AEAD decrypt). **~245 Mbps airlink ceiling** measured on G5
-Wi-Fi (MediaTek USB 2.0 Hi-Speed bus), independently confirmed with a raw UDP flood — nothing client
-code can raise. New flows sometimes black-hole 10-29 s (AP/driver setup), so
-`session::probe::run_speed_probe` waits for the first completed video frame (cap 35 s) before
-bursting — plane live, path warm.
+Burst 320 Mbps / 3s (not 3 Gbps / 5s) — 3-core A9 UI starves on unbounded. 320 detects ceiling changes (>~285 Mbps for recommendation); 400 only raises overshoot (51% drop vs 38%). Probe must advertise `VIDEO_CAP_CHACHA20` (core's `bytes_received` after AEAD). **~245 Mbps airlink ceiling** G5 Wi-Fi (MediaTek USB 2.0), UDP flood confirmed — client can't raise. Flows black-hole 10-29s (AP/driver), `run_speed_probe` waits first completed frame (35s cap) before burst — plane live, path warm.
 
 ## Video backend: NDL
 
-NDL DirectMedia is the only backend. NDL has no decode context; calls go through the `NdlVideo::ffi`
-mutex (the header says not thread-safe). AV1 remains disabled (never produced picture).
+NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` mutex (not thread-safe per header). AV1 disabled.
 
-Backpressure: the video pump samples `render_buffer_length` every 500 ms; two samples of ≥ 8 frames
-freeze the feed and ask for a keyframe, exactly the loss path (no flush — a flush restart kills the
-audio plane). Measured sessions sit at 0–1, so this only fires on a real decoder stall.
+Backpressure: pump samples `render_buffer_length` every 500ms; two ≥8-frame samples freeze+keyframe request (loss path, no flush — kills audio). Measured 0-1, fires decoder stall only.
 
-An SMP (Starfish Media Pipeline) backend for webOS 3.5-4.x was built and removed (issue #164): never
-verified on real 3.5-4.x hardware, and it carried a C++ shim `.so`, an ACB sink and a Settings row
-for the whole NDL v1 audience. Those TVs get NDL v1 (H.264/SDR).
+SMP (Starfish Media Pipeline) for webOS 3.5-4.x built+removed (#164): never verified real hardware, C++ shim, ACB sink, Settings row for NDL v1. Those TVs get NDL v1 (H.264/SDR).
 
 ## NDL generations: v2 (webOS 5+) and v1 (3.5-4.x)
 
-- Same library, two ABIs: v2 (`DirectMediaLoad`, `DirectVideoPlay`, `FlushRenderBuffer`,
-  `GetRenderBufferLength`, `SetHDRInfo`) vs v1 (`DirectVideoOpen/SetCallback/SetArea/
-  PlayWithCallback/Close`). webOS 4 has no v2 symbols.
-- **Must `dlopen`, never link** `libNDL_directmedia.so.1`: a `DT_NEEDED` breaks webOS 4 startup
-  under BIND_NOW (fails before `main`). Do not re-add `#[link(name = "NDL_directmedia")]`;
-  `-Wl,-z,lazy` is not an acceptable workaround.
-- Backend generation comes from `device::ndl_generation()` (`sdkVersion`): v1 for `<5`, v2 for `>=5`
-  and unknown. The version selects what to try; `dlsym` is the final authority (no silent fallback).
-- v1 limits: H.264 + SDR/BT.709 only; no input PTS, render-buffer query, flush, or HDR API.
-  **Resolution is not capped here**: decode dimensions are passed through; `1920x1080` in
-  `ndl/v1.rs` is only the display rect from `SetArea`.
-- `NDL_DIRECTVIDEO_DATA_INFO_T` must include `source` (`width,height,source`). Omitting it fed stack
-  garbage into `NDL_DirectVideoOpen`; now explicitly `NONE` (0).
-- The M3/KADP runtime codec patch remains intentionally unused.
+- Same lib, two ABIs: v2 (`DirectMediaLoad`, `Play`, `Flush`, `GetRenderBufferLength`, `SetHDRInfo`) vs v1 (`Open/SetCallback/SetArea/PlayWithCallback/Close`). webOS 4 has no v2.
+- **Must dlopen, never link** `libNDL_directmedia.so.1`: `DT_NEEDED` breaks webOS 4 startup (BIND_NOW fails before `main`). Don't re-add `#[link]`; `-Wl,-z,lazy` not acceptable.
+- Generation from `device::ndl_generation()` (`sdkVersion`): v1 <5, v2 ≥5/unknown. Version selects what to try; `dlsym` final authority (no fallback).
+- v1 limits: H.264+SDR/BT.709 only; no PTS, buffer query, flush, HDR API. Resolution uncapped (pass-through); `1920x1080` in v1.rs = `SetArea` display rect only.
+- `NDL_DIRECTVIDEO_DATA_INFO_T` must include `source` (`width,height,source`). Omit fed stack garbage; now explicit `NONE` (0).
+- M3/KADP runtime codec patch intentionally unused.

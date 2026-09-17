@@ -1,15 +1,12 @@
 version: '3'
 
-# Suppress command echo (like root Taskfile).
 silent: true
 
 vars:
   SDL2_BACKPORT_RELEASE: release-2.30.12-webos.5
   SDL2_BACKPORT_VERSION: 2.30.12
   SDL2_BACKPORT_SONAME: libSDL2-2.0.so.0.3000.12
-  # Fat LTO plus one codegen unit is what inlines core's decrypt/FEC/QUIC loops across crates
-  # (see the root Cargo.toml's `[profile.release]`). `RELEASE_LTO=thin` for a faster local build.
-  RELEASE_LTO: 'fat'
+  # Apt cache persists via removed docker-clean hook (otherwise ephemeral).
   DOCKER_MOUNTS: >-
     -v {{.ROOT_DIR}}:/workspace
     -v punktfunk-webos-toolchains:/workspace/.toolchains
@@ -83,7 +80,6 @@ tasks:
       - cargo install --locked --git https://github.com/webosbrew/ares-cli-rs ares-package
 
   ares-device:
-    # Separate; links SSH/TLS/GTK, slow build, only deploy uses.
     desc: >-
       Install ares-cli-rs device tools (setup-device/install/launch) for deploy,
       if not already on PATH
@@ -131,23 +127,27 @@ tasks:
         mkdir -p dist
         ares-package "$STAGE_DIR" -o dist --force-arch arm
 
+  # Thin LTO in Docker (faster iteration); Fat LTO for native/CI; RELEASE_LTO overrides.
   docker-run:
     internal: true
     requires:
       vars: [TARGET_TASK]
     vars:
-      CODEGEN_UNITS: '{{if eq .RELEASE_LTO "fat"}}1{{else}}16{{end}}'
+      LTO: '{{.RELEASE_LTO | default "thin"}}'
+      CODEGEN_UNITS: '{{if eq .LTO "fat"}}1{{else}}16{{end}}'
     cmds:
       - |
         set -eu
         TTY=""
         [ -t 0 ] && TTY="-it"
         docker run --rm $TTY --platform linux/arm64 -e DEBIAN_FRONTEND=noninteractive \
-          -e CARGO_PROFILE_RELEASE_LTO={{.RELEASE_LTO}} \
+          -e RELEASE_LTO={{.LTO}} \
+          -e CARGO_PROFILE_RELEASE_LTO={{.LTO}} \
           -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS={{.CODEGEN_UNITS}} \
           -e PKG_VERSION={{.PKG_VERSION}} \
           {{.EXTRA_DOCKER}} {{.DOCKER_MOUNTS}} {{.RUST_IMAGE}} \
           sh -c '
+            rm -f /etc/apt/apt.conf.d/docker-clean &&
             apt-get update -qq &&
             apt-get install -y -qq --no-install-recommends apt-utils cmake curl ca-certificates git pkg-config build-essential xz-utils python3 {{.EXTRA_APT}} > /dev/null &&
             if ! command -v task > /dev/null 2>&1; then

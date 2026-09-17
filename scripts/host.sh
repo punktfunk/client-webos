@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs a punktfunk host in a bare ubuntu container (see `task docker:host`):
-# installs the packages as root, then re-execs as `pf` to run the daemons.
+# Install packages as root, re-exec as `pf` to run daemons.
+# Started in background so install doesn't block the client.
 set -eu
 
 REPO="https://git.unom.io/api/packages/unom/debian"
@@ -15,24 +15,23 @@ pkg() { apt-get -y -qq --no-install-recommends "$@" >/dev/null; }
 
 install_as_root() {
   export DEBIAN_FRONTEND=noninteractive
-  rm -f /etc/apt/apt.conf.d/docker-clean  # else the apt cache volume stays empty
+  command -v curl >/dev/null || { pkg update && pkg install ca-certificates curl; }
 
-  pkg update
-  pkg install ca-certificates curl
+  # Host packages are amd64-only; on the arm64 build image they run through the container
+  # runtime's qemu binfmt handler. The list is arch-pinned so apt doesn't ask for arm64.
+  dpkg --add-architecture amd64
   curl -fsSL "$REPO/repository.key" -o "$KEY"
-  echo "deb [signed-by=$KEY] $REPO stable main" >/etc/apt/sources.list.d/punktfunk.list
-  pkg update  # not scoped to that list: apt would prune the Ubuntu indexes as orphaned
+  echo "deb [arch=amd64 signed-by=$KEY] $REPO stable main" >/etc/apt/sources.list.d/punktfunk.list
+  pkg update  # not scoped to that list: apt would prune the Debian indexes as orphaned
   pkg install punktfunk-host punktfunk-web
 
-  # Host identity lives in $HOME, and the host declines to run as root.
+  # Host won't run as root.
   id -u pf >/dev/null 2>&1 || useradd -m pf
-  chown -R pf:pf /home/pf  # the config volume mounts in root-owned
+  chown -R pf:pf /home/pf  # config volume mounts root-owned
 }
 
-# API/library + the console's TLS pair. `serve` snapshots $PAIRED at startup, so a
-# client that pairs later (every `docker:deploy` run has a fresh, ephemeral identity)
-# is written by punktfunk1-host and never seen here — /api/v1/library then 401s and
-# the app shows an empty library. Restart on any change to the pairing list.
+# serve snapshots $PAIRED at startup, so clients pairing later are unseen.
+# Restart on pairing changes to pick up new pairings.
 serve() {
   fingerprint() { cksum "$PAIRED" 2>/dev/null || true; }
   while :; do
@@ -51,8 +50,9 @@ console() {
 }
 
 if [ "$(id -u)" = 0 ]; then
+  SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"  # `su -` resets cwd, so absolutize
   install_as_root
-  exec su - pf -c "$0"
+  exec su - pf -c "$SELF"
 fi
 
 export PUNKTFUNK_MGMT_TOKEN=0000000000000000 PUNKTFUNK_UI_PASSWORD=0000
@@ -64,12 +64,8 @@ console &
 
 echo "console: https://localhost:$CONSOLE_PORT  password: $PUNKTFUNK_UI_PASSWORD"
 
-# `serve` can't stream in a container (no DRM/compositor path); punktfunk1-host takes
-# the stream traffic with synthetic CPU frames, so pairing and playback still work.
-# No --allow-tofu: it admits the client without persisting a pairing, so `serve`'s mTLS
-# library API still 401s ("not paired"). --allow-pairing keeps the PIN ceremony armed for
-# good — the console's Pairing page arms only `serve`'s plane (9778), so a knock on this
-# process's 9777 never shows up there and the startup arming just times out.
+# serve can't stream in container (no DRM/compositor); use synthetic frames for stream.
+# --allow-tofu doesn't persist pairing so serve's mTLS library API 401s; --allow-pairing needed.
 exec punktfunk-host punktfunk1-host \
   --source synthetic \
   --allow-pairing \
