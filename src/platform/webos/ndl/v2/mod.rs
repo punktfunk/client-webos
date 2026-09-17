@@ -5,9 +5,9 @@
 //! (v1 can't; see [`super::v1`]). Handle and video feed here; [`load`] holds pipeline prerequisites,
 //! [`plane`] holds the audio pace reference.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -24,6 +24,44 @@ pub use plane::OPUS_51_SILENCE;
 
 use plane::PLANE_CONFIRM_GRACE;
 
+/// How long every frame must be refused before the pipeline counts as gone. A re-anchor after
+/// loss has its frames back within a round trip; a plane the TV took for itself does not come
+/// back while it holds it. Generous on purpose — a panel sitting over the stream for a moment
+/// must cost the picture, never the session.
+const DEAD_AFTER_REFUSED: Duration = Duration::from_secs(10);
+
+/// How long the pipeline has been refusing every frame, as ns-since-load of the streak's first
+/// refusal (0 = frames are landing).
+///
+/// NDL only latches [`super::FATAL`] for the one state measured to kill a load, and deliberately
+/// refuses to read an unmapped state as fatal. A pipeline whose resources the TV reclaimed can
+/// therefore die with no callback anyone can name, and the feeds are then the only evidence.
+#[derive(Default)]
+struct RefusalStreak(AtomicU64);
+
+impl RefusalStreak {
+    /// Records one feed at `now_ns` (ns since load). The streak keeps its FIRST refusal, since
+    /// its age is what [`Self::len`] answers with.
+    fn note(&self, fed: bool, now_ns: u64) {
+        if fed {
+            self.0.store(0, Ordering::Relaxed);
+        } else {
+            // `max(1)` so a refusal in the first ns of a load still reads as a streak.
+            let _ = self
+                .0
+                .compare_exchange(0, now_ns.max(1), Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+
+    /// How long every feed has failed for; zero while any is landing.
+    fn len(&self, now_ns: u64) -> Duration {
+        match self.0.load(Ordering::Relaxed) {
+            0 => Duration::ZERO,
+            since => Duration::from_nanos(now_ns.saturating_sub(since)),
+        }
+    }
+}
+
 /// One loaded NDL v2 video decode session. Dropping unloads it (not `NDL_DirectMediaQuit`).
 pub struct NdlVideo {
     fns: &'static ffi::V2,
@@ -36,6 +74,8 @@ pub struct NdlVideo {
     load_instant: Instant,
     /// Audio plane for this session (picture paces against it). Fixed for session life.
     audio: bool,
+    /// Whether the pipeline is still taking frames — see [`RefusalStreak`].
+    refused: RefusalStreak,
     /// Highest audio stamp fed (ms); shared by [`Self::play_audio`] and clock plane to prevent
     /// backward timestamps (NDL reads rewind as seek, mutes session). A floor (never driver):
     /// feeders target player clock + [`PLANE_LEAD_MS`], so the ceiling stays one lead ahead of
@@ -86,7 +126,9 @@ impl NdlVideo {
         let pts_ms = (pts_ns / 1_000_000) as i64;
         let first_frame = {
             let _ffi = lock_ffi();
-            self.fns.video_play(au, pts_ms)?;
+            let fed = self.fns.video_play(au, pts_ms);
+            self.refused.note(fed.is_ok(), self.elapsed_ns());
+            fed?;
             mark_frame_fed_logged("NDL", self.load_instant)
         };
         // Outside the FFI guard — `replay_pending_hdr` takes it again, and it isn't reentrant.
@@ -178,7 +220,53 @@ impl VideoSink for std::sync::Arc<NdlVideo> {
             .then(|| Self::clone(self) as std::sync::Arc<dyn AudioPlane>)
     }
 
+    /// The named fatal state, or a pipeline that has taken nothing for [`DEAD_AFTER_REFUSED`]:
+    /// a reclaimed plane can refuse every frame without ever reporting a state anyone can name,
+    /// and the session must end rather than sit on a picture that cannot come back.
     fn is_dead(&self) -> bool {
+        let refused = self.refused.len(self.elapsed_ns());
+        if refused > DEAD_AFTER_REFUSED {
+            tracing::error!("NDL refused every frame for {refused:?} — the pipeline is gone");
+            return true;
+        }
         super::fatal()
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::{RefusalStreak, DEAD_AFTER_REFUSED};
+
+    const S: u64 = 1_000_000_000;
+
+    /// A streak times from its first refusal, and one accepted frame ends it.
+    #[test]
+    fn only_an_unbroken_streak_ages() {
+        let streak = RefusalStreak::default();
+        assert_eq!(
+            streak.len(S),
+            std::time::Duration::ZERO,
+            "nothing fed yet is not a refusal"
+        );
+        streak.note(false, S);
+        streak.note(false, 5 * S);
+        assert_eq!(
+            streak.len(11 * S).as_secs(),
+            10,
+            "aged from the FIRST refusal, not the last"
+        );
+        assert!(
+            streak.len(11 * S) <= DEAD_AFTER_REFUSED,
+            "the ceiling itself is not yet dead"
+        );
+        assert!(streak.len(12 * S) > DEAD_AFTER_REFUSED);
+        streak.note(true, 12 * S);
+        assert_eq!(
+            streak.len(30 * S),
+            std::time::Duration::ZERO,
+            "one accepted frame clears it"
+        );
+        streak.note(false, 31 * S);
+        assert!(streak.len(32 * S) < DEAD_AFTER_REFUSED, "a fresh streak starts over");
     }
 }
