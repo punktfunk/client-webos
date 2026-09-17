@@ -383,6 +383,31 @@ pub fn poison() -> LeakGuard {
     LeakGuard(())
 }
 
+/// The latest session teardown running off the UI thread, so the menu comes back at once.
+static TEARDOWN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// Runs `teardown` (which ends in its own `quit()`) on a background thread, after any earlier one.
+/// NDL init and process exit wait for it through [`await_teardown`], so an unload never races a load.
+pub fn defer_teardown(teardown: impl FnOnce() + Send + 'static) {
+    let mut slot = TEARDOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    let prev = slot.take();
+    *slot = Some(std::thread::spawn(move || {
+        if let Some(prev) = prev {
+            let _ = prev.join();
+        }
+        teardown();
+    }));
+}
+
+/// Blocks until a [`defer_teardown`] still in flight has finished. Bounded: every join in a
+/// session teardown has a timeout.
+pub fn await_teardown() {
+    let handle = TEARDOWN.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+}
+
 /// Checked early by `session::connect` to avoid holding a host slot for a connect that can only fail.
 pub fn ensure_not_poisoned() -> Result<()> {
     // Cancelled media init must complete before another load.
@@ -401,6 +426,8 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 /// prototypes: `api2` picks the app-id-only form v2 declares, against v1's app id plus
 /// resource-released callback (always NULL here). See [`ffi::Common`].
 fn ensure_init(app_id: &str, api2: bool) -> Result<()> {
+    // The last session may still be unloading behind the menu.
+    await_teardown();
     if INIT_DONE.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -456,7 +483,8 @@ pub fn app_id() -> String {
     std::env::var("APPID").unwrap_or_else(|_| "io.unom.punktfunk.client-webos".into())
 }
 
-/// Process-wide NDL teardown — call once at exit, after every decode session has dropped.
+/// Process-wide NDL teardown, after every decode session has dropped. Session exits reach it
+/// through [`defer_teardown`].
 pub fn quit() {
     if !INIT_DONE.swap(false, Ordering::SeqCst) {
         return;

@@ -91,6 +91,15 @@ impl Connected {
         );
         clean
     }
+
+    /// [`Self::shutdown`], then the NDL unload unless a thread is wedged inside it.
+    pub fn shutdown_and_quit(self) {
+        if self.shutdown() {
+            crate::platform::webos::ndl::quit();
+        } else {
+            tracing::warn!("session teardown timed out — skipping NDL unload for this run");
+        }
+    }
 }
 
 /// Everything [`connect`] needs from the chosen target and the user's settings.
