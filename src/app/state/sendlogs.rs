@@ -108,7 +108,11 @@ fn post_log(target: &HostTarget) -> Result<String, String> {
     // The run that crashed is the one before this one — a tester relaunches before reporting,
     // which rotates it out of the active log. Both travel, so neither case needs the other file.
     let previous = crate::logger::previous_log_file(&dir);
-    let budget = if previous.is_some() { MAX_LOG_BYTES / 2 } else { MAX_LOG_BYTES };
+    let budget = if previous.is_some() {
+        MAX_LOG_BYTES / 2
+    } else {
+        MAX_LOG_BYTES
+    };
     let path = crate::logger::latest_log_file(&dir).ok_or("No logs to send yet.")?;
     let log = log_tail(&path, budget)?;
     let previous = previous
