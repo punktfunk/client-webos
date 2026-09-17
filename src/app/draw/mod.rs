@@ -219,6 +219,17 @@ pub(crate) fn sk(r: ui::render::Rect) -> Rect {
     Rect::from_xywh(r.x() as f32, r.y() as f32, r.width() as f32, r.height() as f32)
 }
 
+/// Scales `r` by `s` about its center, in float space. The integer `scale_about` rounds
+/// each edge separately per frame, which makes an animated pop wobble.
+pub(crate) fn scale_rect(r: Rect, s: f32) -> Rect {
+    Rect::from_xywh(
+        r.center_x() - r.width() * s / 2.0,
+        r.center_y() - r.height() * s / 2.0,
+        r.width() * s,
+        r.height() * s,
+    )
+}
+
 /// The frame's ground: the shared palette's own, flat. The console draws an aurora field
 /// over the same colour; a pointer UI with a grid of covers wants it quiet.
 pub(crate) fn ground() -> skia_safe::Color4f {

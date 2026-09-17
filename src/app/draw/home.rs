@@ -14,7 +14,7 @@ use skia_safe::{
     Rect,
 };
 
-use super::{alpha_layer, focus_face, line_h, linear, panel, sk, with_pop, Frame};
+use super::{alpha_layer, focus_face, line_h, linear, panel, scale_rect, sk, with_pop, Frame};
 use crate::app::draw::glass;
 use crate::app::grid::{Entrance, GridLayout};
 use crate::app::hosts::HostEntry;
@@ -22,7 +22,7 @@ use crate::app::state::cardmenu::CardMenuRow;
 use crate::app::{hero, view, App, HomeFocus, Screen, CARD_GROWTH, LAUNCH_GROWTH, STATUS_BG_PAD};
 use crate::core::model::GameEntry;
 use crate::ui;
-use crate::ui::animation::{anim_frac, anim_frac_smooth, pop_in_rect, zoom_rect, CARD_FOCUS_POP, CARD_MENU_RISE};
+use crate::ui::animation::{anim_frac, anim_frac_smooth, pop_in_scale, zoom_scale, CARD_FOCUS_POP, CARD_MENU_RISE};
 use crate::ui::widgets::{SIDEBAR_PAD, SIDEBAR_W};
 
 /// The old SDL font sizes, px at 1080p; scaled by the frame height like they were.
@@ -195,12 +195,14 @@ fn paint_card_strip(f: &Frame<'_>, title: &str, r: Rect, pop: f32, shown: f32, m
             );
             let lit = m.focus.is_some_and(|(focused, _)| focused == i);
             if lit {
-                let popped = zoom_rect(
-                    super::ui_rect(row),
-                    m.focus.map_or(1.0, |(_, progress)| progress),
-                    ui::animation::FOCUS_GROWTH,
+                let popped = scale_rect(
+                    row,
+                    zoom_scale(
+                        m.focus.map_or(1.0, |(_, progress)| progress),
+                        ui::animation::FOCUS_GROWTH,
+                    ),
                 );
-                c.draw_rrect(rr(sk(popped)), &theme::fill(theme::accent(0.9 * pop)));
+                c.draw_rrect(rr(popped), &theme::fill(theme::accent(0.9 * pop)));
             }
             let tone = if lit { theme::on_accent() } else { theme::fg(0.6 * pop) };
             let (mark, label) = match kind {
@@ -573,7 +575,7 @@ impl App {
             if alpha <= 0.0 {
                 continue;
             }
-            let r = sk(pop_in_rect(card_rect(idx), pop, shrink));
+            let r = scale_rect(sk(card_rect(idx)), pop_in_scale(pop, shrink));
             draw_card_shadow(c, r, 0.45 * alpha);
             self.poster(f, r, game, alpha);
             self.running_dot(f, r, game, alpha);
@@ -716,7 +718,7 @@ impl App {
         let c = f.canvas;
         let focus = anim_frac_smooth(self.render.focus_anim, CARD_FOCUS_POP);
         let (pop, shrink) = Entrance::progress_of(self.render.grid.arrivals.pop(&game.id), now);
-        let r = sk(pop_in_rect(zoom_rect(base, focus, CARD_GROWTH), pop, shrink));
+        let r = scale_rect(sk(base), zoom_scale(focus, CARD_GROWTH) * pop_in_scale(pop, shrink));
         // Glow first — a halo behind the card, blooming over the whole travel.
         draw_focus_glow(c, r, 0.85 * focus * pop);
         draw_card_shadow(c, r, 0.5 * pop);
@@ -775,7 +777,7 @@ impl App {
                 .and_then(|idx| Some((idx, layout.card_at(&self.library.games, idx)?)))
             {
                 let base = view::home::scrolled_card_rect(game.0, grid_x, available_w, layout, self.render.grid.scroll);
-                self.poster(f, sk(zoom_rect(base, frac, LAUNCH_GROWTH)), game.1, 1.0);
+                self.poster(f, scale_rect(sk(base), zoom_scale(frac, LAUNCH_GROWTH)), game.1, 1.0);
             }
             c.draw_rect(
                 Rect::from_xywh(0.0, 0.0, f.w, f.h),
