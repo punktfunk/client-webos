@@ -39,9 +39,7 @@ impl Drop for PendingConnect {
         std::thread::spawn(move || {
             if let Ok(Ok(connected)) = handle.join() {
                 connected.disconnect_quit();
-                if connected.shutdown() {
-                    crate::platform::webos::ndl::quit();
-                }
+                connected.shutdown_and_quit();
             }
             drop(guard);
         });

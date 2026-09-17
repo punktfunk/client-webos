@@ -321,11 +321,7 @@ pub(super) fn run_inner() -> Result<()> {
                             // loaded decoder now needs.
                             tracing::error!("audio player init failed: {e:#}");
                             connected.disconnect_quit();
-                            if connected.shutdown() {
-                                crate::platform::webos::ndl::quit();
-                            } else {
-                                tracing::warn!("session teardown timed out — skipping NDL unload for this run");
-                            }
+                            connected.shutdown_and_quit();
                             cursor.set_captured(false);
                             cursor.flush(canvas.window());
                             menu_status = Some(format!("Couldn't start audio: {e:#}"));
@@ -1117,27 +1113,30 @@ pub(super) fn run_inner() -> Result<()> {
                 slot.extras = pad_session::Extras::default();
                 let _ = slot.pad.set_rumble(0, 0, 0);
             }
-            if let Some(handle) = pad_audio_thread.take() {
-                connected.stop.store(true, Ordering::Relaxed);
-                let _ = handle.join();
-            }
-            // Stop feeding before the transport goes away, and drop the device with it. Ordered ahead
-            // of `shutdown()` only for tidiness — the feed thread also exits on the session's stop flag
-            // and on the audio plane closing, and a late `try_send` into a dropped ring is a no-op.
-            if let Some((player, feed_thread)) = audio {
-                connected.stop_audio_feed(feed_thread);
-                drop(player);
-            }
-            // `shutdown()` joins the video thread and drops `client` so the QUIC close frame
-            // actually sends. `false` means a teardown thread is wedged in FFI — skip the NDL
-            // unload rather than race it, and accept the leak for this run.
-            if connected.shutdown() {
-                crate::platform::webos::ndl::quit();
-            } else {
-                tracing::warn!("session teardown timed out — skipping NDL unload for this run");
-            }
-            // Put the TV's picture/sound modes back (no-op unless game mode switched them).
-            crate::platform::webos::game_mode::restore(restore_tv_modes);
+            // Stopping the threads, the QUIC close and the NDL unload take a second or two; the
+            // menu comes back now and they finish behind it. The next load waits for them.
+            connected.stop.store(true, Ordering::Relaxed);
+            // The SDL device stays on this thread; its feed thread joins with the rest. A late
+            // `try_send` into the dropped ring is a no-op.
+            let audio_feed = audio.map(|(_player, feed_thread)| feed_thread);
+            crate::platform::webos::ndl::defer_teardown(move || {
+                if let Some(handle) = pad_audio_thread {
+                    crate::services::join::join_with_timeout(
+                        handle,
+                        crate::services::join::SHUTDOWN_JOIN_TIMEOUT,
+                        "pad-audio",
+                        || (),
+                    );
+                }
+                if let Some(feed_thread) = audio_feed {
+                    connected.stop_audio_feed(feed_thread);
+                }
+                // Joins the video thread and drops `client` so the QUIC close frame actually sends.
+                connected.shutdown_and_quit();
+                // Put the TV's picture/sound modes back (no-op unless game mode switched them).
+                crate::platform::webos::game_mode::restore(restore_tv_modes);
+                tracing::info!("session torn down");
+            });
             cursor.set_captured(false);
             cursor.flush(canvas.window());
             // A lost link is dialled again with the same target and settings, the toast up over
@@ -1175,6 +1174,7 @@ pub(super) fn run_inner() -> Result<()> {
     // has already torn down whatever session it had, which is the ordering this action needs:
     // the host refuses a cert-lane power action while a session is live. Blocking, because the
     // process is ending — a request abandoned mid-flight does nothing.
+    crate::platform::webos::ndl::await_teardown();
     if let Some(plan) = exit_plan {
         plan.run();
     }
