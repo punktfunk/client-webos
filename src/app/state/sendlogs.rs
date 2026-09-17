@@ -66,17 +66,17 @@ pub(crate) struct HostTarget {
     pub(crate) pin: [u8; 32],
 }
 
-/// Reads the newest [`MAX_LOG_BYTES`], dropping any partial leading line.
-fn log_tail(path: &Path) -> Result<String, String> {
+/// Reads the newest `budget` bytes, dropping any partial leading line.
+fn log_tail(path: &Path, budget: u64) -> Result<String, String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let unreadable = |e: std::io::Error| format!("Couldn't read the log file: {e}");
     let mut f = std::fs::File::open(path).map_err(unreadable)?;
     let len = f.metadata().map_err(unreadable)?.len();
-    let truncated = len > MAX_LOG_BYTES;
+    let truncated = len > budget;
     if truncated {
-        f.seek(SeekFrom::End(-(MAX_LOG_BYTES as i64))).map_err(unreadable)?;
+        f.seek(SeekFrom::End(-(budget as i64))).map_err(unreadable)?;
     }
-    let mut raw = Vec::with_capacity(len.min(MAX_LOG_BYTES) as usize);
+    let mut raw = Vec::with_capacity(len.min(budget) as usize);
     f.read_to_end(&mut raw).map_err(unreadable)?;
     // The seek may land within a UTF-8 character, so conversion remains lossy.
     let from = if truncated {
@@ -104,10 +104,20 @@ pub(crate) fn upload_to_host(target: &HostTarget) -> Result<String, String> {
 }
 
 fn post_log(target: &HostTarget) -> Result<String, String> {
-    let path = crate::logger::latest_log_file(&crate::services::store::app_dir()).ok_or("No logs to send yet.")?;
-    let log = log_tail(&path)?;
+    let dir = crate::services::store::app_dir();
+    // The run that crashed is the one before this one — a tester relaunches before reporting,
+    // which rotates it out of the active log. Both travel, so neither case needs the other file.
+    let previous = crate::logger::previous_log_file(&dir);
+    let budget = if previous.is_some() { MAX_LOG_BYTES / 2 } else { MAX_LOG_BYTES };
+    let path = crate::logger::latest_log_file(&dir).ok_or("No logs to send yet.")?;
+    let log = log_tail(&path, budget)?;
+    let previous = previous
+        .filter(|p| *p != path)
+        .and_then(|p| log_tail(&p, budget).ok())
+        .map(|tail| format!("--- previous run ---\n{tail}\n--- this run ---\n"))
+        .unwrap_or_default();
     let body = format!(
-        "punktfunk-webos {} (webos {}) — client log bundle\n{log}",
+        "punktfunk-webos {} (webos {}) — client log bundle\n{previous}{log}",
         crate::core::VERSION,
         std::env::consts::ARCH,
     );

@@ -176,6 +176,32 @@ fn is_log_file(path: &Path) -> bool {
                 .is_some_and(|rotation| rotation.parse::<usize>().is_ok()))
 }
 
+/// The run before this one (`base.log.1`), if it has any lines. A crash is only ever in here:
+/// relaunching to report it rotates the run that crashed out of the active log.
+pub fn previous_log_file(app_dir: &Path) -> Option<PathBuf> {
+    let path = numbered(&log_file_path(app_dir), 1);
+    path.metadata().is_ok_and(|m| m.len() > 0).then_some(path)
+}
+
+#[cfg(test)]
+mod previous_run_tests {
+    use super::{log_file_path, numbered, previous_log_file};
+
+    /// A relaunch rotates the crashed run to `.1`, and that is the file a report needs.
+    #[test]
+    fn the_rotated_run_is_found_and_an_empty_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("pf-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = numbered(&log_file_path(&dir), 1);
+        assert_eq!(previous_log_file(&dir), None, "nothing rotated yet");
+        std::fs::write(&first, "").unwrap();
+        assert_eq!(previous_log_file(&dir), None, "an empty rotation is no log");
+        std::fs::write(&first, "panicked at stream.rs\n").unwrap();
+        assert_eq!(previous_log_file(&dir), Some(first));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 /// Returns the non-empty active log, otherwise the newest version or rotation.
 /// The active log wins because renaming preserves a rotated file's newer mtime.
 pub fn latest_log_file(app_dir: &Path) -> Option<PathBuf> {
