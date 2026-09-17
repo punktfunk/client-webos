@@ -33,6 +33,22 @@ const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 /// link that keeps failing, not for every drop in an evening.
 const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
 
+/// Whether a cosmetic frame drew, warning once per streak. webOS composites this app's
+/// punch-through plane only while it holds the SAM foreground, so a TV panel over the stream —
+/// the settings one the remote opens — fails every GL call on this surface until it closes. That
+/// has to freeze the overlay and nothing else: these calls sit in the stream loop, whose `Err`
+/// leaves `run_inner` and ends the process.
+fn overlay_drawn(result: Result<()>, warned: &mut bool) -> bool {
+    let Err(e) = result else {
+        *warned = false;
+        return true;
+    };
+    if !std::mem::replace(warned, true) {
+        tracing::warn!("overlay frame skipped — this surface is not ours to draw on: {e:#}");
+    }
+    false
+}
+
 /// Puts the reconnect toast up over the emptied video plane and starts dial `attempt`.
 fn redial(
     attempt: u8,
@@ -45,9 +61,10 @@ fn redial(
 ) -> Result<crate::runtime::PendingConnect> {
     tracing::warn!("connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
     let text = format!("Connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
-    overlay::frame(gl, canvas, fonts, display, overlay::TRANSPARENT, |f| {
+    let frame = overlay::frame(gl, canvas, fonts, display, overlay::TRANSPARENT, |f| {
         overlay::toast(f, &text, 1.0);
-    })?;
+    });
+    overlay_drawn(frame, &mut false);
     std::thread::sleep(RECONNECT_PAUSE);
     spawn_connect(identity.clone(), dial.0.clone(), dial.1.clone())
 }
@@ -436,6 +453,8 @@ pub(super) fn run_inner() -> Result<()> {
             // Transient toasts. `overlay_was_active` catches the fade-out edge so the canvas gets
             // wiped once; `stats_dst`/`log_dst` recomposite each frame at their own slower cadence.
             let mut notif = overlay::Notification::new();
+            // One line per streak of undrawable frames — see `overlay_drawn`.
+            let mut overlay_warned = false;
             // When the current freeze-until-reanchor hold began (`stats.holding`, see `session::pump`),
             // and whether it has been announced — see `HOLD_TOAST_AFTER`.
             let mut hold_since: Option<Instant> = None;
@@ -973,7 +992,7 @@ pub(super) fn run_inner() -> Result<()> {
                 if dialog_frame.is_some() && disconnect.redraw_due(dialog_animating) {
                     // Own pass over the punch-through video: the dialog alone, on a transparent
                     // clear (NDL video is on a hardware plane below this surface, so no blur).
-                    overlay::frame(
+                    let frame = overlay::frame(
                         &mut console_gl,
                         &canvas,
                         &overlay_fonts,
@@ -982,7 +1001,8 @@ pub(super) fn run_inner() -> Result<()> {
                         |f| {
                             disconnect.draw(f);
                         },
-                    )?;
+                    );
+                    overlay_drawn(frame, &mut overlay_warned);
                 } else if dialog_frame.is_none() && dialog_animating {
                     // Close-fade just finished. Confirmed Disconnect: break now, nothing to wipe
                     // since the pre-stream UI takes the canvas next.
@@ -990,7 +1010,8 @@ pub(super) fn run_inner() -> Result<()> {
                         break 'running outcome;
                     }
                     // Cancel/Back: wipe the last frame so it doesn't stick over the video.
-                    overlay::wipe(&mut console_gl, &canvas, &overlay_fonts)?;
+                    let wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
+                    overlay_drawn(wipe, &mut overlay_warned);
                 }
                 // Audio drains on its own threads either way now — the software path on
                 // `session::pump`'s feed thread into SDL's audio callback, the offloaded path on
@@ -1023,9 +1044,12 @@ pub(super) fn run_inner() -> Result<()> {
                 let overlay_active = stats_alpha.is_some() || log_alpha.is_some() || notif_active || ring_visible;
                 if overlay_was_active && !overlay_active {
                     // Nothing else clears this window — the faded-out card would stick otherwise.
-                    overlay::wipe(&mut console_gl, &canvas, &overlay_fonts)?;
+                    // A wipe that could not draw stays owed, so the next tick tries it again.
+                    let wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
+                    overlay_was_active = !overlay_drawn(wipe, &mut overlay_warned);
+                } else {
+                    overlay_was_active = overlay_active;
                 }
-                overlay_was_active = overlay_active;
                 // A fade in flight needs frequent frames; steady-state stats/log are fine at ~2Hz.
                 let fading = notif_active || stats_fade.is_animating() || log_fade.is_animating();
                 let redraw_interval = if fading {
@@ -1055,7 +1079,7 @@ pub(super) fn run_inner() -> Result<()> {
                     if let Some(lines) = log_overlay_lines() {
                         log_lines = lines;
                     }
-                    overlay::frame(
+                    let frame = overlay::frame(
                         &mut console_gl,
                         &canvas,
                         &overlay_fonts,
@@ -1075,7 +1099,8 @@ pub(super) fn run_inner() -> Result<()> {
                                 ring.render(f.canvas, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
                             }
                         },
-                    )?;
+                    );
+                    overlay_drawn(frame, &mut overlay_warned);
                 }
                 // The decoder is gone for this load (`core::media::VideoSink::is_dead`, set by the
                 // pump). The transport is still healthy, so nothing below would ever end the session
