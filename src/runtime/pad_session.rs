@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::pads::{Pads, Slot};
 use crate::platform::webos::dualsense::{self, Feedback, Link};
 use crate::platform::webos::{gamepad, usb_audio};
+use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::services::store::{GamepadType, Settings};
 use crate::session::pad_audio::{self, Envelope, Envelopes};
 use crate::session::Connected;
@@ -33,6 +34,25 @@ pub(super) struct Extras {
 }
 
 impl Extras {
+    /// Hands this pad back before the caller takes it again, waiting — but never past
+    /// [`SHUTDOWN_JOIN_TIMEOUT`]. The wait is what keeps a new link from racing the release of the
+    /// old one; the ceiling is because that release rides Bluetooth replies and a card write, and
+    /// this runs on the stream loop. Past the ceiling the handback finishes on its own thread.
+    pub(super) fn hand_back(&mut self) {
+        // As `retire`: unfiled here, because the index is taken again as soon as this returns.
+        self.audio = None;
+        let extras = std::mem::take(self);
+        if extras.feedback.is_none() && extras.usb_audio.is_none() {
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("pad-handback".into())
+            .spawn(move || drop(extras));
+        if let Ok(handle) = spawned {
+            join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT, "pad-handback", || ());
+        }
+    }
+
     /// Unfiles this pad's audio now and finishes handing it back on a thread of its own.
     pub(super) fn retire(&mut self) {
         // Unfiled here, not on the thread: the index may be taken again before that thread runs.
@@ -109,7 +129,7 @@ pub(super) fn bring_up(
 ) {
     let Some(slot) = pads.get_mut(id) else { return };
     // Hands back whatever link this pad held before, so the new one does not race it.
-    slot.extras = Extras::default();
+    slot.extras.hand_back();
     let link = if slot.is_dualsense(setting) {
         let link = dualsense::link_for(slot.path.as_deref(), slot.serial.as_deref());
         if link.is_none() {
