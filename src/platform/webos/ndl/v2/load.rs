@@ -128,6 +128,7 @@ impl NdlVideo {
             fns,
             load_instant,
             audio: audio.is_some(),
+            refused: Default::default(),
             last_audio_pts_ms: AtomicI64::new(primed_pts_ms),
             extra_lead_ms: AtomicI64::new(0),
             feed_unblocked: AtomicBool::new(confirmed),
