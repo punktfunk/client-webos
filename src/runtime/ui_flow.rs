@@ -119,6 +119,7 @@ pub(super) fn run_ui_flow(
     // The page a frosted modal card sits on, sharp and blurred, held across frames — see the
     // frame block.
     let mut page: Option<crate::app::draw::glass::Page> = None;
+    let mut page_refresh = crate::ui::backdrop::BackdropRefresh::default();
     let mut drawable_size = canvas.window().drawable_size();
     let mut backdrop_was_moving = false;
     'ui: loop {
@@ -365,13 +366,21 @@ pub(super) fn run_ui_flow(
             dirty = true;
         }
         let (app_animating, backdrop_changed) = app.tick_animations();
+        let modal_motion = app.modal_animating() || quit_dialog_animating;
+        // The idle wait wakes every tick, so a deferred refresh still fires once due.
         let animating = app_animating
+            || page_refresh.due(Instant::now(), modal_motion)
             || backdrop_was_moving
             || !app.render.grid.reveal.is_revealed()
             || quit_dialog_animating
             || notif_frame.is_some();
         let (dw, dh) = canvas.window().drawable_size();
-        dirty |= drawable_size != (dw, dh);
+        if drawable_size != (dw, dh) {
+            dirty = true;
+            page = None;
+            // A dropped page must rebuild this frame, not wait out the refresh interval.
+            page_refresh = Default::default();
+        }
         drawable_size = (dw, dh);
         let log_overlay_due = log_overlay_state() != LogOverlayState::Off
             && log_overlay_last.is_none_or(|t| t.elapsed() >= Duration::from_millis(500));
@@ -384,6 +393,9 @@ pub(super) fn run_ui_flow(
             continue;
         }
         let backdrop_dirty = dirty || backdrop_changed || backdrop_was_moving || !app.render.grid.reveal.is_revealed();
+        if backdrop_dirty {
+            page_refresh.invalidate();
+        }
         backdrop_was_moving = backdrop_changed;
         dirty = false;
         // Publish the palette before clearing or caching any pixels from this frame.
@@ -414,23 +426,27 @@ pub(super) fn run_ui_flow(
                 let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
                 app.draw_home(&frame, dt);
             }
-            // The card's frosted backdrop, refreshed whenever the page behind it moves, but
-            // held still for the length of an open or close fade. A refresh is expensive: the
-            // modal layer draws into this surface straight after, so `image_snapshot_with_bounds`
-            // makes copy-on-write copy the whole framebuffer, and the blur runs on top of that.
-            // Page motion that outlives the press which opened the card — the focus pop, the
-            // running-dot pulse, a card pop still settling — kept landing on scattered frames
-            // mid-fade and paying it there. One blur covers a whole fade; the page cannot move
-            // far underneath a card in ~200ms. Dropped and rebuilt inside the one frame, so no
-            // frame draws a card without a backdrop, and released outright once none is up.
+            // Coalesce refreshes through row arrivals as well as the 75ms panel fade,
+            // but keep updating a moving background even during sustained interaction.
             let card_up = app.modal_visible() || quit_dialog_active;
-            if !card_up || (backdrop_dirty && !app.modal_fading()) {
-                page = None;
-            }
+            // advance_frame may have started a transition since the redraw gate.
+            let modal_motion = app.modal_animating() || quit_dialog_animating;
             if card_up && page.is_none() {
+                page_refresh.invalidate();
+            }
+            if !card_up {
+                page = None;
+                page_refresh = Default::default();
+            } else if page_refresh.due(Instant::now(), modal_motion) {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
                 let sigma = crate::app::draw::glass::page_sigma(display_mode.h as u32, dh);
-                page = snap.and_then(|snap| crate::app::draw::glass::Page::capture(surface.canvas(), &snap, sigma));
+                // Allocation failure must not turn an existing glass card opaque.
+                let captured =
+                    snap.and_then(|snap| crate::app::draw::glass::Page::capture(surface.canvas(), &snap, sigma));
+                page_refresh.complete(Instant::now(), captured.is_some());
+                if let Some(captured) = captured {
+                    page = Some(captured);
+                }
             }
             let c = surface.canvas();
             let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)

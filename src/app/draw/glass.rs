@@ -25,7 +25,8 @@ pub(crate) fn page_sigma(layout_h: u32, drawable_h: u32) -> f32 {
 /// Blur `image` at half resolution into an offscreen compatible with `canvas`, so a GPU page
 /// stays on the GPU. The offscreen is not pooled: the snapshot outlives the call by frames, and
 /// drawing into a surface it still references would cost the full copy-on-write this avoids.
-pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) -> Option<skia_safe::Image> {
+/// `sigma` is in page pixels; `size` is the half-resolution output.
+fn blur_image(canvas: &Canvas, image: &skia_safe::Image, size: (i32, i32), sigma: f32) -> Option<skia_safe::Image> {
     let sigma = sigma / DOWNSCALE as f32;
     let mut p = theme::layer();
     p.set_image_filter(skia_safe::image_filters::blur(
@@ -34,11 +35,19 @@ pub(crate) fn blur_image(canvas: &Canvas, image: &skia_safe::Image, sigma: f32) 
         None,
         None,
     )?);
-    half_res(canvas, image, &p)
+    filter_image(canvas, image, size, &p)
 }
 
-fn half_res(canvas: &Canvas, image: &skia_safe::Image, p: &skia_safe::Paint) -> Option<skia_safe::Image> {
-    let (w, h) = ((image.width() / DOWNSCALE).max(1), (image.height() / DOWNSCALE).max(1));
+fn half_size(image: &skia_safe::Image) -> (i32, i32) {
+    ((image.width() / DOWNSCALE).max(1), (image.height() / DOWNSCALE).max(1))
+}
+
+fn filter_image(
+    canvas: &Canvas,
+    image: &skia_safe::Image,
+    (w, h): (i32, i32),
+    p: &skia_safe::Paint,
+) -> Option<skia_safe::Image> {
     let mut surface = canvas.new_surface(&canvas.image_info().with_dimensions((w, h)), None)?;
     surface
         .canvas()
@@ -55,10 +64,11 @@ pub(crate) struct Page {
 
 impl Page {
     pub(crate) fn capture(canvas: &Canvas, snapshot: &skia_safe::Image, sigma: f32) -> Option<Self> {
-        Some(Self {
-            sharp: half_res(canvas, snapshot, &theme::layer())?,
-            blurred: blur_image(canvas, snapshot, sigma)?,
-        })
+        let size = half_size(snapshot);
+        let sharp = filter_image(canvas, snapshot, size, &theme::layer())?;
+        // Share the downsample with the rim instead of sampling the full page twice.
+        let blurred = blur_image(canvas, &sharp, size, sigma)?;
+        Some(Self { sharp, blurred })
     }
 
     pub(crate) fn backdrop(&self) -> super::Backdrop<'_> {
@@ -152,7 +162,7 @@ fn blurred_cover(canvas: &Canvas, img: &skia_safe::Image, art: Rect, k: f32) -> 
     COVER.with(|c| {
         let mut c = c.borrow_mut();
         if !matches!(&*c, Some((image_id, s, _)) if *image_id == img.unique_id() && *s == sigma) {
-            *c = blur_image(canvas, img, sigma as f32).map(|blurred| (img.unique_id(), sigma, blurred));
+            *c = blur_image(canvas, img, half_size(img), sigma as f32).map(|blurred| (img.unique_id(), sigma, blurred));
         }
         c.as_ref().map(|(_, _, img)| img.clone())
     })

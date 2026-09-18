@@ -3,6 +3,7 @@
 //! with, the modal fade.
 
 pub mod animation;
+pub(crate) mod backdrop;
 pub mod fade;
 pub mod focus;
 pub mod render;

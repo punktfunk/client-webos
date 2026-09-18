@@ -191,18 +191,17 @@ struct Key {
 
 type Cached = (Key, skia_safe::Shader);
 
-// Two slots, not one: a card and the card-menu strip are drawn in the same frame, and the
-// strip's rect animates through its wipe — a single slot had each evicting the other every
-// frame, rebuilding both shaders. Most-recent first, so the hit is usually slot 0.
+// A departing card, arriving card, cover strip and quit dialog can coexist.
+const CACHE_SLOTS: usize = 4;
 thread_local! {
-    static SHADER: std::cell::RefCell<[Option<Cached>; 2]> =
-        const { std::cell::RefCell::new([None, None]) };
+    static SHADER: std::cell::RefCell<[Option<Cached>; CACHE_SLOTS]> =
+        const { std::cell::RefCell::new([const { None }; CACHE_SLOTS]) };
 }
 
 /// Drop cached shaders. They hold the page and cover images, whose textures
 /// `free_gpu_resources` cannot reclaim while referenced.
 pub(super) fn release() {
-    SHADER.with(|cache| *cache.borrow_mut() = [None, None]);
+    SHADER.with(|cache| *cache.borrow_mut() = [const { None }; CACHE_SLOTS]);
 }
 
 /// Light the face of `rr` and draw its rim from `page`, an image laid over `dst` in local space.
@@ -224,12 +223,14 @@ pub(super) fn draw(canvas: &Canvas, rr: RRect, k: f32, page: &skia_safe::Image, 
     };
     let shader = SHADER.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let hit = |s: &Option<Cached>| s.as_ref().is_some_and(|(cached, _)| *cached == key);
-        if !hit(&cache[0]) {
-            cache.swap(0, 1);
-            if !hit(&cache[0]) {
-                cache[0] = shader(&key, page).map(|shader| (key, shader));
-            }
+        if let Some(at) = cache
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|(cached, _)| *cached == key))
+        {
+            cache[..=at].rotate_right(1);
+        } else {
+            cache.rotate_right(1);
+            cache[0] = shader(&key, page).map(|shader| (key, shader));
         }
         cache[0].as_ref().map(|(_, shader)| shader.clone())
     });

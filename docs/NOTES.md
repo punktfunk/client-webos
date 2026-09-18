@@ -45,6 +45,10 @@ Immediate mode on Skia over shell GL context (`console::gl`), drawn with console
 - **Keep list widgets alive through modal fades.** Recreating the departing list restarts its
   row entrance while the panel closes. Cross-fades need separate widgets for both screens;
   sharing one slot rebuilds each on every frame. Retire the outgoing widget after its fade.
+- **Coalesce backdrop refreshes through widget motion**, not just the 75ms panel fade.
+  Refresh dirty pages at most every 100ms (150ms during motion), so continuous animation
+  cannot freeze the background. Retain the previous blur on capture failure, and warm
+  scrolling lists too: their edge masks add a layer missing from short-list warmup.
 - **The drawable can differ from the display mode** on webOS: every frame scales the canvas from
   `display_mode` units to `drawable_size`, and every layout and hit test works in display units.
 - **Icons are Lucide, by name** (`app::view::icons`), from the kit's table. A new mark is added to
