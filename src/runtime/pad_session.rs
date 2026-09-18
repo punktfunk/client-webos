@@ -148,10 +148,9 @@ pub(super) fn bring_up(
         Some(Link::Usb(node)) => usb_audio::find_card(node.usb_path().as_deref()),
         _ => None,
     };
-    // Haptics need no transport — without one the coils are rendered as motor rumble — so only the
-    // speaker waits on a link that can play it.
+    let audio_transport = matches!(link, Some(Link::Bluetooth(_))) || card.is_some();
     let caps = if registry.is_some() && slot.is_dualsense(setting) {
-        pad_audio::caps_for(settings, matches!(link, Some(Link::Bluetooth(_))) || card.is_some())
+        pad_audio::caps_for(settings, slot.rumble || audio_transport, audio_transport)
     } else {
         0
     };

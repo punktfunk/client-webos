@@ -314,7 +314,9 @@ impl RingCallback {
     /// Serves one callback's worth of samples into `out`, under [`TUNING`]'s de-jitter policy.
     /// Always fills the whole slice — with silence while priming, and zero-padded on an underrun.
     fn fill(&mut self, out: &mut [f32]) {
-        while let Ok(mut chunk) = self.rx.try_recv() {
+        // A producer can refill while we drain; bound work before the policy trims the ring.
+        for _ in 0..CHUNK_QUEUE {
+            let Ok(mut chunk) = self.rx.try_recv() else { break };
             self.ring.extend(chunk.iter().copied());
             // Return the drained Vec to the pool; a full/closed pool just drops it.
             chunk.clear();
@@ -388,7 +390,33 @@ impl RingCallback {
 
 #[cfg(test)]
 mod tests {
-    use super::source_frames;
+    use super::*;
+
+    #[test]
+    fn callback_bounds_drain_when_more_than_one_queueful_is_available() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (recycle, _) = std::sync::mpsc::sync_channel(CHUNK_QUEUE);
+        for _ in 0..=CHUNK_QUEUE {
+            tx.send(vec![0.0; 480]).unwrap();
+        }
+        let mut callback = RingCallback {
+            rx,
+            recycle,
+            ring: VecDeque::new(),
+            policy: JitterPolicy::new(TUNING, 2),
+            per_ms: 96,
+            scratch: Vec::new(),
+            buffer_ms: Arc::new(AtomicU32::new(0)),
+            underruns: 0,
+            sheds: 0,
+            trims: 0,
+            dropped_ms: 0,
+            callbacks: 0,
+        };
+        callback.fill(&mut [0.0; 1024]);
+        assert_eq!(callback.rx.try_recv().unwrap().len(), 480);
+        assert!(callback.rx.try_recv().is_err());
+    }
 
     #[test]
     fn device_period_is_sized_in_source_frames() {

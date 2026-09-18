@@ -151,7 +151,7 @@ fn spawn_connect(
                     // cap, and the host advertises `HOST_CAP_PAD_AUDIO` only in reply to it. A pad
                     // plugged in later re-declares per-pad through `set_pad_audio_caps`, but only
                     // inside a session that claimed the cap up front — probing here would cost hotplug.
-                    pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true),
+                    pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true, true),
                     audio_route: settings.audio_route(),
                     multi_slice: settings.multi_slice(),
                     present_priority: settings.present_priority(),
