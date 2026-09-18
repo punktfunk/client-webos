@@ -136,7 +136,7 @@ fn log_tone(line: &str) -> Color4f {
     }
 }
 
-pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
+pub(super) fn log(f: &Frame<'_>, lines: &[String]) {
     let k = f.k;
     let size = LOG_LINE * f64::from(k);
     let stride = line_h(size) as f32;
@@ -155,7 +155,6 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
     let h = stride * rows.len().max(1) as f32 + 2.0 * LOG_PAD * k;
     let strip = Rect::from_xywh(0.0, f.h - h, f.w, h);
     let c = f.canvas;
-    alpha_layer(c, strip, alpha);
     c.draw_rect(strip, &theme::fill(crate::app::draw::surface()));
     for (i, (dx, text, tone)) in rows.iter().enumerate() {
         f.fonts.draw(
@@ -168,7 +167,6 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String], alpha: f32) {
             *tone,
         );
     }
-    c.restore();
 }
 
 pub(super) fn toast(f: &Frame<'_>, text: &str, alpha: f32) {

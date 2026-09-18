@@ -439,7 +439,6 @@ pub(super) fn run_inner() -> Result<()> {
             if stats_enabled {
                 stats_fade.open();
             }
-            let mut log_fade = crate::ui::fade::ModalFade::<()>::overlay();
             // Seeded from live key state, not `false`: these are rising-edge polls, and the launch
             // itself is a keypress. A key still down when the stream loop starts (webOS's EXIT
             // gesture in particular — a synthetic press whose key-up may never arrive) would read as
@@ -464,7 +463,6 @@ pub(super) fn run_inner() -> Result<()> {
             // tier change), and the log tail on its 500 ms cadence; drawn as they stand between.
             let mut stats_lines: Vec<HudLine> = Vec::new();
             let mut stats_snap: Option<StatsSnapshot> = None;
-            let mut log_lines: Vec<String> = Vec::new();
             let mut stats_built_at: Option<Instant> = None;
             let mut overlay_last: Option<Instant> = None;
             let mut prev_cpu: Option<(u64, Instant)> = None;
@@ -948,15 +946,8 @@ pub(super) fn run_inner() -> Result<()> {
                     }
                 }
                 if rising_edge(!dialog_open && key_down(WEBOS_YELLOW_SCANCODE), &mut yellow_held) {
-                    let was_on = log_overlay_state() != LogOverlayState::Off;
                     cycle_log_overlay();
-                    let now_on = log_overlay_state() != LogOverlayState::Off;
                     overlay_last = None; // force an immediate redraw with the new state
-                    if now_on && !was_on {
-                        log_fade.reopen();
-                    } else if was_on && !now_on {
-                        log_fade.close(());
-                    }
                 }
                 // Connection-issue toast, once per hold that outlasts `HOLD_TOAST_AFTER` — the same
                 // "network trouble" signal the stats overlay's "Beat" line reads, visible without the
@@ -1038,12 +1029,11 @@ pub(super) fn run_inner() -> Result<()> {
                 connected.stats().set_diagnostics(stats_alpha.is_some());
                 connected.set_hud_enabled(stats_alpha.is_some());
                 let log_overlay_on = log_overlay_state() != LogOverlayState::Off;
-                let log_alpha = log_fade.visibility_alpha(log_overlay_on);
                 let ring_damage = ring.damage();
                 let ring_visible = ring_damage != 0;
-                let overlay_active = stats_alpha.is_some() || log_alpha.is_some() || notif_active || ring_visible;
+                let overlay_active = stats_alpha.is_some() || log_overlay_on || notif_active || ring_visible;
                 if overlay_was_active && !overlay_active {
-                    // Nothing else clears this window — the faded-out card would stick otherwise.
+                    // Nothing else clears this window when the last overlay disappears.
                     // A wipe that could not draw stays owed, so the next tick tries it again.
                     let wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
                     overlay_was_active = !overlay_drawn(wipe, &mut overlay_warned);
@@ -1051,7 +1041,7 @@ pub(super) fn run_inner() -> Result<()> {
                     overlay_was_active = overlay_active;
                 }
                 // A fade in flight needs frequent frames; steady-state stats/log are fine at ~2Hz.
-                let fading = notif_active || stats_fade.is_animating() || log_fade.is_animating();
+                let fading = notif_active || stats_fade.is_animating();
                 let redraw_interval = if fading {
                     Duration::from_millis(33)
                 } else {
@@ -1074,11 +1064,7 @@ pub(super) fn run_inner() -> Result<()> {
                         stats_lines = hud::format(&snap, stats_tier, advanced_stats);
                         stats_snap = Some(snap);
                     }
-                    // `None` during fade-out once the toggle flips Off — the fade keeps drawing
-                    // the last lines read.
-                    if let Some(lines) = log_overlay_lines() {
-                        log_lines = lines;
-                    }
+                    let log_lines = log_overlay_lines();
                     let frame = overlay::frame(
                         &mut console_gl,
                         &canvas,
@@ -1089,8 +1075,8 @@ pub(super) fn run_inner() -> Result<()> {
                             if let Some(alpha) = stats_alpha {
                                 overlay::stats(f, &stats_lines, stats_hint(stats_tier), alpha);
                             }
-                            if let Some(alpha) = log_alpha {
-                                overlay::log(f, &log_lines, alpha);
+                            if let Some(lines) = &log_lines {
+                                overlay::log(f, lines);
                             }
                             if let Some((text, alpha)) = &notif_frame {
                                 overlay::toast(f, text, *alpha);

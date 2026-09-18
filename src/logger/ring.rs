@@ -12,8 +12,7 @@ use tracing_subscriber::Layer;
 
 use super::level;
 
-/// Bounds overlay memory and per-event lock scope. Only the last
-/// `ui::tiles::LOG_OVERLAY_LINES` are ever rendered; the rest is snapshot headroom.
+/// Bounds overlay memory and per-event lock scope.
 const CAPACITY: usize = 32;
 const LINE_MAX_CHARS: usize = 200;
 /// Byte budget a line may reach while recording; chars are truncated exactly after.
@@ -36,9 +35,8 @@ pub fn set_ring_capture(active: bool) {
     }
 }
 
-/// Last `n` log lines, oldest first — for the in-stream/menu log-tail overlay
-/// (`ui::tiles::render_log_overlay_tile`). Clones out of the ring buffer only;
-/// never touches the file or TCP sink.
+/// Last `n` log lines, oldest first, for the stream/menu overlay.
+/// Clones the ring buffer without touching the file or TCP sink.
 pub fn recent_lines(n: usize) -> Vec<String> {
     let buf = buffer().lock().unwrap_or_else(PoisonError::into_inner);
     let skip = buf.len().saturating_sub(n);
