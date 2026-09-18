@@ -56,6 +56,15 @@ pub(crate) fn draw(
         RowSpec::slider("Bitrate", "Automatic", 0.0),
         RowSpec::toggle("HDR", true),
         RowSpec::toggle("Statistics", false),
+        RowSpec::choice("Palette", "Violet").with_header("Interface"),
+        RowSpec::toggle("Gamepad UI", false),
+        RowSpec::choice("Mode", "Automatic"),
+        RowSpec::action("About", true).with_header("Information"),
+        RowSpec::action("Licences", true),
+        RowSpec::choice("Codec", "Automatic").with_header("Video"),
+        RowSpec::toggle("10-bit SDR", false),
+        RowSpec::toggle("Smooth buffer", true),
+        RowSpec::toggle("Game mode", false),
     ];
     let mut host_menu = ListSlot::new(Screen::HostMenu);
     let mut settings_menu = ListSlot::new(Screen::SettingsPage);
@@ -65,6 +74,10 @@ pub(crate) fn draw(
     // Step widget clocks through arrival and settling, without sleeping at startup.
     for step in 0..STEPS {
         let progress = (step as f32 / ARRIVAL).min(1.0);
+        // Overflow adds a masked layer absent from short menus. Exercise both edges.
+        if step == STEPS / 2 {
+            settings_menu.list.cursor = settings_rows.len() - 1;
+        }
         {
             let c = target.canvas();
             c.reset_matrix();

@@ -365,12 +365,13 @@ impl App {
         }
     }
 
-    /// Whether a card is mid open- or close-fade. The runtime holds the page blur still for
-    /// the length of one: a rebuild copies the whole framebuffer and re-blurs it, and paying
-    /// that on frames of a ~200ms fade is what the fade stutters on. Outside a fade the blur
-    /// still refreshes whenever the page behind it moves.
-    pub(crate) fn modal_fading(&self) -> bool {
+    /// Pace backdrop refreshes through widget motion, which outlasts the panel fade.
+    pub(crate) fn modal_animating(&self) -> bool {
         self.render.modal.frames.fading
+            || self.render.tab_focus.animating()
+            || self.render.lists.iter().any(|slot| slot.list.animating())
+            || self.render.modal.focus_anim.is_some()
+            || self.render.modal.switch_anim.is_some()
     }
 
     /// Whether a modal card will be drawn this frame — i.e. whether the page behind it is

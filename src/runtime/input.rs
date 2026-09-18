@@ -159,6 +159,7 @@ impl RemoteGate {
 
     /// Reads the remote's nodes; a node that is gone is dropped.
     pub(super) fn poll(&mut self, now: Instant) {
+        self.owed.retain(|&(_, at)| now.duration_since(at) < Self::CLAIM_WINDOW);
         let owed = &mut self.owed;
         self.nodes.retain_mut(|node| node.drain(|code| owed.push((code, now))));
     }
