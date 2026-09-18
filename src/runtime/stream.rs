@@ -126,6 +126,9 @@ pub(super) fn run_inner() -> Result<()> {
     // Nothing here wants a mouse synthesized from touch — the Magic Remote is a real pointer,
     // and a pad's touchpad must not be one at all (`mouse::is_touch_emulated`).
     sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+    // SDL's PS5 driver drops an idle Bluetooth DualSense after 500ms; its only keepalive, enhanced
+    // mode, breaks the link here (9ae6c3c). Use evdev. Costs rumble: `hid-generic` has no FF.
+    sdl3::hint::set("SDL_JOYSTICK_HIDAPI_PS5", "0");
     let sdl = sdl3::init().map_err(|e| anyhow::anyhow!("SDL_Init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow::anyhow!("SDL video subsystem: {e}"))?;
     let game_controller = sdl
