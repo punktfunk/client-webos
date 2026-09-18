@@ -438,7 +438,7 @@ pub(super) fn run_ui_flow(
             app.draw_modals(&frame, dt);
             app.draw_launch(&frame);
             if let Some(lines) = &log_lines {
-                overlay::log(&frame, lines, 1.0);
+                overlay::log(&frame, lines);
             }
             if let Some((text, alpha)) = &notif_frame {
                 overlay::toast(&frame, text, *alpha);
