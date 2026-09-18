@@ -186,7 +186,7 @@ impl VideoSink for std::sync::Arc<NdlVideo> {
     fn caps(&self) -> VideoSinkCaps {
         VideoSinkCaps {
             pts: true,
-            partial_au: true,
+            partial_au: false,
             flush: true,
         }
     }

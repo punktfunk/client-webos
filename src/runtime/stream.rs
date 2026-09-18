@@ -91,7 +91,7 @@ fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl2::Eve
         if exit_gesture_fired(&mut exit_held) || QUIT_REQUESTED.load(Ordering::Relaxed) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        crate::platform::webos::input::wait_for_event(Duration::from_millis(20));
     }
     false
 }
@@ -1110,7 +1110,7 @@ pub(super) fn run_inner() -> Result<()> {
 
                 // Bounds staleness of forwarded input/audio (video has its own thread). 2ms keeps
                 // added latency near zero; the wakeup rate is noise even on this SoC.
-                std::thread::sleep(Duration::from_millis(2));
+                crate::platform::webos::input::wait_for_event(Duration::from_millis(2));
             };
             connected.release_input();
             text_input.stop();
