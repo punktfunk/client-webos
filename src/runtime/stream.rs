@@ -122,13 +122,11 @@ pub(super) fn run_inner() -> Result<()> {
     // Magic Remote sleeps pointer after 5m; streams need it awake (remote IS the host mouse).
     // Set to 24h to make idle sleep a non-event. A webOS fork hint.
     sdl3::hint::set("SDL_WEBOS_CURSOR_SLEEP_TIME", "86400000");
-    // SDL3 deleted SDL_RENDER_SCALE_QUALITY (makes linear the default).
     // Nothing here wants a mouse synthesized from touch — the Magic Remote is a real pointer,
     // and a pad's touchpad must not be one at all (`mouse::is_touch_emulated`).
     sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
-    // SDL's PS5 driver drops an idle Bluetooth DualSense after 500ms; its only keepalive, enhanced
-    // mode, breaks the link here (9ae6c3c). Use evdev. Costs rumble: `hid-generic` has no FF.
-    sdl3::hint::set("SDL_JOYSTICK_HIDAPI_PS5", "0");
+    // Keep Bluetooth PlayStation pads on their simple reports, SDL2's default. SDL3 defaults this to on.
+    sdl3::hint::set("SDL_JOYSTICK_ENHANCED_REPORTS", "0");
     let sdl = sdl3::init().map_err(|e| anyhow::anyhow!("SDL_Init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow::anyhow!("SDL video subsystem: {e}"))?;
     let game_controller = sdl
@@ -168,14 +166,12 @@ pub(super) fn run_inner() -> Result<()> {
         .fullscreen()
         .build()
         .map_err(|e| anyhow::anyhow!("create window: {e}"))?;
-    // 🛑 SDL3 dropped `.accelerated()` check. Picks driver itself, falls back to software.
-    // Check name instead — silent software fallback must not ship.
-    let mut canvas = sdl3::render::create_renderer(window, None).map_err(|e| anyhow::anyhow!("create canvas: {e}"))?;
-    let renderer = &canvas.renderer_name;
-    tracing::info!("window + canvas created (renderer: {renderer})");
-    if renderer.eq_ignore_ascii_case("software") {
-        anyhow::bail!("SDL picked its software renderer — no GLES2 driver on this set");
-    }
+    // Named, so a GLES2 renderer that won't come up is a hard error rather than a silent fall back
+    // to SDL's software path (~25-45ms/frame on this SoC). The fork builds no Vulkan and webOS has
+    // no desktop GL, so GLES2 is the only accelerated renderer there is.
+    let mut canvas =
+        sdl3::render::create_renderer(window, Some(c"opengles2")).map_err(|e| anyhow::anyhow!("create canvas: {e}"))?;
+    tracing::info!("window + canvas created (renderer: {})", canvas.renderer_name);
 
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("event pump: {e}"))?;
     crate::platform::webos::input::mute_unused_events();
@@ -656,8 +652,6 @@ pub(super) fn run_inner() -> Result<()> {
                                 ring.menu(ev);
                             }
                         }
-                        // SDL3's own family predicates, rather than the seven-arm `|` chain this
-                        // used to spell out.
                         _ if ring.open() && (event.is_keyboard() || event.is_text() || event.is_mouse()) => {}
                         // Scancode keys are real game input — forward only, never open the dialog.
                         Event::KeyDown { scancode: Some(sc), .. } if !hid_keys && (key_admitted || osk) => {
@@ -672,9 +666,9 @@ pub(super) fn run_inner() -> Result<()> {
                         _ if remote.is_some() => {
                             let Some((key, down)) = remote else { continue };
                             match key {
-                                // Forwarded as Esc, and gated: a pad echoing Back must not
-                                // reach the host as a keypress the user never made.
-                                RemoteKey::Back if key_admitted => {
+                                // Forwarded as Esc. `remote_keys.edge` already refused a pad
+                                // echoing Back, so it never reaches the host as a phantom press.
+                                RemoteKey::Back => {
                                     if let Some(ev) = keyboard::key_event(sdl3::keyboard::Scancode::Escape, down) {
                                         connected.send_input(&ev);
                                     }

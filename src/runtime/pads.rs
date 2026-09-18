@@ -213,6 +213,11 @@ impl Pads {
     pub(super) fn first(&self) -> Option<&Slot> {
         self.slots.first()
     }
+
+    /// [`Self::first`]'s name, for the legend.
+    pub(super) fn first_name(&self) -> Option<String> {
+        self.first().and_then(|slot| slot.pad.name())
+    }
 }
 
 /// Which pad a touchpad or motion node belongs to: `(uniq, wire index)` per slot, shared with the

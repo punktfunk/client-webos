@@ -15,6 +15,7 @@ use crate::app::draw::{alpha_layer, line_h, wrap, Frame};
 use crate::app::screens::confirm::{Confirm, Tone};
 use crate::console::ConsoleGl;
 use crate::core::event::MenuEvent;
+use crate::platform::webos::input::RemoteKey;
 use crate::ui;
 
 /// Design units.
@@ -311,10 +312,8 @@ impl ConfirmDialog {
 
     /// Pointer and pad input while open. The layout is the same one [`Self::draw`] draws.
     ///
-    /// `remote` is the Magic Remote key this event pressed, already resolved by the caller's
-    /// [`RemoteKeys`](crate::platform::webos::input::RemoteKeys). It is passed in rather than
-    /// derived here because the remote's keys carry no keycode and deriving them twice for one
-    /// event is what let a Back tap open this dialog and immediately dismiss it.
+    /// `remote` is this event's key as the caller's
+    /// [`RemoteKeys`](crate::platform::webos::input::RemoteKeys) resolved it; never re-derive it.
     pub(super) fn handle_event(
         &mut self,
         event: &sdl3::event::Event,
@@ -369,7 +368,7 @@ impl ConfirmDialog {
             }
             _ => {}
         }
-        let nav = if remote == Some(crate::platform::webos::input::RemoteKey::Back) {
+        let nav = if remote == Some(RemoteKey::Back) {
             Some(MenuEvent::Back)
         } else {
             match event {

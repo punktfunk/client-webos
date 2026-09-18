@@ -54,7 +54,7 @@ Immediate mode on Skia over shell GL context (`console::gl`), drawn with console
   cannot freeze the background. Retain the previous blur on capture failure, and warm
   scrolling lists too: their edge masks add a layer missing from short-list warmup.
 - **The drawable can differ from the display mode** on webOS: every frame scales the canvas from
-  `display_mode` units to `drawable_size`, and every layout and hit test works in display units.
+  layout-box units to `size_in_pixels`, and every layout and hit test works in layout units.
 - **Icons are Lucide, by name** (`app::view::icons`), from the kit's table. A new mark is added to
   `assets/lucide/` in `unom/punktfunk` and regenerated there, not here.
 - **Slow frames are GPU raster inside the shared shell, not this client's painters** (measured on

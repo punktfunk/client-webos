@@ -122,7 +122,7 @@ pub(super) fn run(
     // The open pad's name, or `None` when what SDL has open is the Magic Remote. Refreshed on
     // hotplug only to avoid per-frame string allocations.
     open_pads.sync(game_controller);
-    let mut pad_name: Option<String> = open_pads.first().and_then(|slot| slot.pad.name());
+    let mut pad_name: Option<String> = open_pads.first_name();
     // Both answers SDL's device list can give, sampled on the same hotplug events. Polling them
     // per frame walked every device and allocated a name for each.
     let mut pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
@@ -183,22 +183,17 @@ pub(super) fn run(
             if let Some(key) = remote {
                 use crate::platform::webos::input::RemoteKey;
                 last_input = Instant::now();
-                match key {
-                    RemoteKey::Back => {
-                        console.menu(MenuEvent::Back, InputSource::Keys);
-                    }
+                let ev = match key {
+                    RemoteKey::Back => MenuEvent::Back,
                     // Green and Red make the shell's Secondary/Tertiary REACHABLE from a
                     // Magic Remote at all: the library screen puts Collections on Secondary
                     // and Options — the whole host menu — on Tertiary, and unlike the home
                     // screen it has no d-pad fallback.
-                    RemoteKey::Red => {
-                        console.menu(MenuEvent::Secondary, InputSource::Keys);
-                    }
-                    RemoteKey::Green => {
-                        console.menu(MenuEvent::Tertiary, InputSource::Keys);
-                    }
-                    _ => {}
-                }
+                    RemoteKey::Red => MenuEvent::Secondary,
+                    RemoteKey::Green => MenuEvent::Tertiary,
+                    _ => continue,
+                };
+                console.menu(ev, InputSource::Keys);
                 continue;
             }
             match event {
@@ -209,7 +204,7 @@ pub(super) fn run(
                 Event::GamepadAdded { which, .. } => {
                     pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
                     if open_pads.add(game_controller, which).is_some() {
-                        pad_name = open_pads.first().and_then(|slot| slot.pad.name());
+                        pad_name = open_pads.first_name();
                         // The legend describes the handle, so it is rebuilt with it.
                         last_pref = None;
                     }
@@ -222,7 +217,7 @@ pub(super) fn run(
                         // An unplugged pad sends no releases: drop what the synthesizer holds.
                         nav.reset();
                         sample = MenuSample::default();
-                        pad_name = open_pads.first().and_then(|slot| slot.pad.name());
+                        pad_name = open_pads.first_name();
                         last_pref = None;
                     }
                     pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);

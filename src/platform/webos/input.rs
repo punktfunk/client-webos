@@ -138,80 +138,40 @@ pub const WEBOS_EXIT_SCANCODE: i32 = 375;
 /// set a bit, and bits in that range get stuck down for the whole session.
 /// Matching the event restores true edges and filters pad echoes through `RemoteGate`.
 ///
-/// `repr(u8)` from zero makes the discriminant match [`RemoteKeys`]'s held-state array slot.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-#[repr(u8)]
-pub enum RemoteKey {
-    Red = 0,
-    Green,
-    Yellow,
-    Blue,
-    Back,
-}
-
 /// `KEY_RED`..`KEY_BLUE` are 0x18e-0x191; `KEY_PREVIOUS` (Back) is 0x19c. Green, Yellow, Blue
 /// and Back confirmed on glass; Red is the same run, one below Green.
-impl RemoteKey {
-    /// How many variants there are, for [`RemoteKeys`]'s held-state array.
-    pub const COUNT: usize = 5;
-
-    /// This key's slot in that array — its discriminant, so the two cannot drift apart.
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-
-    /// Each key's evdev code, in discriminant order — one table both directions read, so a
-    /// code and the key it names cannot drift apart.
-    const RAW: [u16; Self::COUNT] = [0x18e, 0x18f, 0x190, 0x191, 0x19c];
-
-    /// Every variant, in the same order, so [`from_raw`](Self::from_raw) can walk them.
-    const ALL: [Self; Self::COUNT] = [Self::Red, Self::Green, Self::Yellow, Self::Blue, Self::Back];
-
-    pub const fn from_raw(raw: u16) -> Option<Self> {
-        // `const fn`, so a hand-rolled loop rather than `iter().position()`.
-        let mut i = 0;
-        while i < Self::COUNT {
-            if Self::RAW[i] == raw {
-                return Some(Self::ALL[i]);
-            }
-            i += 1;
-        }
-        None
-    }
-
-    pub const fn to_raw(self) -> u16 {
-        Self::RAW[self.index()]
-    }
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u16)]
+pub enum RemoteKey {
+    Red = 0x18e,
+    Green = 0x18f,
+    Yellow = 0x190,
+    Blue = 0x191,
+    Back = 0x19c,
 }
 
-/// The evdev code the remote reports: arrows, OK, Back, digits.
-///
-/// Lives here (not `runtime`) to keep remote key knowledge in one module. Back comes off `raw`
-/// (SDL3 gives no scancode/keycode); others come from their scancodes. `None` means the remote
-/// has no such key, what `RemoteGate` uses to deny unknown keys.
-pub fn remote_evdev_code(scancode: Option<sdl3::keyboard::Scancode>, raw: u16) -> Option<u16> {
-    use sdl3::keyboard::Scancode as S;
-    if raw == RemoteKey::Back.to_raw() {
-        return Some(raw);
+impl RemoteKey {
+    pub const fn from_raw(raw: u16) -> Option<Self> {
+        Some(match raw {
+            0x18e => Self::Red,
+            0x18f => Self::Green,
+            0x190 => Self::Yellow,
+            0x191 => Self::Blue,
+            0x19c => Self::Back,
+            _ => return None,
+        })
     }
-    Some(match scancode? {
-        S::Up => 103,
-        S::Down => 108,
-        S::Left => 105,
-        S::Right => 106,
-        S::Return | S::KpEnter => 28,
-        S::_1 => 2,
-        S::_2 => 3,
-        S::_3 => 4,
-        S::_4 => 5,
-        S::_5 => 6,
-        S::_6 => 7,
-        S::_7 => 8,
-        S::_8 => 9,
-        S::_9 => 10,
-        S::_0 => 11,
-        _ => return None,
-    })
+
+    /// This key's slot in [`RemoteKeys`]'s held-state array.
+    const fn index(self) -> usize {
+        match self {
+            Self::Red => 0,
+            Self::Green => 1,
+            Self::Yellow => 2,
+            Self::Blue => 3,
+            Self::Back => 4,
+        }
+    }
 }
 
 /// Check a Magic Remote button via raw SDL keyboard state (safe after `sdl3::init`).
@@ -249,7 +209,7 @@ fn raw_edge(event: &sdl3::event::Event) -> Option<(RemoteKey, bool)> {
 /// ride normal `keycode: Some(k)` paths. Which edges arrive depends on where the loop started.
 #[derive(Default)]
 pub struct RemoteKeys {
-    held: [bool; RemoteKey::COUNT],
+    held: [bool; 5],
 }
 
 impl RemoteKeys {
@@ -277,10 +237,10 @@ impl RemoteKeys {
     pub fn press(&mut self, event: &sdl3::event::Event) -> Option<RemoteKey> {
         let (key, down) = raw_edge(event)?;
         let held = &mut self.held[key.index()];
-        let orphan_release = !down && !*held;
-        let fresh_press = down && !*held;
+        // Unheld either way: a fresh press, or an orphan release (see the doc above).
+        let fire = !*held;
         *held = down;
-        (fresh_press || orphan_release).then_some(key)
+        fire.then_some(key)
     }
 }
 
@@ -348,7 +308,7 @@ mod remote_keys_tests {
     }
 
     fn back(down: bool) -> sdl3::event::Event {
-        key(RemoteKey::Back.to_raw(), down)
+        key(RemoteKey::Back as u16, down)
     }
 
     /// The invariant every Back bug broke: one physical press, one menu action.
@@ -388,7 +348,7 @@ mod remote_keys_tests {
     fn keys_do_not_share_held_state() {
         let mut keys = RemoteKeys::default();
         assert_eq!(keys.press(&back(true)), Some(RemoteKey::Back));
-        assert_eq!(keys.press(&key(RemoteKey::Red.to_raw(), true)), Some(RemoteKey::Red));
+        assert_eq!(keys.press(&key(RemoteKey::Red as u16, true)), Some(RemoteKey::Red));
         assert_eq!(keys.press(&back(false)), None);
     }
 

@@ -1,9 +1,9 @@
 //! `PlayStation` pad nodes: the touchpad and the motion sensors.
 //!
 //! The kernel's `hid-playstation` publishes a `DualSense` as three evdev nodes — the pad itself,
-//! its touchpad and its motion sensors. SDL reads only the first here (see `input::mute_unused_events`),
-//! so the other two reach the
-//! host's virtual pad only if this reader claims them: [`RichInput::Touchpad`] contacts for a
+//! its touchpad and its motion sensors. SDL reads only the first here (see
+//! `input::mute_unused_events`), so the other two reach the host's virtual pad only if this
+//! reader claims them: [`RichInput::Touchpad`] contacts for a
 //! game's swipes, [`RichInput::Motion`] samples for gyro aiming. Claiming is not optional either
 //! way — both advertise absolute axes the compositor would otherwise turn into a second cursor,
 //! the touchpad with a stuck left button (see [`is_pad_touchpad`]).

@@ -2,6 +2,7 @@ use super::overlay::{self, ConfirmAction, ConfirmDialog, Notification};
 use super::*;
 use crate::console::ConsoleGl;
 use crate::core::settings::TvSettings;
+use crate::platform::webos::input::RemoteKey;
 use crate::services::store::ExitAction;
 use crate::ui::render::Size;
 
@@ -302,13 +303,13 @@ pub(super) fn run_ui_flow(
                 }
                 continue;
             }
-            if remote == Some(crate::platform::webos::input::RemoteKey::Yellow) {
+            if remote == Some(RemoteKey::Yellow) {
                 cycle_log_overlay();
                 dirty = true;
                 log_overlay_last = None;
                 continue;
             }
-            let remote_back = remote == Some(crate::platform::webos::input::RemoteKey::Back);
+            let remote_back = remote == Some(RemoteKey::Back);
             // Short Back tap on Home with sidebar focus opens the quit dialog. From a
             // game card / the ⋯ column, Back first steps focus back to the sidebar
             // (see `App::back`), so it falls through to normal dispatch instead.

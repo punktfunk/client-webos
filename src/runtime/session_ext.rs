@@ -206,9 +206,10 @@ impl Connected {
     /// Every command is routed by its pad index to that pad's own handle and `DualSense` link. The
     /// two planes go to different places, because each has one route that works for every
     /// controller rather than only one:
-    ///   * **rumble** → SDL's evdev force feedback (`GameController::set_rumble`, plus
+    ///   * **rumble** → SDL's evdev force feedback (`Gamepad::set_rumble`, plus
     ///     `set_rumble_triggers` for the impulse-trigger motors on pads that have them), which
-    ///     works on any pad the TV has bound, `DualSense` included;
+    ///     works on any pad the TV has bound, except a Bluetooth `DualSense` on SDL's HIDAPI
+    ///     driver (rumble needs enhanced reports, which stay off);
     ///   * **`DualSense` HID feedback** (adaptive triggers, lightbar, player LEDs) → the pad's
     ///     Bluetooth address or wired hidraw node (see [`crate::platform::webos::dualsense`]).
     ///

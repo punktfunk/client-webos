@@ -153,15 +153,12 @@ impl RemoteGate {
         if !self.armed {
             return true;
         }
-        let (scancode, raw, down, repeat) = match *event {
-            Event::KeyDown {
-                scancode, raw, repeat, ..
-            } => (scancode, raw, true, repeat),
-            Event::KeyUp { scancode, raw, .. } => (scancode, raw, false, false),
+        // `raw` is the Wayland key, i.e. the same evdev code the remote's node reports. A key the
+        // remote lacks never has a press owed to it, so it fails below like an echo.
+        let (code, down, repeat) = match *event {
+            Event::KeyDown { raw, repeat, .. } => (raw, true, repeat),
+            Event::KeyUp { raw, .. } => (raw, false, false),
             _ => return true,
-        };
-        let Some(code) = crate::platform::webos::input::remote_evdev_code(scancode, raw) else {
-            return false;
         };
         self.owed.retain(|&(_, at)| now.duration_since(at) < Self::CLAIM_WINDOW);
         let held = self.down.iter().position(|&c| c == code);
@@ -203,10 +200,8 @@ fn scancode_rising_edge(scancode: i32, prev: &mut bool) -> bool {
 
 /// Controls the webOS on-screen keyboard for UI and streaming loops.
 ///
-/// Holds no copy of whether input is on: SDL3 scopes text input per window and answers
-/// `SDL_TextInputActive` for it, so the mirrored `bool` this used to carry - which the
-/// compositor could silently invalidate by dismissing the panel behind our back, and which the
-/// stream loop needed a `raise()` escape hatch to work around - has one source of truth again.
+/// Whether input is on is read from SDL (`SDL_TextInputActive`), never mirrored: the compositor
+/// can dismiss the panel without telling us.
 pub(super) struct TextInputController {
     util: sdl3::keyboard::TextInputUtil,
     options: Option<sdl3::keyboard::TextInputOptions>,
@@ -594,11 +589,6 @@ impl NavFocus {
 
 /// The menu's layout box, in the whole units every screen lays out in: the panel's real mode
 /// divided by `app::draw::panel_k`.
-///
-/// Its own type rather than the `sdl3::video::DisplayMode` this used to be passed as. That mode
-/// was fabricated field by field - pixel density, an exact refresh numerator/denominator and a
-/// null backend-data pointer - to carry two numbers into code that read nothing else, and being
-/// an SDL type invited setting it on a display, which it is not valid for.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) struct LayoutBox {
     pub(super) w: u32,
@@ -1018,19 +1008,16 @@ mod remote_gate_tests {
     use sdl3::event::Event;
     use sdl3::keyboard::{Keycode, Scancode};
 
-    use crate::platform::webos::input::{test_key_event, RemoteKey};
-
-    fn key(scancode: Option<Scancode>, keycode: Option<Keycode>, down: bool, repeat: bool) -> Event {
-        test_key_event(scancode, keycode, 0, down, repeat)
-    }
+    // `raw` is the evdev code, as the fork's Wayland backend reports it.
+    use crate::platform::webos::input::{test_key_event as key, RemoteKey};
 
     fn up_key(down: bool, repeat: bool) -> Event {
-        key(Some(Scancode::Up), Some(Keycode::Up), down, repeat)
+        key(Some(Scancode::Up), Some(Keycode::Up), 103, down, repeat)
     }
 
     /// The remote's Back as SDL3 actually delivers it: nothing but `raw`.
     fn back_key(down: bool) -> Event {
-        test_key_event(None, None, RemoteKey::Back.to_raw(), down, false)
+        key(None, None, RemoteKey::Back as u16, down, false)
     }
 
     #[test]
@@ -1053,11 +1040,10 @@ mod remote_gate_tests {
         assert!(!gate.admits(&up_key(true, false), t));
         assert!(!gate.admits(&up_key(true, true), t));
         assert!(!gate.admits(&up_key(false, false), t));
-        // The remote's Back: no scancode, no keycode, identified only by `raw` (see
-        // `remote_evdev_code`). Gated like any other key - the echo is refused, the real press admitted.
+        // The remote's Back: no scancode, no keycode, identified only by `raw`. Gated like any other key - the echo is refused, the real press admitted.
         let back = || back_key(true);
         assert!(!gate.admits(&back(), t));
-        gate.pressed(RemoteKey::Back.to_raw(), t);
+        gate.pressed(RemoteKey::Back as u16, t);
         assert!(gate.admits(&back(), t));
     }
 
@@ -1067,7 +1053,7 @@ mod remote_gate_tests {
         let mut keys = crate::platform::webos::input::RemoteKeys::default();
         let down = back_key(true);
         assert_eq!(keys.edge(&down, gate.admits(&down, t)), None);
-        gate.pressed(RemoteKey::Back.to_raw(), t);
+        gate.pressed(RemoteKey::Back as u16, t);
         assert_eq!(keys.edge(&down, gate.admits(&down, t)), Some((RemoteKey::Back, true)));
         let up = back_key(false);
         assert_eq!(keys.edge(&up, gate.admits(&up, t)), Some((RemoteKey::Back, false)));
@@ -1079,14 +1065,14 @@ mod remote_gate_tests {
         let (mut gate, t) = (RemoteGate::armed(), Instant::now());
         // An OK the pointer turned into a click: no key-down ever claims it.
         gate.pressed(28, t);
-        let enter = key(Some(Scancode::Return), Some(Keycode::Return), true, false);
+        let enter = key(Some(Scancode::Return), Some(Keycode::Return), 28, true, false);
         assert!(!gate.admits(&enter, t + Duration::from_millis(300)));
     }
 
     #[test]
     fn keys_the_remote_lacks_never_pass_and_other_events_always_do() {
         let (mut gate, t) = (RemoteGate::armed(), Instant::now());
-        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), true, false);
+        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), 1, true, false);
         assert!(!gate.admits(&esc, t));
         assert!(gate.admits(&Event::Quit { timestamp: 0 }, t));
     }
@@ -1097,7 +1083,7 @@ mod remote_gate_tests {
         let (mut gate, t) = (RemoteGate::default(), Instant::now());
         assert!(gate.admits(&up_key(true, false), t));
         assert!(gate.admits(&up_key(false, false), t));
-        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), true, false);
+        let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), 1, true, false);
         assert!(gate.admits(&esc, t));
     }
 }

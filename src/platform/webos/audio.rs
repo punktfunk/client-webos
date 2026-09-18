@@ -41,8 +41,7 @@ use crate::session::audio::SAMPLE_RATE;
 /// Device buffer: 512 frames (10.67 ms). Deliberately not smaller — a smaller quantum on a 2-3
 /// core TV `SoC` buys more wakeups and more missed callbacks, not less latency (docs/NOTES.md).
 ///
-/// SDL3's `AudioSpec` has no `samples` field: the device quantum moved out of the open call and
-/// onto this hint, which must be set before the device is opened. Same number, different lever.
+/// Set as a hint before the device opens: SDL3's `AudioSpec` carries no quantum.
 const DEVICE_BUFFER_FRAMES: u16 = 512;
 
 /// Chunks in flight between the decode thread and the callback. 5 ms each.
@@ -299,10 +298,7 @@ impl sdl3::audio::AudioCallback<f32> for RingCallback {
         if wanted == 0 {
             return;
         }
-        // Moved out instead of borrowed: `fill` touches `self` throughout, and holding `&mut
-        // self.scratch` across it would lock the whole struct. Take/restore once around `fill`
-        // prevents a later return from orphaning scratch (no compile error but reallocates on
-        // next callback, inside the deadline).
+        // Taken, not borrowed, so `fill` can have `&mut self`; restored below to avoid reallocating.
         let mut buf = std::mem::take(&mut self.scratch);
         if buf.len() < wanted {
             buf.resize(wanted, 0.0);
