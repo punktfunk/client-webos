@@ -164,7 +164,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - **Magic Remote Back needs `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** before window creation (keycode 2097155). Same for Home/Guide. Launcher ribbon needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false`.
 - **Access-policy hints are all-or-nothing,** latched at window creation; cannot scope to stream only.
 - **Held Back is EXIT key (keycode 2097155 short tap, scancode 505 held).** Don't time; webOS detects long-press. Poll `WEBOS_EXIT_SCANCODE` (edge-detected), open dialog on rising edge. Short stays Esc/back-nav. Needs both `KEYS_EXIT` and `KEYS_BACK`, or gesture SIGTERMs app.
-- **Gamepad shortcuts are 2s holds** (`runtime::input::DisconnectChord`). Guide/shoulders/Start+Back open disconnect — also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
+- **The gamepad shortcut is a 1s hold of L1+R1+Start+Select** (`runtime::input::DisconnectChord`), every client's escape chord. It opens disconnect and is also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
 - **Hidden window gets no pointer input.** Keep mapped, fully transparent `RGBA(0,0,0,0)` so NDL shows through (not `.hide()`).
 - **Two independent cursors** — webOS + host over network. Three levers (order matters): `EVIOCGRAB` on evdev (starves compositor), `SDL_webOSCursorVisibility`, `show_cursor`.
   - **Compositor repaints lazy both ways.** Visibility branches: visible synthesizes event, invisible marks only. Under grab no event arrives; arrow stuck on screen. `Cursor::flush` warps (center when captured, else position). Timer-based workarounds gone.
