@@ -299,7 +299,6 @@ struct Device {
     /// Summed across this read burst — see `flush_motion`.
     dx: i32,
     dy: i32,
-    scroll: mouse::ScrollAccumulator,
     /// Mirrors `commons-evmouse`'s `dev_fd_t.grab`: tracks what's actually applied to `fd`, not
     /// just requested, so a failed `EVIOCGRAB` (device gone, already grabbed elsewhere) is
     /// retried on the next call instead of silently believed.
@@ -429,7 +428,6 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         path: path.to_path_buf(),
         dx: 0,
         dy: 0,
-        scroll: mouse::ScrollAccumulator::default(),
         grabbed: false,
         grab_warned_for: None,
         mouse: false,
@@ -892,13 +890,11 @@ fn decode_hid(dev: &mut Device, buf: &[u8], size: usize, sink: &impl Fn(HidRepor
                         dev.dy += ev.value;
                     }
                 }
-                // evdev's wheel is one unit per notch, same as SDL's, so the ×120 wire
-                // scaling accumulator applies unchanged.
+                // evdev wheel is one unit per notch, like SDL's, so the wire scaling holds.
                 REL_WHEEL | REL_HWHEEL => {
                     flush_motion(dev, sink);
-                    if let Some(e) = dev.scroll.scroll_event(ev.value, ev.code == REL_HWHEEL) {
-                        sink(HidReport::Input(dev.source, &e));
-                    }
+                    let e = mouse::scroll_event(ev.value, ev.code == REL_HWHEEL);
+                    sink(HidReport::Input(dev.source, &e));
                 }
                 _ => {}
             },

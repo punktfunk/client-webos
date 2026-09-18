@@ -37,7 +37,7 @@ const NOTIFICATION_HOLD: std::time::Duration = std::time::Duration::from_secs(2)
 /// units to the drawable. `draw` paints in display units; the frame is then swapped.
 pub(super) fn frame(
     gl: &mut Option<ConsoleGl>,
-    canvas: &sdl2::render::WindowCanvas,
+    canvas: &sdl3::render::WindowCanvas,
     fonts: &Fonts,
     display: (u32, u32),
     clear: Color4f,
@@ -45,7 +45,7 @@ pub(super) fn frame(
 ) -> Result<()> {
     // Never vsync: every caller here draws over live video, on the thread forwarding input.
     let gl = super::console_flow::bring_up(gl, canvas, false)?;
-    let (dw, dh) = canvas.window().drawable_size();
+    let (dw, dh) = canvas.window().size_in_pixels();
     {
         let surface = gl.surface(dw, dh)?;
         let c = surface.canvas();
@@ -63,7 +63,7 @@ pub(super) fn frame(
 pub(super) const TRANSPARENT: Color4f = Color4f::new(0.0, 0.0, 0.0, 0.0);
 
 /// Two swaps of nothing, so both buffers of the window are wiped.
-pub(super) fn wipe(gl: &mut Option<ConsoleGl>, canvas: &sdl2::render::WindowCanvas, fonts: &Fonts) -> Result<()> {
+pub(super) fn wipe(gl: &mut Option<ConsoleGl>, canvas: &sdl3::render::WindowCanvas, fonts: &Fonts) -> Result<()> {
     for _ in 0..2 {
         frame(gl, canvas, fonts, (1, 1), TRANSPARENT, |_| {})?;
     }
@@ -310,14 +310,20 @@ impl ConfirmDialog {
     }
 
     /// Pointer and pad input while open. The layout is the same one [`Self::draw`] draws.
+    ///
+    /// `remote` is the Magic Remote key this event pressed, already resolved by the caller's
+    /// [`RemoteKeys`](crate::platform::webos::input::RemoteKeys). It is passed in rather than
+    /// derived here because the remote's keys carry no keycode and deriving them twice for one
+    /// event is what let a Back tap open this dialog and immediately dismiss it.
     pub(super) fn handle_event(
         &mut self,
-        event: &sdl2::event::Event,
+        event: &sdl3::event::Event,
+        remote: Option<crate::platform::webos::input::RemoteKey>,
         fonts: &Fonts,
         w: u32,
         h: u32,
     ) -> Option<ConfirmAction> {
-        use sdl2::event::Event;
+        use sdl3::event::Event;
         let focus = self.focus?;
         let l = dialog::layout(
             fonts,
@@ -328,6 +334,7 @@ impl ConfirmDialog {
         );
         match *event {
             Event::MouseMotion { x, y, .. } => {
+                let (x, y) = (x as i32, y as i32);
                 let hover_close = l.on_close(x, y);
                 let hover_changed = self.hover_close != hover_close;
                 self.hover_close = hover_close;
@@ -341,11 +348,12 @@ impl ConfirmDialog {
                 };
             }
             Event::MouseButtonDown {
-                mouse_btn: sdl2::mouse::MouseButton::Left,
+                mouse_btn: sdl3::mouse::MouseButton::Left,
                 x,
                 y,
                 ..
             } => {
+                let (x, y) = (x as i32, y as i32);
                 if l.on_close(x, y) {
                     self.dismiss();
                     return Some(ConfirmAction::Dismissed);
@@ -361,14 +369,20 @@ impl ConfirmDialog {
             }
             _ => {}
         }
-        let nav = match event {
-            Event::KeyDown {
-                keycode: Some(k),
-                repeat: false,
-                ..
-            } => crate::platform::webos::input::menu_event_for_key(*k),
-            Event::ControllerButtonDown { button, .. } => crate::platform::webos::input::menu_event_for_button(*button),
-            _ => None,
+        let nav = if remote == Some(crate::platform::webos::input::RemoteKey::Back) {
+            Some(MenuEvent::Back)
+        } else {
+            match event {
+                Event::KeyDown {
+                    keycode: Some(k),
+                    repeat: false,
+                    ..
+                } => crate::platform::webos::input::menu_event_for_key(*k),
+                Event::GamepadButtonDown { button, .. } => {
+                    crate::platform::webos::input::menu_event_for_button(*button)
+                }
+                _ => None,
+            }
         };
         match nav {
             Some(MenuEvent::Left | MenuEvent::Right) => {
@@ -447,21 +461,23 @@ mod dialog_tests {
         let mut dialog = ConfirmDialog::new("Quit?", "Close app", None, "Quit", Tone::Danger);
         dialog.focus = Some(0);
         let l = dialog::layout(&fonts, 1920.0, 1080.0, crate::app::draw::scale(1080), "Close app");
-        let motion = |x, y| sdl2::event::Event::MouseMotion {
+        let motion = |x, y| sdl3::event::Event::MouseMotion {
             timestamp: 0,
             window_id: 0,
             which: 0,
-            mousestate: sdl2::mouse::MouseState::from_sdl_state(0),
+            mousestate: sdl3::mouse::MouseState::from_sdl_state(0),
             x,
             y,
-            xrel: 0,
-            yrel: 0,
+            xrel: 0.0,
+            yrel: 0.0,
         };
-        let enter = motion(l.close.center_x() as i32, l.close.center_y() as i32);
-        assert!(dialog.handle_event(&enter, &fonts, 1920, 1080).is_some());
+        let enter = motion(l.close.center_x(), l.close.center_y());
+        assert!(dialog.handle_event(&enter, None, &fonts, 1920, 1080).is_some());
         assert!(dialog.hover_close);
-        assert!(dialog.handle_event(&enter, &fonts, 1920, 1080).is_none());
-        assert!(dialog.handle_event(&motion(0, 0), &fonts, 1920, 1080).is_some());
+        assert!(dialog.handle_event(&enter, None, &fonts, 1920, 1080).is_none());
+        assert!(dialog
+            .handle_event(&motion(0.0, 0.0), None, &fonts, 1920, 1080)
+            .is_some());
         assert!(!dialog.hover_close);
     }
 

@@ -8,7 +8,11 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 - `.cargo/config.toml` wires linker to `scripts/cc-shim.sh` (passes `--sysroot` explicitly).
 - **Soft-float was single biggest perf fix** (~300ms → ~30ms render). Non-`hf` target disables hardware FP codegen. Fix: `target-feature=+neon,+vfp3,-soft-float` + `target-cpu=cortex-a73` in `.cargo/config.toml`. Codegen only, not FFI ABI.
 - **glibc shims required** (`src/platform/webos/glibc_compat_shim.c`): webOS glibc ~2.12 lacks `getauxval`/`gettid`/`sendmmsg`. Must land AFTER libstd via `cargo:rustc-link-arg` (single-pass linker drops `link-lib=static` early).
-- **SDL2 must be webosbrew fork** (release-2.30.12-webos.5). Only fork has Wayland shell-integration; on-device system is 2.0.10. Bundle libSDL2 with `$ORIGIN/../lib` RPATH (set in `build.rs`).
+- **SDL3 must be webosbrew fork** (release-3.4.16-webos.2). Only fork has Wayland shell-integration, the webOS scancodes and `SDL_webOS*`; webOS ships no SDL3 at all. Fetched to its own prefix (`$SDL3_PREFIX`, NOT the NDK sysroot — the release says so, and buildroot's pkg-config wrapper mangles a .pc outside it), linked by path from `build.rs`, bundled as `lib/libSDL3.so.0` with `$ORIGIN/../lib` RPATH.
+- **webOS scancodes moved in SDL3** — the block was compacted from 340-505 to 352-375. Home 384→364, Back 482→367, Red/Green/Yellow/Blue 486..489→370..373, Guide 495→374, Exit 505→375.
+- **rust-sdl3's `Keycode`/`Scancode` are closed enums,** with no variant for any webOS key. Every webOS key comes back `None` on BOTH fields of `Event::KeyDown`, so none of them can be named from the safe event API. Two different answers, and the split is load-bearing:
+  - **The colour keys and Back are matched on `Event::KeyDown`'s `raw`,** which carries the plain evdev code (`KEY_RED`..`KEY_BLUE` 0x18e-0x191, `KEY_PREVIOUS` 0x19c) — see `platform::webos::input::RemoteKey`. Polling the state array for these is a **dead end**: Back and Red never set a bit at all, and bits in that range latch (368/369 `CURSOR_SHOW`/`CURSOR_HIDE` read as held all session), so a wrong guess sticks on. Matching the event also restores real down/up edges, which a poll can only approximate.
+  - **Only Home (364) and Exit (375) are polled** with `webos_scancode_down`: they do set state bits and have no event worth matching.
 - **cmake/opus**: `punktfunk-core`'s `quic` feature needs CMAKE_POLICY_VERSION_MINIMUM=3.5 (modern CMake refuses vendored libopus's old minimum).
 - **Shipped builds use fat LTO, one codegen unit** (`Cargo.toml`'s `[profile.release]`). Cross-crate inlining (AEAD, FEC, QUIC parsing) required for armv7 hot loops. Docker tasks default thin LTO/16 units for speed; override with `RELEASE_LTO=fat|thin|false`.
 - **libstdc++ is linked statically, never bundled.** Bundled `lib/libstdc++.so.6` via `DT_RPATH` outranks `LD_LIBRARY_PATH`. webOS 11's `libNDL_media_impl.so.1` needs `GLIBCXX_3.4.32` (missing in SDK copy); webOS 10 needs 3.4.30. Static works on every firmware. No C++ crosses boundary — SDL, NDL, Luna are all C.
@@ -164,10 +168,10 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 
 ## Known platform limitations (don't retry)
 
-- **Panel refresh rate cannot be set.** `webosbrew/SDL-webOS` read-only `SDL_webOSGetRefreshRate` only; no webOS set API exists.
-- **Magic Remote Back needs `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** before window creation (keycode 2097155). Same for Home/Guide. Launcher ribbon needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false`.
+- **Panel refresh rate cannot be set.** `webosbrew/SDL-webOS` is read-only (`SDL_webOSGetRefreshRate`); no webOS set API exists. It and `SDL_webOSGetPanelResolution` are read once on the SDL thread by `device::probe_panel` — the resolution feeds `native_mode` (stock SDL reports the app plane as 1080p on a 4K set), the rate is logged only, since Native deliberately still dials 60.
+- **Magic Remote Back needs `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** before window creation. Same for Home/Guide. Launcher ribbon needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false`.
 - **Access-policy hints are all-or-nothing,** latched at window creation; cannot scope to stream only.
-- **Held Back is EXIT key (keycode 2097155 short tap, scancode 505 held).** Don't time; webOS detects long-press. Poll `WEBOS_EXIT_SCANCODE` (edge-detected), open dialog on rising edge. Short stays Esc/back-nav. Needs both `KEYS_EXIT` and `KEYS_BACK`, or gesture SIGTERMs app.
+- **Held Back is the EXIT key (375); a short tap is ordinary Back.** Don't time it; webOS detects the long-press. Poll `WEBOS_EXIT_SCANCODE` (edge-detected), open dialog on rising edge. Short stays Esc/back-nav. Needs both `KEYS_EXIT` and `KEYS_BACK`, or gesture SIGTERMs app.
 - **The gamepad shortcut is a 1s hold of L1+R1+Start+Select** (`runtime::input::DisconnectChord`), every client's escape chord. It opens disconnect and is also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
 - **Hidden window gets no pointer input.** Keep mapped, fully transparent `RGBA(0,0,0,0)` so NDL shows through (not `.hide()`).
 - **Two independent cursors** — webOS + host over network. Three levers (order matters): `EVIOCGRAB` on evdev (starves compositor), `SDL_webOSCursorVisibility`, `show_cursor`.
@@ -186,7 +190,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
   - **Device filter `EV_REL` with `REL_X`/`REL_Y`**, not absolute. Test `ABS_X`/`ABS_Y` specifically (mice report stray axes).
   - **`EVIOCGRAB` scoped to `set_active`**, not reader lifetime. Kernel releases on fd close (panic safe). Flag gates `sink` call; grabbed/forwarded can't drift.
   - **Hot-plug rescans gated on `/dev/input` mtime.** Opening ~40ms, ~20 empty nodes; unconditional rescan stalls reader ~1s.
-- **Colour buttons: Green/Yellow/Blue poll scancode, Red is keycode.** Scancodes 487-489 appear in state array; Red arrives as `KeyDown` with keycode 2097169, no scancode. No access policy hint for colours.
+- **Colour buttons carry no scancode and no keycode** — matched on the key event's `raw` evdev code with Back (see the Toolchain note above). No access-policy hint exists for them, and none of them can be polled off the state array.
 - **Keyboard Win is Home-class:** gated with remote Home under `KEYS_HOME`. Capture both, relaunch launcher via luna on remote-Home keycode to reach host.
 - **Thread priority boosting removed — don't re-add.** Renicing needs `CAP_SYS_NICE` or `RLIMIT_NICE`; SAM jail grants neither. Poller cost 100ms-interval thread 5s during connect (busiest on 3-core). All threads same priority.
 - **Don't toggle window show/hide while NDL composites.** Silently kills process (Wayland crash). Test visibility in isolation.
@@ -197,7 +201,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - `luna-send` over raw ssh needs `ssh -tt` (real PTY) or output swallowed; `ares-install`/`ares-launch` work.
 - **Black screen despite decode:** launch via real lifecycle (`luna-send .../launch`, SAM jailed uid). NDL punch-through composites for SAM foreground app only.
 - No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
-- SDL2/Wayland may report `refresh_rate=0`; clamp to default.
+- SDL/Wayland may report `refresh_rate=0`; clamp to default. (SDL3 reports it as a float plus an exact numerator/denominator pair, so 59.94 is no longer rounded to 60.)
 - **Game mode/ALLM rooted-only:** public bus denies `settingsservice`; routes via hbchannel root exec. Settings row shown on rooted TV only.
 
 ## ChaCha20 over AES-GCM
@@ -211,6 +215,11 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - 365 titles: decoded drops from 365 to viewport (~5 cols).
 
 ## Audio: two routes, one pipeline (SDL is the default)
+
+- **rust-sdl3 0.20 callback teardown needs a guard.** Its callback wrapper frees userdata before
+  destroying the running stream. `AudioPlayer::drop` unregisters the get callback under SDL's
+  stream lock first. Preserve this ordering until the binding fixes its destructor. The stream
+  owns its device; never wrap its borrowed device ID in an owning `AudioDevice`.
 
 **Audio processing** picks route (`core::model::AudioRoutePref`). Both built on `session::audio::AudioStage` pipeline: decodes/forwards to selected `core::media::AudioSink`. One pump drives both. Third route = one `AudioSink` impl.
 
@@ -245,9 +254,9 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 
 **Blind alleys, so don't re-try:**
 - ⚠ **NDL PCM plane built, measured, removed.** Third route decoded Opus → NDL's `NDL_AUDIO_TYPE_PCM`. Fed on arrival, plane depth (NDL paces picture on it) = network jitter function; field: intermittent lag. Paced ring helped, small latency win for can't-carry-7.1 route (interleave inferred, unverified). Not worth third path.
-- **`sdl2::audio::AudioQueue` can't carry de-jitter** — `queue_audio`/`size`/`clear` only. Pull callback stayed.
+- **SDL's audio queue API can't carry de-jitter** — put/available/clear only. Pull callback stayed. In SDL3 that callback is `AudioCallback<f32>`: it pushes into an `AudioStream` rather than filling a slice SDL owns. ⚠ Its `requested` is a count of **f32 samples, not bytes** — SDL's own C callback is handed bytes, but rust-sdl3 divides by `size_of::<Channel>()` first. Dividing again serves a quarter of every callback, which is audible as noise, not as a dropout.
 - **Don't put audio drain on main loop.** `AudioQueue` is `!Send`; audio cadence behind UI rasterizer.
-- **Don't shrink `DEVICE_BUFFER_FRAMES` below 512.** Smaller quantum buys more wakeups, misses.
+- **Don't shrink `DEVICE_BUFFER_FRAMES` below 512.** Smaller quantum buys more wakeups, misses. SDL3 has no `samples` field on `AudioSpec` — it is the `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` hint, set before the device opens.
 - **Don't split `lock_ffi` per plane** without device evidence. No NDL entry is thread-safe; contention real but second guard guesses vendor internals.
 - **Don't fold clock plane keep-alive into audio pump.** Cadence 20ms; pump parks 100ms empty. One thread = starved plane = the stutter it prevents.
 

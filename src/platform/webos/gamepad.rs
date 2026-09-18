@@ -1,16 +1,20 @@
-//! Maps SDL2 `GameController` events to punktfunk wire `InputEvents`.
+//! Maps SDL3 `Gamepad` events to punktfunk wire `InputEvents`.
 //! Per-transition events (universally compatible).
 use punktfunk_core::input::{gamepad, InputEvent, InputKind};
-use sdl2::controller::{Axis, Button};
+use sdl3::gamepad::{Axis, Button};
 
-/// SDL2's `Button` enum (exhaustively matched — all 20 current variants) → punktfunk's
-/// `BTN_*` wire bit.
-pub fn button_bit(button: Button) -> u32 {
-    match button {
-        Button::A => gamepad::BTN_A,
-        Button::B => gamepad::BTN_B,
-        Button::X => gamepad::BTN_X,
-        Button::Y => gamepad::BTN_Y,
+/// SDL3's `Button` enum (26 variants) → punktfunk's `BTN_*` wire bit, or `None` for a button
+/// the wire has no bit for (see the `Misc2..Misc6` arm) — same shape as [`mouse::button_code`],
+/// so a button with nothing to send is dropped by the `if let` every input source already uses
+/// rather than by remembering to test a sentinel.
+///
+/// [`mouse::button_code`]: crate::platform::webos::mouse::button_code
+pub fn button_bit(button: Button) -> Option<u32> {
+    Some(match button {
+        Button::South => gamepad::BTN_A,
+        Button::East => gamepad::BTN_B,
+        Button::West => gamepad::BTN_X,
+        Button::North => gamepad::BTN_Y,
         Button::Back => gamepad::BTN_BACK,
         Button::Guide => gamepad::BTN_GUIDE,
         Button::Start => gamepad::BTN_START,
@@ -23,12 +27,75 @@ pub fn button_bit(button: Button) -> u32 {
         Button::DPadLeft => gamepad::BTN_DPAD_LEFT,
         Button::DPadRight => gamepad::BTN_DPAD_RIGHT,
         Button::Misc1 => gamepad::BTN_MISC1,
-        Button::Paddle1 => gamepad::BTN_PADDLE1,
-        Button::Paddle2 => gamepad::BTN_PADDLE2,
-        Button::Paddle3 => gamepad::BTN_PADDLE3,
-        Button::Paddle4 => gamepad::BTN_PADDLE4,
+        Button::RightPaddle1 => gamepad::BTN_PADDLE1,
+        Button::LeftPaddle1 => gamepad::BTN_PADDLE2,
+        Button::RightPaddle2 => gamepad::BTN_PADDLE3,
+        Button::LeftPaddle2 => gamepad::BTN_PADDLE4,
         Button::Touchpad => gamepad::BTN_TOUCHPAD,
+        // SDL3 grew Misc2..Misc6 (extra vendor buttons: a Switch pad's capture key and the
+        // like). punktfunk's wire has one `BTN_MISC1` and no bit to carry them, so there is
+        // nothing to send for these.
+        Button::Misc2 | Button::Misc3 | Button::Misc4 | Button::Misc5 | Button::Misc6 => return None,
+    })
+}
+
+/// Sony's USB vendor id, and the `DualSense` Edge's product id. SDL types both Edge and plain
+/// `DualSense` as `PS5` — the ids are what tells them apart, and they are what the kernel's own
+/// `hid-playstation` driver matches on too (see [`crate::platform::webos::dualsense`]).
+const SONY_VID: u16 = 0x054c;
+const DUALSENSE_EDGE_PID: u16 = 0x0df2;
+
+/// The kind to present for a pad SDL has already identified from its controller database, or
+/// `None` to leave the choice to the host.
+///
+/// `SDL_GetGamepadType` is the authority here, answering from SDL's own VID/PID-keyed database.
+/// Not the product string: substring-matching it misses every pad whose name does not spell its
+/// family out ("Wireless Controller" is what a stock `DualShock` 4 calls itself over Bluetooth)
+/// and mis-hits anything that happens to contain the word. [`type_for_name`] stays behind it for
+/// a pad that database has never seen.
+///
+/// Only pads the Xbox default actually misrepresents are mapped. An Xbox pad, or anything
+/// unrecognized, stays `None`: the host's default is already right for the former, and for
+/// the latter naming a specific backend the host may not be able to build is worse than
+/// letting it choose.
+fn kind_for(
+    sdl_type: sdl3::gamepad::GamepadType,
+    ids: Option<(u16, u16)>,
+    name: &str,
+) -> Option<crate::services::store::GamepadType> {
+    use crate::services::store::GamepadType;
+    use sdl3::gamepad::GamepadType as T;
+    match sdl_type {
+        T::PS5 if ids == Some((SONY_VID, DUALSENSE_EDGE_PID)) => Some(GamepadType::DualSenseEdge),
+        // An Edge SDL knows as a PS5 pad but whose ids did not come back (a Bluetooth link that
+        // reports neither) still names itself one.
+        T::PS5 => Some(type_for_name(name).unwrap_or(GamepadType::DualSense)),
+        T::PS4 => Some(GamepadType::DualShock4),
+        T::NintendoSwitchPro | T::NintendoSwitchJoyconPair => Some(GamepadType::SwitchPro),
+        // Not in SDL's database: fall back to what the pad calls itself.
+        T::Unknown | T::Standard => type_for_name(name),
+        _ => None,
     }
+}
+
+/// The kind to present for an open pad — what `Automatic` mirrors.
+pub fn kind_of(pad: &sdl3::gamepad::Gamepad) -> Option<crate::services::store::GamepadType> {
+    let name = pad.name().unwrap_or_default();
+    kind_for(pad.r#type(), pad.vendor_id().zip(pad.product_id()), &name)
+}
+
+/// The same, for a pad SDL has enumerated but nothing has opened. SDL3 answers all three from
+/// the instance id, so a probe no longer has to take the pad's one slot to ask.
+pub fn kind_at(
+    subsystem: &sdl3::GamepadSubsystem,
+    id: sdl3::joystick::JoystickId,
+) -> Option<crate::services::store::GamepadType> {
+    let name = subsystem.name_for_id(id).unwrap_or_default();
+    kind_for(
+        subsystem.type_for_id(id),
+        subsystem.vendor_for_id(id).zip(subsystem.product_for_id(id)),
+        &name,
+    )
 }
 
 /// The controller kind to present to the host when Settings says `Automatic`, derived from
@@ -39,22 +106,16 @@ pub fn button_bit(button: Button) -> u32 {
 /// `DualSense` while the game saw an Xbox pad: wrong glyphs, and — the reason this matters —
 /// no adaptive-trigger effects at all, since a game only emits those for a `DualSense`
 /// ([`crate::platform::webos::dualsense`]).
-///
-/// Only pads the Xbox default actually misrepresents are mapped. An Xbox pad, or anything
-/// unrecognized, stays `None`: the host's default is already right for the former, and for
-/// the latter naming a specific backend the host may not be able to build is worse than
-/// letting it choose.
-pub fn detect_type(subsystem: &sdl2::GameControllerSubsystem) -> Option<crate::services::store::GamepadType> {
-    let count = subsystem.num_joysticks().ok()?;
-    (0..count)
-        .filter(|&i| subsystem.is_game_controller(i))
-        .filter_map(|i| subsystem.name_for_index(i).ok())
-        .find_map(|name| type_for_name(&name))
+pub fn detect_type(subsystem: &sdl3::GamepadSubsystem) -> Option<crate::services::store::GamepadType> {
+    subsystem
+        .gamepads()
+        .ok()?
+        .into_iter()
+        .find_map(|id| kind_at(subsystem, id))
 }
 
-/// Maps an SDL controller name to the kind to present. Names come from SDL's controller
-/// database (`SDL_GameControllerNameForIndex`), so they are stable strings like
-/// "`DualSense` Wireless Controller" rather than raw USB product strings.
+/// Maps a controller's own product string to the kind to present, for a pad SDL's database has
+/// no entry for. Behind [`kind_for`], never on its own.
 pub fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
     use crate::services::store::GamepadType;
     let name = name.to_ascii_lowercase();
@@ -88,23 +149,22 @@ pub fn is_tv_remote(name: &str) -> bool {
     name.contains("remote") || name.contains("rcu")
 }
 
-/// Whether the controller SDL enumerates at `index` is [the TV's remote](is_tv_remote). Neither
+/// Whether the controller with SDL instance id `id` is [the TV's remote](is_tv_remote). Neither
 /// loop opens it: it would take the one pad slot and leave the real pad closed.
-pub fn is_remote_at(subsystem: &sdl2::GameControllerSubsystem, index: u32) -> bool {
-    subsystem.name_for_index(index).is_ok_and(|name| is_tv_remote(&name))
+pub fn is_remote_at(subsystem: &sdl3::GamepadSubsystem, id: sdl3::joystick::JoystickId) -> bool {
+    subsystem.name_for_id(id).is_ok_and(|name| is_tv_remote(&name))
 }
 
 /// Whether a real game pad is attached — what the "With a controller" console-UI mode reads.
 ///
 /// [`is_tv_remote`] is the whole point of the filter: every webOS set enumerates its own remote
 /// as a controller, so trusting SDL's list would make that mode mean "always" on every TV.
-pub fn any_pad_connected(subsystem: &sdl2::GameControllerSubsystem) -> bool {
-    let Ok(count) = subsystem.num_joysticks() else {
-        return false;
-    };
-    (0..count)
-        .filter(|&i| subsystem.is_game_controller(i))
-        .filter_map(|i| subsystem.name_for_index(i).ok())
+pub fn any_pad_connected(subsystem: &sdl3::GamepadSubsystem) -> bool {
+    subsystem
+        .gamepads()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| subsystem.name_for_id(id).ok())
         .any(|name| !is_tv_remote(&name))
 }
 
@@ -143,7 +203,7 @@ pub fn remove_event(pad: u8) -> InputEvent {
     }
 }
 
-/// SDL2's `Axis` enum → punktfunk's `AXIS_*` wire id.
+/// SDL3's `Axis` enum → punktfunk's `AXIS_*` wire id.
 fn axis_id(axis: Axis) -> u32 {
     match axis {
         Axis::LeftX => gamepad::AXIS_LS_X,
@@ -153,12 +213,6 @@ fn axis_id(axis: Axis) -> u32 {
         Axis::TriggerLeft => gamepad::AXIS_LT,
         Axis::TriggerRight => gamepad::AXIS_RT,
     }
-}
-
-/// `pad` is the wire pad index (`flags`) — 0 for the single-controller case this phase
-/// targets (multi-pad indexing is a follow-up once one controller round-trips cleanly).
-pub fn button_event(button: Button, pressed: bool, pad: u8) -> InputEvent {
-    bit_event(button_bit(button), pressed, pad)
 }
 
 /// One `BTN_*` wire bit's edge on pad `pad`.
@@ -173,12 +227,12 @@ pub fn bit_event(bit: u32, pressed: bool, pad: u8) -> InputEvent {
     }
 }
 
-/// SDL2 sticks are already i16 (−32768..32767) matching the wire's range, so X passes
+/// SDL3 sticks are already i16 (−32768..32767) matching the wire's range, so X passes
 /// straight through. Y does not: confirmed on-device (`DualSense` over Bluetooth, this
-/// webOS/Linux SDL2 build) that pushing a stick up/forward reports a *negative* raw
+/// webOS/Linux SDL build) that pushing a stick up/forward reports a *negative* raw
 /// value — the opposite of the wire's XInput/Moonlight "+y = up" convention — so both
 /// sticks' Y axes are negated before sending (`saturating_neg` since raw `i16::MIN`
-/// has no positive counterpart in range). Triggers arrive as SDL2's 0..32767 range —
+/// has no positive counterpart in range). Triggers arrive as SDL's 0..32767 range —
 /// punktfunk wants 0..255, so those are rescaled.
 pub fn axis_event(axis: Axis, value: i16, pad: u8) -> InputEvent {
     let scaled = match axis {

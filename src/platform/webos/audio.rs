@@ -40,16 +40,19 @@ use crate::session::audio::SAMPLE_RATE;
 
 /// Device buffer: 512 frames (10.67 ms). Deliberately not smaller — a smaller quantum on a 2-3
 /// core TV `SoC` buys more wakeups and more missed callbacks, not less latency (docs/NOTES.md).
+///
+/// SDL3's `AudioSpec` has no `samples` field: the device quantum moved out of the open call and
+/// onto this hint, which must be set before the device is opened. Same number, different lever.
 const DEVICE_BUFFER_FRAMES: u16 = 512;
 
 /// Chunks in flight between the decode thread and the callback. 5 ms each.
 const CHUNK_QUEUE: usize = 64;
 
 /// Pre-allocate to satisfy both the policy cap and device period, accounting for chunks in flight.
-fn ring_capacity(device_samples: u16, channels: u8) -> usize {
+fn ring_capacity(device_samples: u32, channels: u8) -> usize {
     const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1000;
     const CHUNK_MS: usize = 5;
-    let period_ms = usize::from(device_samples) / SAMPLES_PER_MS + CHUNK_MS;
+    let period_ms = device_samples as usize / SAMPLES_PER_MS + CHUNK_MS;
     let depth_ms = (TUNING.hard_cap_ms as usize).max(period_ms) + CHUNK_QUEUE * CHUNK_MS;
     depth_ms * SAMPLES_PER_MS * usize::from(channels)
 }
@@ -79,10 +82,8 @@ const TUNING: JitterTuning = JitterTuning::AAUDIO;
 /// audio thread from construction until this is dropped. See the module docs for when it is used
 /// at all.
 pub struct AudioPlayer {
-    /// Never read: this is a pure RAII guard. SDL drains the ring on its own audio thread from
-    /// `open_playback` until the device is dropped, so holding it IS the playback.
-    #[allow(dead_code)]
-    device: sdl2::audio::AudioDevice<RingCallback>,
+    /// Owns playback and the callback state; `Drop` first disconnects SDL's callback.
+    stream: sdl3::audio::AudioStreamWithCallback<RingCallback>,
 }
 
 impl AudioPlayer {
@@ -93,64 +94,80 @@ impl AudioPlayer {
     /// The two halves are returned separately because they belong on different threads: the device
     /// stays wherever SDL was initialised, and the sink moves to the audio thread.
     pub fn new(
-        sdl_audio: &sdl2::AudioSubsystem,
+        sdl_audio: &sdl3::AudioSubsystem,
         channels: u8,
         buffer_ms: Arc<AtomicU32>,
     ) -> Result<(Self, SdlAudioSink)> {
-        let spec = sdl2::audio::AudioSpecDesired {
+        // Before the open, not part of it: see [`DEVICE_BUFFER_FRAMES`].
+        sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", &DEVICE_BUFFER_FRAMES.to_string());
+        let spec = sdl3::audio::AudioSpec {
             freq: Some(SAMPLE_RATE as i32),
-            channels: Some(channels),
-            samples: Some(DEVICE_BUFFER_FRAMES),
+            channels: Some(i32::from(channels)),
+            format: Some(sdl3::audio::AudioFormat::f32_sys()),
         };
         let depth_cell = buffer_ms.clone();
         let (pcm_tx, pcm_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(CHUNK_QUEUE);
         let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(CHUNK_QUEUE);
-        let device = sdl_audio
-            .open_playback(None, &spec, |obtained| RingCallback {
-                rx: pcm_rx,
-                recycle: recycle_tx,
-                ring: VecDeque::with_capacity(ring_capacity(obtained.samples, obtained.channels)),
-                // Built from what the device actually negotiated, not what was asked for: the
-                // policy denominates every depth in interleaved samples, so a channel count that
-                // disagrees with the ring's stride would scale every target silently.
-                policy: JitterPolicy::new(TUNING, obtained.channels),
-                per_ms: (SAMPLE_RATE as usize / 1000) * obtained.channels as usize,
-                buffer_ms,
-                underruns: 0,
-                sheds: 0,
-                trims: 0,
-                dropped_ms: 0,
-                callbacks: 0,
-            })
-            .map_err(|e| anyhow::anyhow!("SDL open_playback: {e}"))?;
-        let obtained = *device.spec();
-        // The device quantum is the other half of this route's latency, and SDL is free to
-        // negotiate something other than what was asked for — a larger one also silently raises the
-        // policy's effective target, which is floored at `one callback + 5 ms`. Unlogged, there was
-        // no way to tell from a session log where the software route's buffering actually went.
+        let stream = sdl_audio
+            .default_playback_device()
+            .open_playback_stream_with_callback(
+                &spec,
+                RingCallback {
+                    rx: pcm_rx,
+                    recycle: recycle_tx,
+                    ring: VecDeque::new(),
+                    policy: JitterPolicy::new(TUNING, channels),
+                    per_ms: (SAMPLE_RATE as usize / 1000) * channels as usize,
+                    scratch: Vec::new(),
+                    buffer_ms,
+                    underruns: 0,
+                    sheds: 0,
+                    trims: 0,
+                    dropped_ms: 0,
+                    callbacks: 0,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("SDL open_playback_stream: {e}"))?;
+        let mut player = Self { stream };
+        let (obtained, frames) = device_format(&player.stream)?;
+        let dev_channels = obtained.channels.unwrap_or(i32::from(channels)).max(1) as u8;
+        let dev_freq = obtained.freq.unwrap_or(SAMPLE_RATE as i32).max(1);
+        let dev_frames = frames.unwrap_or(i32::from(DEVICE_BUFFER_FRAMES)).max(1) as u32;
+        // Device quantum is half of this route's latency. SDL may negotiate larger than requested,
+        // which silently raises the policy's target (floored at one callback + 5ms). Need to log
+        // so session logs show where buffering went.
         tracing::info!(
-            "SDL audio device: {} driver, {}ch @{}Hz, {} frame(s) per callback ({:.1}ms), format {:?}",
+            "SDL audio device: {} driver, {dev_channels}ch @{dev_freq}Hz, {dev_frames} frame(s) per callback ({:.1}ms), format {:?}",
             sdl_audio.current_audio_driver(),
-            obtained.channels,
-            obtained.freq,
-            obtained.samples,
-            f64::from(obtained.samples) * 1000.0 / f64::from(obtained.freq.max(1)),
+            f64::from(dev_frames) * 1000.0 / f64::from(dev_freq),
             obtained.format,
         );
-        if obtained.channels != channels || obtained.freq != SAMPLE_RATE as i32 {
-            // Not fatal — SDL converts — but it means the decoder and the device disagree about
-            // the frame shape, which is worth seeing in a log before it is heard.
+        if dev_channels != channels || dev_freq != SAMPLE_RATE as i32 {
+            // Not fatal - SDL converts - but decoder/device disagreement on frame shape should
+            // be logged before it is heard.
             tracing::warn!(
-                "audio device negotiated {}ch @{}Hz, stream is {}ch @{}Hz",
-                obtained.channels,
-                obtained.freq,
-                channels,
+                "audio device negotiated {dev_channels}ch @{dev_freq}Hz, stream is {channels}ch @{}Hz",
                 SAMPLE_RATE,
             );
         }
-        device.resume();
+        // Convert the device period to source frames before sizing decoder-side buffers.
+        let source_frames = source_frames(dev_frames, dev_freq as u32);
+        {
+            let mut callback = player
+                .stream
+                .lock()
+                .ok_or_else(|| anyhow::anyhow!("SDL lock audio stream"))?;
+            callback.ring.reserve(ring_capacity(source_frames, channels));
+            callback
+                .scratch
+                .resize(source_frames as usize * usize::from(channels), 0.0);
+        }
+        player
+            .stream
+            .resume()
+            .map_err(|e| anyhow::anyhow!("SDL resume audio stream: {e}"))?;
         Ok((
-            Self { device },
+            player,
             SdlAudioSink {
                 pcm_tx,
                 recycle_rx: std::sync::Mutex::new(recycle_rx),
@@ -161,8 +178,36 @@ impl AudioPlayer {
     }
 }
 
+impl Drop for AudioPlayer {
+    fn drop(&mut self) {
+        // rust-sdl3 0.20 frees callback userdata before destroying its stream. Unregistering
+        // under SDL's stream lock waits for an in-flight callback and prevents use-after-free.
+        // SAFETY: the stream is live; this only fails for a null stream.
+        unsafe {
+            sdl3::sys::audio::SDL_SetAudioStreamGetCallback(self.stream.raw(), None, std::ptr::null_mut());
+        }
+    }
+}
+
+/// Query the stream's actual device without constructing an owning `AudioDevice` guard.
+fn device_format(stream: &sdl3::audio::AudioStream) -> Result<(sdl3::audio::AudioSpec, Option<i32>)> {
+    let mut spec = sdl3::sys::audio::SDL_AudioSpec::default();
+    let mut frames = 0;
+    // SAFETY: the stream keeps its bound device alive; both output pointers are valid.
+    let ok = unsafe {
+        let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.raw());
+        sdl3::sys::audio::SDL_GetAudioDeviceFormat(device, &mut spec, &mut frames)
+    };
+    anyhow::ensure!(ok, "SDL device format: {}", sdl3::get_error());
+    Ok((sdl3::audio::AudioSpec::from(&spec), (frames > 0).then_some(frames)))
+}
+
+fn source_frames(device_frames: u32, device_rate: u32) -> u32 {
+    (u64::from(device_frames) * u64::from(SAMPLE_RATE)).div_ceil(u64::from(device_rate)) as u32
+}
+
 /// The feed half of the device, as the pipeline sees it: hand it f32 samples in punktfunk's own
-/// channel order and they reach SDL's callback with no conversion anywhere.
+/// channel order. SDL converts from that format to the playback device's format.
 ///
 /// Timestamps are ignored — this device has no timeline to land on, it plays what it is given in
 /// the order it arrives. That is the whole difference between this route and the two that ride
@@ -226,6 +271,10 @@ struct RingCallback {
     policy: JitterPolicy,
     /// Interleaved samples per millisecond, for the counters below.
     per_ms: usize,
+    /// Buffer for ring samples before push to stream. rust-sdl3 asks for samples instead of a
+    /// mutable slice, so this side owns memory - grown only when callback requests exceed device
+    /// quantum, never allocated per callback.
+    scratch: Vec<f32>,
     buffer_ms: Arc<AtomicU32>,
     underruns: u64,
     /// Smooth drift sheds — the policy working. Counted apart from [`Self::trims`] because they
@@ -238,10 +287,37 @@ struct RingCallback {
     callbacks: u64,
 }
 
-impl sdl2::audio::AudioCallback for RingCallback {
-    type Channel = f32;
+impl sdl3::audio::AudioCallback<f32> for RingCallback {
+    /// SDL3 inverted the contract: callback pushes audio INTO the stream instead of filling a
+    /// slice SDL owns. Core logic unchanged - policy sees one read of `out.len()` samples per call.
+    ///
+    /// WARNING: `requested` is a sample count (f32 units), not bytes. SDL's C callback gets bytes,
+    /// rust-sdl3 divides by `size_of::<Channel>()` before calling here. Dividing again gives 1/4
+    /// of desired samples - audible as noise, not dropout, since ring stays full but reads wrong.
+    fn callback(&mut self, stream: &mut sdl3::audio::AudioStream, requested: i32) {
+        let wanted = requested.max(0) as usize;
+        if wanted == 0 {
+            return;
+        }
+        // Moved out instead of borrowed: `fill` touches `self` throughout, and holding `&mut
+        // self.scratch` across it would lock the whole struct. Take/restore once around `fill`
+        // prevents a later return from orphaning scratch (no compile error but reallocates on
+        // next callback, inside the deadline).
+        let mut buf = std::mem::take(&mut self.scratch);
+        if buf.len() < wanted {
+            buf.resize(wanted, 0.0);
+        }
+        self.fill(&mut buf[..wanted]);
+        let _ = stream.put_data_f32(&buf[..wanted]);
+        self.scratch = buf;
+        self.log_periodically();
+    }
+}
 
-    fn callback(&mut self, out: &mut [f32]) {
+impl RingCallback {
+    /// Serves one callback's worth of samples into `out`, under [`TUNING`]'s de-jitter policy.
+    /// Always fills the whole slice — with silence while priming, and zero-padded on an underrun.
+    fn fill(&mut self, out: &mut [f32]) {
         while let Ok(mut chunk) = self.rx.try_recv() {
             self.ring.extend(chunk.iter().copied());
             // Return the drained Vec to the pool; a full/closed pool just drops it.
@@ -267,18 +343,16 @@ impl sdl2::audio::AudioCallback for RingCallback {
         // quantum every callback, and this is what drift correction actually reacts to.
         self.buffer_ms.store(self.policy.avg_depth_ms(), Ordering::Relaxed);
 
-        // Priming, or re-priming after a sustained drain. Serving a ring shallower than one
-        // callback only produces a run of half-empty callbacks, i.e. continuous crackle instead of
-        // one gap. `note_read` is skipped deliberately — core ignores un-primed reads, and a
-        // deliberate silence is not an underrun.
+        // Priming or re-priming after sustained drain. Ring shallower than one callback produces
+        // continuous crackle (half-empty callbacks) not one gap. Skip note_read - core ignores
+        // un-primed reads, deliberate silence is not an underrun.
         if step.silence {
             out.fill(0.0);
-            self.log_periodically();
             return;
         }
 
-        // Two `copy_from_slice`s at most (the ring wraps once), rather than one `pop_front` per
-        // sample: this runs on SDL's audio thread against a hard deadline.
+        // Two copy_from_slice calls max (ring wraps once), not pop_front per sample - SDL's
+        // audio thread runs against a hard deadline.
         let served = out.len().min(self.ring.len());
         let (head, tail) = self.ring.as_slices();
         let from_head = served.min(head.len());
@@ -293,11 +367,8 @@ impl sdl2::audio::AudioCallback for RingCallback {
         // Drives both the de-prime hysteresis and the adaptive floor, so it must be reported for
         // every read the policy authorised — including the ones that went fine.
         self.policy.note_read(ran_short);
-        self.log_periodically();
     }
-}
 
-impl RingCallback {
     /// ~10 s at this device quantum. `target_ms` is the adaptive floor's current answer — the one
     /// figure that says whether this set needed more slack than the preset's base, and the
     /// evidence for whether the policy is earning its place here.
@@ -316,5 +387,18 @@ impl RingCallback {
             dropped_ms = self.dropped_ms,
             "audio playback (SDL device)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_frames;
+
+    #[test]
+    fn device_period_is_sized_in_source_frames() {
+        assert_eq!(source_frames(512, 48_000), 512);
+        assert_eq!(source_frames(512, 24_000), 1024);
+        assert_eq!(source_frames(512, 96_000), 256);
+        assert_eq!(source_frames(512, 44_100), 558);
     }
 }

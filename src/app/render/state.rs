@@ -47,7 +47,7 @@ pub(crate) struct RenderState {
 /// painter reads.
 ///
 /// Stepped rather than continuous, because reporting `animating` is what keeps the menu loop
-/// off `wait_for_event`: a smooth 60 Hz breath would hold this `SoC` at a full grid redraw per
+/// off the idle wait: a smooth 60 Hz breath would hold this `SoC` at a full grid redraw per
 /// frame for as long as a game is up, to move one dot on a near-two-second cycle. Eighteen
 /// steps is ~10 Hz, past what anyone resolves in a slow fade and a sixth of the redraws.
 ///

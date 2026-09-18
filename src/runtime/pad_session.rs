@@ -16,13 +16,13 @@ use crate::session::Connected;
 const ARRIVAL_SENDS: usize = 3;
 
 /// Every pad axis, for releasing a pad and for re-sending held sticks.
-const PAD_AXES: [sdl2::controller::Axis; 6] = [
-    sdl2::controller::Axis::LeftX,
-    sdl2::controller::Axis::LeftY,
-    sdl2::controller::Axis::RightX,
-    sdl2::controller::Axis::RightY,
-    sdl2::controller::Axis::TriggerLeft,
-    sdl2::controller::Axis::TriggerRight,
+const PAD_AXES: [sdl3::gamepad::Axis; 6] = [
+    sdl3::gamepad::Axis::LeftX,
+    sdl3::gamepad::Axis::LeftY,
+    sdl3::gamepad::Axis::RightX,
+    sdl3::gamepad::Axis::RightY,
+    sdl3::gamepad::Axis::TriggerLeft,
+    sdl3::gamepad::Axis::TriggerRight,
 ];
 
 /// One `DualSense`'s own effects and audio lanes. Dropping it hands the pad back.
@@ -122,7 +122,7 @@ impl Drop for UsbWriter {
 pub(super) fn bring_up(
     connected: &Connected,
     pads: &mut Pads,
-    id: u32,
+    id: sdl3::joystick::JoystickId,
     setting: GamepadType,
     settings: &Settings,
     registry: Option<&Arc<Envelopes>>,

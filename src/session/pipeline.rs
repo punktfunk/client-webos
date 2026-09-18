@@ -201,12 +201,12 @@ fn audio_path_label(pref: AudioRoutePref, route: AudioRoutePref, has_plane: bool
         (AudioRoutePref::NdlOpus, _) => "NDL hardware Opus decode (+ clock plane standing by)",
         // User asked for offload, but plane never confirmed in budget.
         (AudioRoutePref::Software, true) if pref == AudioRoutePref::NdlOpus && !proven => {
-            "software Opus decode -> SDL2 + NDL clock plane (offload asked for, plane unconfirmed)"
+            "software Opus decode -> SDL3 + NDL clock plane (offload asked for, plane unconfirmed)"
         }
         // Plane is the pacing metronome; see `NdlVideo::run_clock_plane`.
-        (AudioRoutePref::Software, true) => "software Opus decode -> SDL2 + NDL clock plane",
+        (AudioRoutePref::Software, true) => "software Opus decode -> SDL3 + NDL clock plane",
         // No plane: NDL v1 has none, or load was refused.
-        (AudioRoutePref::Software, false) => "software Opus decode -> SDL2, no clock plane",
+        (AudioRoutePref::Software, false) => "software Opus decode -> SDL3, no clock plane",
     }
 }
 

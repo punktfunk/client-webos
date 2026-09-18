@@ -20,6 +20,7 @@ includes:
     vars:
       NDK_DIR: '{{.NDK_DIR}}'
       SYSROOT: '{{.SYSROOT}}'
+      SDL3_PREFIX: '{{.SDL3_PREFIX}}'
       TARGET: '{{.TARGET}}'
       APP_ID: '{{.APP_ID}}'
       RUST_IMAGE: '{{.RUST_IMAGE}}'
@@ -29,6 +30,7 @@ vars:
   TV_DEVICE: webos-tv
   SSH_KEY: '{{.SSH_KEY | default "$HOME/.ssh/id_rsa"}}'
   NDK_DIR: .toolchains/arm-webos-linux-gnueabi_sdk-buildroot
+  SDL3_PREFIX: '{{.ROOT_DIR}}/.toolchains/SDL3-3.4.16-webos'
   SYSROOT: '{{.NDK_DIR}}/arm-webos-linux-gnueabi/sysroot'
   TARGET: armv7-unknown-linux-gnueabi
   # One image for all container tasks (shared cargo/target volumes). trixie for glibc 2.41 (host packages).
@@ -60,6 +62,7 @@ tasks:
       PKG_VERSION: '{{.PKG_VERSION}}'
       CARGO_PROFILE_RELEASE_LTO: '{{.LTO}}'
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '{{if eq .LTO "fat"}}1{{else}}16{{end}}'
+      SDL3_PREFIX: '{{.SDL3_PREFIX}}'
     cmds:
       - rustup target add {{.TARGET}}
       - cargo build --release --target {{.TARGET}}
@@ -67,6 +70,8 @@ tasks:
   check:
     desc: Cross-target cargo check without Docker (CI entry point)
     deps: [toolchain:all]
+    env:
+      SDL3_PREFIX: '{{.SDL3_PREFIX}}'
     cmds:
       - rustup target add {{.TARGET}}
       - cargo check --target {{.TARGET}}
@@ -74,17 +79,22 @@ tasks:
   test:
     desc: >-
       Run unit tests on host target. armv7 cross build cannot execute on runner, and lint only
-      type-checks. Needs native SDL2, fontconfig, FreeType; docker:test brings its own.
+      type-checks. Builds SDL3 from source (`vendored-sdl3`); needs fontconfig, FreeType
+      and X11 headers — docker:test brings its own.
     env:
       # Use rust-skia upstream (our mirror is armv7-only).
       SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
     cmds:
-      - cargo test --bins
+      # `vendored-sdl3`: the host target has no libSDL3 to link against — see Cargo.toml.
+      - cargo test --bins --features vendored-sdl3
 
   lint:
     desc: rustfmt check plus cross-target cargo clippy (Cargo.toml [lints.clippy])
     deps: [toolchain:all]
+    env:
+      SDL3_PREFIX: '{{.SDL3_PREFIX}}'
     cmds:
+      - rustup component add rustfmt
       - cargo fmt --check
       - rustup target add {{.TARGET}}
       - rustup component add clippy
@@ -124,7 +134,9 @@ tasks:
       - task: toolchain:docker-run
         vars:
           TARGET_TASK: test
-          EXTRA_APT: libsdl2-dev libfontconfig-dev libfreetype-dev
+          EXTRA_APT: >-
+            libfontconfig-dev libfreetype-dev libx11-dev libxext-dev libxrandr-dev
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev
 
   docker:lint:
     desc: Cross-target cargo clippy in Docker (Cargo.toml [lints.clippy])
@@ -214,7 +226,11 @@ tasks:
           TARGET_TASK: >-
             preview WEBOS_SDK={{.WEBOS_SDK}}
             TELEMETRY_LEVEL={{.TELEMETRY_LEVEL | default "debug"}}
-          EXTRA_APT: libsdl2-dev libfontconfig-dev libfreetype-dev xvfb x11vnc novnc websockify netcat-openbsd
+          EXTRA_APT: >-
+            libfontconfig-dev libfreetype-dev libx11-dev libxext-dev libxrandr-dev
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev
+            libgl1-mesa-dev libegl1-mesa-dev libgl1-mesa-dri
+            xvfb x11vnc novnc websockify netcat-openbsd
           EXTRA_DOCKER: >-
             -p 127.0.0.1:6080:6080 -p 47992:47992
             -v punktfunk-webos-client-home:/root

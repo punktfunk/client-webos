@@ -3,9 +3,9 @@ version: '3'
 silent: true
 
 vars:
-  SDL2_BACKPORT_RELEASE: release-2.30.12-webos.5
-  SDL2_BACKPORT_VERSION: 2.30.12
-  SDL2_BACKPORT_SONAME: libSDL2-2.0.so.0.3000.12
+  SDL3_RELEASE: release-3.4.16-webos.2
+  SDL3_VERSION: 3.4.16
+  SDL3_SONAME: libSDL3.so.0.4.16
   # Apt cache persists via removed docker-clean hook (otherwise ephemeral).
   DOCKER_MOUNTS: >-
     -v {{.ROOT_DIR}}:/workspace
@@ -46,31 +46,30 @@ tasks:
         echo 'int main(void) { return 0; }' | {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-gcc \
             --sysroot={{.SYSROOT}} -x c -o "$TMP/probe" -
 
-  sdl2:
-    desc: Overlay webosbrew/SDL-webOS onto the NDK sysroot
+  sdl3:
+    desc: Fetch webosbrew/SDL-webOS (SDL3) into its own prefix
     deps: [ndk]
+    requires:
+      vars: [SDL3_PREFIX]
     status:
-      - test "$(readlink {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0)" = "{{.SDL2_BACKPORT_SONAME}}"
+      - test -e {{.SDL3_PREFIX}}/lib/{{.SDL3_SONAME}}
     cmds:
       - |
         set -eu
         TMP="$(mktemp -d)"
         trap 'rm -rf "$TMP"' EXIT
-        ASSET="SDL2-{{.SDL2_BACKPORT_VERSION}}-webos.tar.gz"
-        URL="https://github.com/webosbrew/SDL-webOS/releases/download/{{.SDL2_BACKPORT_RELEASE}}/${ASSET}"
+        ASSET="SDL3-{{.SDL3_VERSION}}-webos.2.tar.gz"
+        URL="https://github.com/webosbrew/SDL-webOS/releases/download/{{.SDL3_RELEASE}}/${ASSET}"
         curl -sL -o "$TMP/$ASSET" "$URL"
-        mkdir -p "$TMP/extracted"
-        tar xzf "$TMP/$ASSET" -C "$TMP/extracted"
-        cp -RL "$TMP/extracted/include/SDL2/." {{.SYSROOT}}/usr/include/SDL2/
-        cp -L "$TMP/extracted/lib/{{.SDL2_BACKPORT_SONAME}}" {{.SYSROOT}}/usr/lib/{{.SDL2_BACKPORT_SONAME}}
-        ln -sf {{.SDL2_BACKPORT_SONAME}} {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0
-        ln -sf {{.SDL2_BACKPORT_SONAME}} {{.SYSROOT}}/usr/lib/libSDL2.so
-        sed -i.bak "s/^Version:.*/Version: {{.SDL2_BACKPORT_VERSION}}/" {{.SYSROOT}}/usr/lib/pkgconfig/sdl2.pc
-        rm -f {{.SYSROOT}}/usr/lib/pkgconfig/sdl2.pc.bak
+        rm -rf {{.SDL3_PREFIX}}
+        mkdir -p {{.SDL3_PREFIX}}
+        tar xzf "$TMP/$ASSET" -C {{.SDL3_PREFIX}}
+        test -e {{.SDL3_PREFIX}}/lib/{{.SDL3_SONAME}}
+        test -e {{.SDL3_PREFIX}}/include/SDL3/SDL.h
 
   all:
     desc: Fetch the full webOS cross-toolchain
-    deps: [sdl2]
+    deps: [sdl3]
 
   ares-package:
     desc: Install ares-package (webosbrew/ares-cli-rs) if it isn't already on PATH
@@ -95,7 +94,7 @@ tasks:
   stage-and-package:
     internal: true
     requires:
-      vars: [PKG_VERSION, TARGET, NDK_DIR, SYSROOT]
+      vars: [PKG_VERSION, TARGET, NDK_DIR, SYSROOT, SDL3_PREFIX]
     cmds:
       - |
         set -eu
@@ -103,12 +102,12 @@ tasks:
         trap 'rm -rf "$STAGE_DIR"' EXIT
         mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/lib"
         cp target/{{.TARGET}}/release/punktfunk-webos "$STAGE_DIR/bin/"
-        cp -L {{.SYSROOT}}/usr/lib/libSDL2-2.0.so.0 "$STAGE_DIR/lib/libSDL2-2.0.so.0"
+        cp -L {{.SDL3_PREFIX}}/lib/libSDL3.so.0 "$STAGE_DIR/lib/libSDL3.so.0"
         # libstdc++ linked statically; bundled versions break TV's DT_RPATH.
         # Bundle FreeType 2.13 COLRv1 support; webOS 9.0+ has entry points Skia needs.
         cp -L {{.SYSROOT}}/usr/lib/libfreetype.so.6 "$STAGE_DIR/lib/libfreetype.so.6"
         {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-strip \
-          "$STAGE_DIR/bin/punktfunk-webos" "$STAGE_DIR/lib/libSDL2-2.0.so.0" \
+          "$STAGE_DIR/bin/punktfunk-webos" "$STAGE_DIR/lib/libSDL3.so.0" \
           "$STAGE_DIR/lib/libfreetype.so.6"
         # PROBES=1 ships pfprobe (diagnostics CLI); omit by default (250KB, SSH-only).
         if [ -n "{{.PROBES}}" ]; then
@@ -149,7 +148,7 @@ tasks:
           sh -c '
             rm -f /etc/apt/apt.conf.d/docker-clean &&
             apt-get update -qq &&
-            apt-get install -y -qq --no-install-recommends apt-utils cmake curl ca-certificates git pkg-config build-essential xz-utils python3 {{.EXTRA_APT}} > /dev/null &&
+            apt-get install -y -qq --no-install-recommends cmake {{.EXTRA_APT}} > /dev/null &&
             if ! command -v task > /dev/null 2>&1; then
               curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /opt/punktfunk-webos-tools/bin > /dev/null;
             fi &&

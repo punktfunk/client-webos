@@ -46,8 +46,8 @@ pub(super) struct DisconnectChord {
 
 impl DisconnectChord {
     /// Records one button transition and arms or disarms the hold timer.
-    pub(super) fn set(&mut self, button: sdl2::controller::Button, down: bool) {
-        use sdl2::controller::Button;
+    pub(super) fn set(&mut self, button: sdl3::gamepad::Button, down: bool) {
+        use sdl3::gamepad::Button;
         match button {
             Button::LeftShoulder => self.left_shoulder = down,
             Button::RightShoulder => self.right_shoulder = down,
@@ -82,39 +82,6 @@ impl DisconnectChord {
     pub(super) fn clear(&mut self) {
         *self = Self::default();
     }
-}
-
-/// The Magic Remote's Back as its own node reports it (`KEY_PREVIOUS`), measured on a G5.
-const REMOTE_BACK: u16 = 0x19c;
-
-/// The remote's evdev code for a key the compositor delivered, when the remote has that key:
-/// the arrows, OK, Back and the digits.
-pub(super) fn remote_code(
-    scancode: Option<sdl2::keyboard::Scancode>,
-    keycode: Option<sdl2::keyboard::Keycode>,
-) -> Option<u16> {
-    use sdl2::keyboard::Scancode as S;
-    if keycode.is_some_and(|k| k.into_i32() == crate::platform::webos::input::WEBOS_BACK_KEYCODE) {
-        return Some(REMOTE_BACK);
-    }
-    Some(match scancode? {
-        S::Up => 103,
-        S::Down => 108,
-        S::Left => 105,
-        S::Right => 106,
-        S::Return | S::KpEnter => 28,
-        S::Num1 => 2,
-        S::Num2 => 3,
-        S::Num3 => 4,
-        S::Num4 => 5,
-        S::Num5 => 6,
-        S::Num6 => 7,
-        S::Num7 => 8,
-        S::Num8 => 9,
-        S::Num9 => 10,
-        S::Num0 => 11,
-        _ => return None,
-    })
 }
 
 /// Which of the compositor's keys the Magic Remote pressed. webOS 23+ also types every pad
@@ -181,22 +148,19 @@ impl RemoteGate {
 
     /// Whether `event` may act: anything but a key does, and a key only if the remote pressed
     /// it. A pad's echo has no press behind it, so it, its repeats and its release all fail.
-    pub(super) fn admits(&mut self, event: &sdl2::event::Event, now: Instant) -> bool {
-        use sdl2::event::Event;
+    pub(super) fn admits(&mut self, event: &sdl3::event::Event, now: Instant) -> bool {
+        use sdl3::event::Event;
         if !self.armed {
             return true;
         }
-        let (scancode, keycode, down, repeat) = match *event {
+        let (scancode, raw, down, repeat) = match *event {
             Event::KeyDown {
-                scancode,
-                keycode,
-                repeat,
-                ..
-            } => (scancode, keycode, true, repeat),
-            Event::KeyUp { scancode, keycode, .. } => (scancode, keycode, false, false),
+                scancode, raw, repeat, ..
+            } => (scancode, raw, true, repeat),
+            Event::KeyUp { scancode, raw, .. } => (scancode, raw, false, false),
             _ => return true,
         };
-        let Some(code) = remote_code(scancode, keycode) else {
+        let Some(code) = crate::platform::webos::input::remote_evdev_code(scancode, raw) else {
             return false;
         };
         self.owed.retain(|&(_, at)| now.duration_since(at) < Self::CLAIM_WINDOW);
@@ -227,69 +191,138 @@ impl RemoteGate {
     }
 }
 
-/// Fires once when `down` changes from false to true.
-pub(super) fn rising_edge(down: bool, prev: &mut bool) -> bool {
+/// Rising-edge detect on a raw webOS scancode (polled since these sit outside
+/// rust-sdl3's `Scancode` enum), firing once as it goes down. `prev` carries the last-frame
+/// state across calls.
+fn scancode_rising_edge(scancode: i32, prev: &mut bool) -> bool {
+    let down = crate::platform::webos::input::webos_scancode_down(scancode);
     let fired = down && !*prev;
     *prev = down;
     fired
 }
 
-/// Rising-edge detect on a raw webOS scancode (polled since these sit outside
-/// rust-sdl2's `Scancode` enum). `prev` carries the last-frame state across calls.
-fn scancode_rising_edge(scancode: i32, prev: &mut bool) -> bool {
-    rising_edge(crate::platform::webos::input::webos_scancode_down(scancode), prev)
+/// Controls the webOS on-screen keyboard for UI and streaming loops.
+///
+/// Holds no copy of whether input is on: SDL3 scopes text input per window and answers
+/// `SDL_TextInputActive` for it, so the mirrored `bool` this used to carry - which the
+/// compositor could silently invalidate by dismissing the panel behind our back, and which the
+/// stream loop needed a `raise()` escape hatch to work around - has one source of truth again.
+pub(super) struct TextInputController {
+    util: sdl3::keyboard::TextInputUtil,
+    options: Option<sdl3::keyboard::TextInputOptions>,
+    /// A panel this app raised, and whether it has come up yet — see [`release_if_dismissed`].
+    ///
+    /// [`release_if_dismissed`]: Self::release_if_dismissed
+    raised: Option<(std::time::Instant, bool)>,
 }
 
-/// Controls the webOS on-screen keyboard for UI and streaming loops.
-pub(super) struct TextInputController {
-    util: sdl2::keyboard::TextInputUtil,
-    /// Last requested SDL state. The compositor may dismiss the panel independently.
-    active: bool,
-}
+/// Where the IME should put the caret inside the field rect. Nothing here drives a caret, so the
+/// panel is told the field's start.
+const IME_CURSOR: i32 = 0;
 
 impl TextInputController {
-    pub(super) fn new(util: sdl2::keyboard::TextInputUtil) -> Self {
-        Self { util, active: false }
+    pub(super) fn new(util: sdl3::keyboard::TextInputUtil) -> Self {
+        Self {
+            util,
+            options: None,
+            raised: None,
+        }
     }
 
     pub(super) fn has_screen_keyboard_support(&self) -> bool {
         self.util.has_screen_keyboard_support()
     }
 
-    pub(super) fn is_shown(&self, window: &sdl2::video::Window) -> bool {
+    /// Whether the panel is actually up. Not the same question as [`is_active`](Self::is_active):
+    /// the compositor can dismiss it on its own (Back does exactly that) while text input stays on.
+    pub(super) fn is_shown(&self, window: &sdl3::video::Window) -> bool {
         self.util.is_screen_keyboard_shown(window)
     }
 
-    /// Matches text input state to the active UI screen.
-    pub(super) fn set_active(&mut self, want: bool, rect: Option<sdl2::rect::Rect>) {
-        if want == self.active {
+    /// Whether SDL is accepting text input on `window`, straight from SDL.
+    fn is_active(&self, window: &sdl3::video::Window) -> bool {
+        self.util.is_active(window)
+    }
+
+    /// Matches text input state to the active UI screen, telling the platform IME what kind of
+    /// field it is opening for. `window` is new in SDL3, which scopes text input per window
+    /// instead of globally.
+    pub(super) fn set_active(
+        &mut self,
+        want: Option<sdl3::keyboard::TextInputOptions>,
+        rect: Option<sdl3::rect::Rect>,
+        window: &sdl3::video::Window,
+    ) {
+        let Some(options) = want else {
+            if self.is_active(window) {
+                self.stop(window);
+                tracing::debug!("text input stopped");
+            }
+            self.options = None;
+            return;
+        };
+        if let Some(r) = rect {
+            // The form moves when the keyboard appears. Update its area without reopening it.
+            if self.util.rect(window).ok() != Some((r, IME_CURSOR)) {
+                self.util.set_rect(window, r, IME_CURSOR);
+            }
+        }
+        if self.is_active(window) && self.options == Some(options) {
             return;
         }
-        self.active = want;
-        if want {
-            if let Some(r) = rect {
-                self.util.set_rect(r);
-            }
-            self.util.start();
-        } else {
-            self.util.stop();
+        if let Err(e) = self.util.start_with_options(window, options) {
+            // The options are a hint; a backend that refuses them still owes a panel.
+            tracing::debug!("text input options refused ({e}) - starting plain");
+            self.util.start(window);
         }
-        tracing::debug!("text input requested: {want}");
+        self.options = Some(options);
+        tracing::debug!("text input started: {options:?}");
     }
 
-    /// Raises the panel unconditionally, even if `active` already says it's up — the stream
-    /// loop never polls `is_shown`, so `active` can't tell a still-open panel from one Back
-    /// silently dismissed underneath it. Closing it again is the TV's job — Back dismisses it
-    /// through webOS's own IME, and this app never calls `stop()` in response to that.
-    pub(super) fn raise(&mut self, rect: sdl2::rect::Rect) {
-        self.active = false;
-        self.set_active(true, Some(rect));
+    /// Raises the panel for a host-side field, whatever SDL thinks the current state is - the
+    /// stream loop has no screen to derive one from, and re-starting an already-active input is
+    /// how SDL3 re-shows a panel the compositor dismissed underneath it.
+    pub(super) fn raise(&mut self, rect: sdl3::rect::Rect, window: &sdl3::video::Window) {
+        self.util.set_rect(window, rect, IME_CURSOR);
+        self.util.start(window);
+        self.raised = Some((std::time::Instant::now(), false));
     }
+
+    /// Ends the text input behind a panel webOS has taken away. Call every tick with
+    /// [`is_shown`](Self::is_shown)'s answer.
+    ///
+    /// Back dismisses the panel through webOS's own IME without telling SDL, which leaves the
+    /// field focused — and webOS routes every remote key to a focused field, so the remote reads
+    /// as dead and a later OK re-summons the panel. Nothing else ends it.
+    ///
+    /// Waits for the panel to have actually appeared: `shown` is false for the ticks it takes to
+    /// animate in. [`SHOW_TIMEOUT`](Self::SHOW_TIMEOUT) covers a raise the compositor refuses
+    /// outright, which would otherwise hold the field for the whole session.
+    pub(super) fn release_if_dismissed(&mut self, shown: bool, window: &sdl3::video::Window) {
+        let Some((raised_at, came_up)) = &mut self.raised else {
+            return;
+        };
+        if shown {
+            *came_up = true;
+            return;
+        }
+        if !*came_up && raised_at.elapsed() < Self::SHOW_TIMEOUT {
+            return;
+        }
+        tracing::info!("on-screen keyboard dismissed — releasing text input");
+        self.stop(window);
+    }
+
+    /// How long a raised panel has to appear before [`release_if_dismissed`] gives up on it.
+    ///
+    /// [`release_if_dismissed`]: Self::release_if_dismissed
+    const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Stops text input at loop exit.
-    pub(super) fn stop(&mut self) {
-        self.util.stop();
-        self.active = false;
+    pub(super) fn stop(&mut self, window: &sdl3::video::Window) {
+        self.options = None;
+        self.raised = None;
+        self.util.stop(window);
     }
 }
 
@@ -311,14 +344,28 @@ pub(super) fn home_key_fired(prev: &mut bool) -> bool {
 /// `SDL_StartTextInput`, so the keyboard simply never appeared on the add-host screen
 /// and the only way to enter an address was the remote's number pad.
 ///
-/// `run_ui_flow` now starts text input whenever a screen that edits text is open and
-/// stops it on the way out, and `SDL_SetTextInputRect` tells webOS where the field is
-/// so the panel doesn't cover it. Committed text arrives as `Event::TextInput`.
-pub(super) fn text_input_screen(screen: Screen) -> bool {
-    matches!(
-        screen,
-        Screen::AddHost | Screen::EditHost | Screen::RenameCollection | Screen::RenameProfile
-    )
+/// `run_ui_flow` starts text input whenever a screen that edits text is open and stops it on the
+/// way out, and `SDL_SetTextInputArea` tells webOS where the field is so the panel doesn't cover
+/// it. Committed text arrives as `Event::TextInput`.
+///
+/// What each screen asks the IME for is per-field, not one global "text input is on".
+/// An address is neither a sentence nor a word, so autocorrect and auto-capitalisation are turned
+/// off for it - left on, webOS's own keyboard capitalises the first character of a hostname and
+/// offers to correct it to a dictionary word.
+pub(super) fn text_input_options(screen: Screen) -> Option<sdl3::keyboard::TextInputOptions> {
+    use sdl3::keyboard::{Capitalization, TextInputOptions, TextInputType};
+    let input_type = match screen {
+        Screen::AddHost | Screen::EditHost => TextInputType::Text,
+        Screen::RenameCollection | Screen::RenameProfile => TextInputType::Name,
+        _ => return None,
+    };
+    Some(TextInputOptions {
+        input_type: Some(input_type),
+        capitalization: Some(Capitalization::None),
+        autocorrect: Some(false),
+        multiline: Some(false),
+        android_input_type: None,
+    })
 }
 
 /// Edge-triggers Back off `held`: a repeat/OS-resent press while already held
@@ -353,9 +400,9 @@ const NAV_REPEAT_PERIOD: Duration = Duration::from_millis(90);
 /// not have its re-centre cancel the D-pad's repeat.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum NavSource {
-    Key(sdl2::keyboard::Keycode),
-    Button(sdl2::controller::Button),
-    Axis(sdl2::controller::Axis),
+    Key(sdl3::keyboard::Keycode),
+    Button(sdl3::gamepad::Button),
+    Axis(sdl3::gamepad::Axis),
 }
 
 /// A held direction, mid-autorepeat.
@@ -373,15 +420,15 @@ struct NavRepeat {
 /// `allow_repeat` says whether the OS's auto-repeat of a held key counts: a gesture that acts
 /// on the press (Back) wants only the first, one that tracks the button being *down* (the
 /// card hold) has to see them all.
-pub(super) fn is_menu_press(event: &sdl2::event::Event, want: MenuEvent, allow_repeat: bool) -> bool {
-    use sdl2::event::Event;
+pub(super) fn is_menu_press(event: &sdl3::event::Event, want: MenuEvent, allow_repeat: bool) -> bool {
+    use sdl3::event::Event;
     match *event {
         Event::KeyDown {
             keycode: Some(k),
             repeat,
             ..
         } => (allow_repeat || !repeat) && crate::platform::webos::input::menu_event_for_key(k) == Some(want),
-        Event::ControllerButtonDown { button, .. } => {
+        Event::GamepadButtonDown { button, .. } => {
             crate::platform::webos::input::menu_event_for_button(button) == Some(want)
         }
         _ => false,
@@ -389,11 +436,11 @@ pub(super) fn is_menu_press(event: &sdl2::event::Event, want: MenuEvent, allow_r
 }
 
 /// The release half of [`is_menu_press`], for the gestures that resolve on the way up.
-pub(super) fn is_menu_release(event: &sdl2::event::Event, want: MenuEvent) -> bool {
-    use sdl2::event::Event;
+pub(super) fn is_menu_release(event: &sdl3::event::Event, want: MenuEvent) -> bool {
+    use sdl3::event::Event;
     match *event {
         Event::KeyUp { keycode: Some(k), .. } => crate::platform::webos::input::menu_event_for_key(k) == Some(want),
-        Event::ControllerButtonUp { button, .. } => {
+        Event::GamepadButtonUp { button, .. } => {
             crate::platform::webos::input::menu_event_for_button(button) == Some(want)
         }
         _ => false,
@@ -422,6 +469,15 @@ pub(super) struct UiInput {
 }
 
 impl UiInput {
+    /// Hands focus to the non-pointer input that is about to act, for callers outside this
+    /// module. The remote's Back carries no keycode in SDL3, so `ui_flow` resolves and
+    /// dispatches it itself (see `RemoteKeys`) and never reaches the claim `handle_ui_event`
+    /// makes for every other menu key — without this, the row Back just left is re-hovered by
+    /// the first wobble of the hand holding the remote.
+    pub(super) fn claim_nav_focus(&mut self) {
+        self.nav_focus.claim();
+    }
+
     /// Arms autorepeat on a direction that was just pressed.
     ///
     /// Pressing a non-directional one also ends any repeat in flight: whatever the user is
@@ -536,6 +592,38 @@ impl NavFocus {
     }
 }
 
+/// The menu's layout box, in the whole units every screen lays out in: the panel's real mode
+/// divided by `app::draw::panel_k`.
+///
+/// Its own type rather than the `sdl3::video::DisplayMode` this used to be passed as. That mode
+/// was fabricated field by field - pixel density, an exact refresh numerator/denominator and a
+/// null backend-data pointer - to carry two numbers into code that read nothing else, and being
+/// an SDL type invited setting it on a display, which it is not valid for.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct LayoutBox {
+    pub(super) w: u32,
+    pub(super) h: u32,
+}
+
+impl LayoutBox {
+    /// SDL's IME area is in window coordinates, not the menu's scaled layout units.
+    pub(super) fn window_rect(self, rect: crate::ui::render::Rect, window: (u32, u32)) -> sdl3::rect::Rect {
+        let x = window.0 as f32 / self.w.max(1) as f32;
+        let y = window.1 as f32 / self.h.max(1) as f32;
+        sdl3::rect::Rect::new(
+            (rect.x() as f32 * x).round() as i32,
+            (rect.y() as f32 * y).round() as i32,
+            (rect.width() as f32 * x).round() as u32,
+            (rect.height() as f32 * y).round() as u32,
+        )
+    }
+
+    /// The box as the `App` entry points take it.
+    fn wh(self) -> (u32, u32) {
+        (self.w, self.h)
+    }
+}
+
 /// What the UI loop should do with the event `handle_ui_event` just consumed.
 pub(super) enum EventAction {
     /// Handled — carry on with the next event.
@@ -567,20 +655,20 @@ fn arm_card_hold(input: &mut UiInput, app: &App, screen_w: u32) -> bool {
 /// further.
 fn card_hold_gate(
     app: &mut App,
-    event: &sdl2::event::Event,
+    event: &sdl3::event::Event,
     input: &mut UiInput,
-    display_mode: sdl2::video::DisplayMode,
+    layout: LayoutBox,
     dirty: &mut bool,
 ) -> Option<EventAction> {
-    use sdl2::event::Event;
-    let (w, h) = (display_mode.w as u32, display_mode.h as u32);
+    use sdl3::event::Event;
+    let (w, h) = layout.wh();
     // The Magic Remote's pointer delivers OK as a left mouse button, so give it the same
     // hold gesture the D-pad's Confirm has: a press on a hovered Home card starts the hold
     // and is swallowed (the card's menu opens on the hold-elapsed tick, same as `CARD_HOLD`
     // above), and the tap/launch comes only from the release. A press on anything else falls
     // through to the normal click path.
     if let Event::MouseButtonDown {
-        mouse_btn: sdl2::mouse::MouseButton::Left,
+        mouse_btn: sdl3::mouse::MouseButton::Left,
         x,
         y,
         ..
@@ -592,9 +680,9 @@ fn card_hold_gate(
         if !matches!(app.nav.screen, Screen::Home) || app.card_menu.is_some() {
             return None;
         }
-        // Land hover focus on the press point first — a button press can jostle the
+        // Land hover focus on the press point first - a button press can jostle the
         // remote off the last motion position.
-        *dirty |= app.handle_mouse_motion(x, y, w, h);
+        *dirty |= app.handle_mouse_motion(x as i32, y as i32, w, h);
         if input.card_held.is_some() {
             return Some(EventAction::Next);
         }
@@ -607,7 +695,7 @@ fn card_hold_gate(
     // already opened the card's menu (swallow); a quick tap confirms whatever's under the
     // pointer now, exactly as an immediate click would have.
     if let Event::MouseButtonUp {
-        mouse_btn: sdl2::mouse::MouseButton::Left,
+        mouse_btn: sdl3::mouse::MouseButton::Left,
         x,
         y,
         ..
@@ -618,7 +706,7 @@ fn card_hold_gate(
         if hold.fired {
             return Some(EventAction::Next);
         }
-        return Some(if app.handle_mouse_click(x, y, w, h).is_some() {
+        return Some(if app.handle_mouse_click(x as i32, y as i32, w, h).is_some() {
             EventAction::Launch
         } else {
             EventAction::Next
@@ -633,10 +721,7 @@ fn card_hold_gate(
         if input.card_held.is_some() {
             return Some(EventAction::Next);
         }
-        if matches!(app.nav.screen, Screen::Home)
-            && app.card_menu.is_none()
-            && arm_card_hold(input, app, display_mode.w as u32)
-        {
+        if matches!(app.nav.screen, Screen::Home) && app.card_menu.is_none() && arm_card_hold(input, app, layout.w) {
             return Some(EventAction::Next);
         }
         return None;
@@ -649,7 +734,7 @@ fn card_hold_gate(
     // A quick tap: the press never dispatched, so do it now. A hold that already opened its
     // menu, or one whose screen/focus moved out from under it, resolves to nothing.
     let tapped = !hold.fired && matches!(app.nav.screen, Screen::Home) && hold.focus == app.home_focus;
-    let launched = tapped && app.press(display_mode.w as u32, display_mode.h as u32).is_some();
+    let launched = tapped && app.press(w, h).is_some();
     Some(if launched {
         EventAction::Launch
     } else {
@@ -659,12 +744,8 @@ fn card_hold_gate(
 
 /// Feeds a resolved `MenuEvent` to the app, translating what it returns into this
 /// loop's terms. The per-screen routing is `App::handle_menu_event`.
-pub(super) fn dispatch_menu_event(
-    app: &mut App,
-    menu_ev: MenuEvent,
-    display_mode: sdl2::video::DisplayMode,
-) -> EventAction {
-    let (w, h) = (display_mode.w as u32, display_mode.h as u32);
+pub(super) fn dispatch_menu_event(app: &mut App, menu_ev: MenuEvent, layout: LayoutBox) -> EventAction {
+    let (w, h) = layout.wh();
     if menu_ev == MenuEvent::Back {
         return if app.back(w, h).is_some() {
             EventAction::Launch
@@ -692,18 +773,22 @@ pub(super) fn dispatch_menu_event(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn handle_ui_event(
     app: &mut App,
-    event: sdl2::event::Event,
+    event: sdl3::event::Event,
     input: &mut UiInput,
-    display_mode: sdl2::video::DisplayMode,
+    layout: LayoutBox,
     dirty: &mut bool,
 ) -> EventAction {
-    use sdl2::event::Event;
-    let (w, h) = (display_mode.w as u32, display_mode.h as u32);
-    // The Magic Remote's pointer mode surfaces as a plain SDL2 MouseMotion
+    use sdl3::event::Event;
+    let (w, h) = layout.wh();
+    // The Magic Remote's pointer mode surfaces as a plain SDL MouseMotion
     // event fired continuously while the remote is moving — unlike every other
     // event handled below, redraw only if the motion actually changed the
     // focused/hovered element, not on every no-op tick.
+    //
+    // SDL3 reports pointer coordinates as f32; everything below this line lays out in whole
+    // pixels, so they are truncated once here rather than at each of the dozen readers.
     if let Event::MouseMotion { x, y, .. } = event {
+        let (x, y) = (x as i32, y as i32);
         if !input.nav_focus.swallows_motion(x, y) {
             *dirty |= app.handle_mouse_motion(x, y, w, h);
         }
@@ -713,7 +798,9 @@ pub(super) fn handle_ui_event(
     // y > 0 = "scroll up" = content moves down). Like motion above, only
     // redraws when the offset actually moved (a wheel tick at either clamp
     // edge is a no-op).
-    if let Event::MouseWheel { y: wheel_y, .. } = event {
+    // `integer_y`, not `y`: SDL carries both, and the detent logic below wants whole clicks,
+    // not the fractional scroll a trackpad reports.
+    if let Event::MouseWheel { integer_y: wheel_y, .. } = event {
         input.nav_focus.claim();
         // Anything that navigates by row — a list screen, an open dropdown, a held card's
         // submenu — takes one detent as one Up/Down press, so the wheel reaches every list
@@ -725,7 +812,7 @@ pub(super) fn handle_ui_event(
             // for free off the focus pop `list_nav` arms, but an open dropdown has no such
             // animation, so its pick would move with nothing on screen following it.
             let before = app.row_focus();
-            dispatch_menu_event(app, menu_ev, display_mode);
+            dispatch_menu_event(app, menu_ev, layout);
             *dirty |= app.row_focus() != before;
         } else {
             match app.nav.screen {
@@ -749,7 +836,7 @@ pub(super) fn handle_ui_event(
     // acting on the row they just navigated to, not on whatever the pointer drifted over on the
     // way — so it confirms the focused row, exactly as the remote's OK would.
     if let Event::MouseButtonDown {
-        mouse_btn: sdl2::mouse::MouseButton::Left,
+        mouse_btn: sdl3::mouse::MouseButton::Left,
         ..
     } = event
     {
@@ -758,21 +845,21 @@ pub(super) fn handle_ui_event(
         if std::mem::take(&mut input.nav_focus).held {
             input.nav_click = true;
             *dirty = true;
-            return dispatch_menu_event(app, MenuEvent::Confirm, display_mode);
+            return dispatch_menu_event(app, MenuEvent::Confirm, layout);
         }
     }
     // The release of that same click carries no second action.
     if matches!(
         event,
         Event::MouseButtonUp {
-            mouse_btn: sdl2::mouse::MouseButton::Left,
+            mouse_btn: sdl3::mouse::MouseButton::Left,
             ..
         }
     ) && std::mem::take(&mut input.nav_click)
     {
         return EventAction::Next;
     }
-    if let Some(action) = card_hold_gate(app, &event, input, display_mode, dirty) {
+    if let Some(action) = card_hold_gate(app, &event, input, layout, dirty) {
         return action;
     }
     // Any other event might change what's on screen (focus/hover, a typed
@@ -786,14 +873,14 @@ pub(super) fn handle_ui_event(
         // `ui::widgets::sidebar_menu_button_rect`), so nothing needs to wait for the
         // release.
         Event::MouseButtonDown {
-            mouse_btn: sdl2::mouse::MouseButton::Left,
+            mouse_btn: sdl3::mouse::MouseButton::Left,
             x,
             y,
             ..
         } => {
             // A grid-card click resolves via `confirm_grid_card`'s async check,
             // same as a remote Confirm — never a target directly here.
-            return if app.handle_mouse_click(x, y, w, h).is_some() {
+            return if app.handle_mouse_click(x as i32, y as i32, w, h).is_some() {
                 EventAction::Launch
             } else {
                 EventAction::Next
@@ -802,7 +889,7 @@ pub(super) fn handle_ui_event(
         // Ends a Bitrate drag armed in `handle_mouse_click` — without this the slider
         // would keep tracking the pointer (or a stale last position) past the release.
         Event::MouseButtonUp {
-            mouse_btn: sdl2::mouse::MouseButton::Left,
+            mouse_btn: sdl3::mouse::MouseButton::Left,
             ..
         } => {
             app.end_slider_drag();
@@ -835,7 +922,7 @@ pub(super) fn handle_ui_event(
             // as a synthetic Backspace rather than as `TextInput`. Consumed only when the
             // screen had something to erase, so on such a remote Backspace still leaves an
             // empty field the way Back does.
-            if k == sdl2::keyboard::Keycode::Backspace && app.erase_text_entry() {
+            if k == sdl3::keyboard::Keycode::Backspace && app.erase_text_entry() {
                 return EventAction::Next;
             }
         }
@@ -890,21 +977,21 @@ pub(super) fn handle_ui_event(
             input.release_nav_repeat(NavSource::Key(k));
             None
         }
-        Event::ControllerButtonDown { button, .. } => {
+        Event::GamepadButtonDown { button, .. } => {
             let ev = edge_trigger_back(
                 crate::platform::webos::input::menu_event_for_button(button),
                 &mut input.menu_back_down,
             );
             input.press_nav(NavSource::Button(button), ev)
         }
-        Event::ControllerButtonUp { button, .. } => {
+        Event::GamepadButtonUp { button, .. } => {
             if crate::platform::webos::input::menu_event_for_button(button) == Some(MenuEvent::Back) {
                 input.menu_back_down = false;
             }
             input.release_nav_repeat(NavSource::Button(button));
             None
         }
-        Event::ControllerAxisMotion { axis, value, .. } => {
+        Event::GamepadAxisMotion { axis, value, .. } => {
             // Back at centre ends the hold this axis was running; a fresh deflection past the
             // deadzone starts one.
             if crate::platform::webos::input::StickMenuNav::centred(value) {
@@ -922,40 +1009,28 @@ pub(super) fn handle_ui_event(
     // the pointer off until it is deliberately moved, so rows sliding under a resting cursor
     // (or a Back that lands one under it) cannot steal the focus back.
     input.nav_focus.claim();
-    dispatch_menu_event(app, menu_ev, display_mode)
+    dispatch_menu_event(app, menu_ev, layout)
 }
 
 #[cfg(test)]
 mod remote_gate_tests {
     use super::*;
-    use sdl2::event::Event;
-    use sdl2::keyboard::{Keycode, Mod, Scancode};
+    use sdl3::event::Event;
+    use sdl3::keyboard::{Keycode, Scancode};
+
+    use crate::platform::webos::input::{test_key_event, RemoteKey};
 
     fn key(scancode: Option<Scancode>, keycode: Option<Keycode>, down: bool, repeat: bool) -> Event {
-        let (timestamp, window_id, keymod) = (0, 0, Mod::NOMOD);
-        if down {
-            Event::KeyDown {
-                timestamp,
-                window_id,
-                keycode,
-                scancode,
-                keymod,
-                repeat,
-            }
-        } else {
-            Event::KeyUp {
-                timestamp,
-                window_id,
-                keycode,
-                scancode,
-                keymod,
-                repeat,
-            }
-        }
+        test_key_event(scancode, keycode, 0, down, repeat)
     }
 
     fn up_key(down: bool, repeat: bool) -> Event {
         key(Some(Scancode::Up), Some(Keycode::Up), down, repeat)
+    }
+
+    /// The remote's Back as SDL3 actually delivers it: nothing but `raw`.
+    fn back_key(down: bool) -> Event {
+        test_key_event(None, None, RemoteKey::Back.to_raw(), down, false)
     }
 
     #[test]
@@ -978,10 +1053,25 @@ mod remote_gate_tests {
         assert!(!gate.admits(&up_key(true, false), t));
         assert!(!gate.admits(&up_key(true, true), t));
         assert!(!gate.admits(&up_key(false, false), t));
-        let back = Keycode::from_i32(crate::platform::webos::input::WEBOS_BACK_KEYCODE);
-        assert!(!gate.admits(&key(None, back, true, false), t));
-        gate.pressed(REMOTE_BACK, t);
-        assert!(gate.admits(&key(None, back, true, false), t));
+        // The remote's Back: no scancode, no keycode, identified only by `raw` (see
+        // `remote_evdev_code`). Gated like any other key - the echo is refused, the real press admitted.
+        let back = || back_key(true);
+        assert!(!gate.admits(&back(), t));
+        gate.pressed(RemoteKey::Back.to_raw(), t);
+        assert!(gate.admits(&back(), t));
+    }
+
+    #[test]
+    fn rejected_back_echo_does_not_swallow_the_real_press() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        let mut keys = crate::platform::webos::input::RemoteKeys::default();
+        let down = back_key(true);
+        assert_eq!(keys.edge(&down, gate.admits(&down, t)), None);
+        gate.pressed(RemoteKey::Back.to_raw(), t);
+        assert_eq!(keys.edge(&down, gate.admits(&down, t)), Some((RemoteKey::Back, true)));
+        let up = back_key(false);
+        assert_eq!(keys.edge(&up, gate.admits(&up, t)), Some((RemoteKey::Back, false)));
+        assert_eq!(keys.edge(&up, gate.admits(&up, t)), None);
     }
 
     #[test]
@@ -1015,7 +1105,7 @@ mod remote_gate_tests {
 #[cfg(test)]
 mod disconnect_chord_tests {
     use super::*;
-    use sdl2::controller::Button::{self, Back, Guide, LeftShoulder, RightShoulder, Start};
+    use sdl3::gamepad::Button::{self, Back, Guide, LeftShoulder, RightShoulder, Start};
 
     fn held(buttons: &[Button]) -> DisconnectChord {
         let mut chord = DisconnectChord::default();
@@ -1038,6 +1128,88 @@ mod disconnect_chord_tests {
             &[Guide, LeftShoulder, RightShoulder, Start],
         ] {
             assert!(!held(partial).held_for(Duration::ZERO), "{partial:?} armed the dialog");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sdl_tests {
+    use super::*;
+
+    #[test]
+    fn ime_area_uses_window_units() {
+        let layout = LayoutBox { w: 1536, h: 864 };
+        let rect = crate::ui::render::Rect::new(100, 200, 400, 60);
+        assert_eq!(
+            layout.window_rect(rect, (1920, 1080)),
+            sdl3::rect::Rect::new(125, 250, 500, 75)
+        );
+        assert_eq!(
+            layout.window_rect(rect, (1536, 864)),
+            sdl3::rect::Rect::new(100, 200, 400, 60)
+        );
+    }
+
+    #[test]
+    fn text_and_audio_lifetimes() {
+        use crate::core::media::{AudioSink, Samples};
+        use crate::platform::webos::audio::AudioPlayer;
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc;
+
+        // SDL's main-thread state and driver hints are process-global. Isolate from other tests.
+        const CHILD: &str = "PUNKTFUNK_SDL_LIFETIME_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::input::sdl_tests::text_and_audio_lifetimes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("SDL_AUDIO_DRIVER", "dummy")
+                .env("SDL_VIDEO_DRIVER", "dummy")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let sdl = sdl3::init().unwrap();
+        let video = sdl.video().unwrap();
+        let window = video.window("input test", 1920, 1080).hidden().build().unwrap();
+        let util = video.text_input();
+        let mut input = TextInputController::new(video.text_input());
+        let first = sdl3::rect::Rect::new(100, 700, 400, 60);
+        let moved = sdl3::rect::Rect::new(100, 400, 400, 60);
+        input.set_active(text_input_options(Screen::AddHost), Some(first), &window);
+        assert!(util.is_active(&window));
+        assert_eq!(util.rect(&window).unwrap(), (first, IME_CURSOR));
+        input.set_active(text_input_options(Screen::AddHost), Some(moved), &window);
+        assert!(util.is_active(&window));
+        assert_eq!(util.rect(&window).unwrap(), (moved, IME_CURSOR));
+        input.set_active(None, None, &window);
+        assert!(!util.is_active(&window));
+
+        let audio = sdl.audio().unwrap();
+        for channels in [2, 6, 2, 6] {
+            let depth = Arc::new(AtomicU32::new(0));
+            let (player, sink) = AudioPlayer::new(&audio, channels, depth.clone()).unwrap();
+            let pcm = vec![0.1; 240 * usize::from(channels)];
+            for _ in 0..16 {
+                sink.feed(Samples::F32(&pcm), 0).unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while depth.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(depth.load(Ordering::Relaxed) > 0, "SDL callback never consumed PCM");
+            // Tear down while playback is active, then reopen on the same subsystem.
+            drop(player);
         }
     }
 }

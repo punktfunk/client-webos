@@ -162,24 +162,86 @@ fn ota_id() -> Option<String> {
     json_str_field(system_info(), "otaId")
 }
 
+/// The panel as the SDL fork reports it. Each field is `None` when the fork could not answer —
+/// a stock SDL3, or a set whose compositor does not carry that figure.
+#[derive(Copy, Clone, Debug)]
+struct Panel {
+    size: Option<(u32, u32)>,
+    refresh_hz: Option<u32>,
+}
+
+/// The panel SIZE only. Probed once on the SDL thread by [`probe_panel`].
+///
+/// The rate is not cached; `native_mode` doesn't dial it, so a cached value would mislead
+/// future readers. It is logged at probe time only.
+///
+/// `Some(None)` is "fork was asked, could not answer"; `None` is "not probed yet".
+static PANEL_SIZE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+
+/// Probes the SDL fork for the panel's real size and rate, caching the size for [`native_mode`].
+///
+/// **Call once from the SDL video thread, after the video subsystem is up.** Both fork calls
+/// read compositor state, and [`native_mode`] runs on the connect thread — thus the cache.
+pub fn probe_panel() {
+    let probed = sdl_webos_panel();
+    let _ = PANEL_SIZE.set(probed.size);
+    match probed.size {
+        Some((w, h)) => tracing::info!(
+            "panel (SDL fork): {w}x{h}, {}",
+            probed
+                .refresh_hz
+                .map_or_else(|| "rate unavailable".to_string(), |r| format!("{r}Hz")),
+        ),
+        None => tracing::info!("panel: SDL fork reports no resolution — falling back to Luna's UHD flag"),
+    }
+}
+
+/// Calls into the SDL fork. Separate from [`probe_panel`] to keep caching and FFI apart.
+fn sdl_webos_panel() -> Panel {
+    let Ok(fns) = super::sdl_webos::fns() else {
+        return Panel {
+            size: None,
+            refresh_hz: None,
+        };
+    };
+    let (mut w, mut h, mut rate) = (0i32, 0i32, 0i32);
+    // SAFETY: three valid out-pointers to locals; both entry points are documented as filling
+    // them only on a `true` return, and the caller is the SDL video thread.
+    let (got_size, got_rate) = unsafe { ((fns.panel_resolution)(&mut w, &mut h), (fns.refresh_rate)(&mut rate)) };
+    Panel {
+        size: (got_size && w > 0 && h > 0).then_some((w as u32, h as u32)),
+        refresh_hz: (got_rate && rate > 0).then_some(rate as u32),
+    }
+}
+
 /// The panel's own stream mode — what the shared settings document's `0` ("Native") and
 /// `match_window` resolve to at connect, as the desktop clients resolve them to the monitor.
 ///
-/// SDL cannot answer this: it reports the app plane as 1080p@60 on a 4K panel. The resolution
-/// comes from `getSystemInfo`'s `UHD` flag; an unanswered query reads as 1080p, which streams
-/// rather than failing the handshake with a 0×0 request. The rate is 60: the plane rate the
-/// compositor reports, and the shipped default before the document moved. 120 stays a pick.
+/// The size comes from the SDL fork ([`probe_panel`]), or, where it cannot answer, from
+/// `getSystemInfo`'s `UHD` flag as before; an unanswered query reads as 1080p, which streams
+/// rather than failing the handshake with a 0×0 request.
+///
+/// The rate stays 60 even where the fork reports otherwise, and deliberately: it is the plane
+/// rate the compositor drives and the shipped default, and 120 remains something the user picks
+/// rather than something a 120 Hz panel starts dialling on its own. The measured rate is logged
+/// by [`probe_panel`] either way.
 pub fn native_mode() -> punktfunk_core::config::Mode {
-    let uhd = json_str_field(system_info(), "UHD");
-    let (width, height) = if uhd.as_deref() == Some("true") {
-        (3840, 2160)
-    } else {
-        (1920, 1080)
-    };
-    tracing::info!(
-        "panel: UHD={} — native mode {width}x{height}@60",
-        uhd.as_deref().unwrap_or("unknown")
-    );
+    let probed = PANEL_SIZE.get().copied().unwrap_or_else(|| {
+        // Not expected; `run_inner` probes before this runs. Worth a warn because the fallback
+        // silently answers 1080p-or-4K either way — no other signal for a wrong mode.
+        tracing::warn!("native mode asked for before the panel was probed — using Luna's UHD flag");
+        None
+    });
+    let (width, height) = probed.unwrap_or_else(|| {
+        let uhd = json_str_field(system_info(), "UHD");
+        tracing::info!("panel: UHD={}", uhd.as_deref().unwrap_or("unknown"));
+        if uhd.as_deref() == Some("true") {
+            (3840, 2160)
+        } else {
+            (1920, 1080)
+        }
+    });
+    tracing::info!("native mode {width}x{height}@60");
     punktfunk_core::config::Mode {
         width,
         height,

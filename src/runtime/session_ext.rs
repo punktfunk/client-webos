@@ -233,7 +233,7 @@ impl Connected {
             if slot.extras.audio.as_ref().is_some_and(|audio| audio.envelope.active()) {
                 continue;
             }
-            // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
+            // SDL treats 0 as "until changed" not "stop now" — desired since the policy
             // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
             //
             // Errors here are the common "this pad has no rumble motors" case, not a fault:

@@ -81,10 +81,7 @@ struct ConnectOutcome {
 /// displays) keeps saying `Automatic`. Resolving into the stored value instead would turn
 /// a preference that means "match my pad" into a fixed pad kind the next time a different
 /// controller was plugged in.
-fn resolve_gamepad_type(
-    mut settings: store::Settings,
-    game_controller: &sdl2::GameControllerSubsystem,
-) -> store::Settings {
+fn resolve_gamepad_type(mut settings: store::Settings, game_controller: &sdl3::GamepadSubsystem) -> store::Settings {
     if settings.gamepad_type() != store::GamepadType::Auto {
         return settings;
     }
