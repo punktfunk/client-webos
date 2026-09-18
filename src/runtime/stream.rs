@@ -76,8 +76,9 @@ fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl3::Eve
     let mut remote_keys = RemoteKeys::default();
     while !handle.is_finished() {
         for event in events.poll_iter() {
-            // Back has no keycode in SDL3; check before keycodes (see RemoteKeys).
-            if remote_keys.press(&event) == Some(RemoteKey::Back) {
+            // Back has no keycode in SDL3; check before keycodes (see RemoteKeys). Down edge only:
+            // `press` would read the release of a Back tapped as the link dropped as a cancel.
+            if remote_keys.edge(&event, true) == Some((RemoteKey::Back, true)) {
                 return true;
             }
             if let sdl3::event::Event::KeyDown {

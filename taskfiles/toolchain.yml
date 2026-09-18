@@ -40,7 +40,7 @@ tasks:
         mkdir -p "$(dirname {{.NDK_DIR}})"
         TMP="$(mktemp -d)"
         trap 'rm -rf "$TMP"' EXIT
-        curl -sL -o "$TMP/$ASSET" "$URL"
+        curl -fsSL -o "$TMP/$ASSET" "$URL"
         tar xjf "$TMP/$ASSET" -C "$(dirname {{.NDK_DIR}})"
         sh {{.NDK_DIR}}/relocate-sdk.sh
         echo 'int main(void) { return 0; }' | {{.NDK_DIR}}/bin/arm-webos-linux-gnueabi-gcc \
@@ -58,9 +58,10 @@ tasks:
         set -eu
         TMP="$(mktemp -d)"
         trap 'rm -rf "$TMP"' EXIT
-        ASSET="SDL3-{{.SDL3_VERSION}}-webos.2.tar.gz"
+        RELEASE="{{.SDL3_RELEASE}}"
+        ASSET="SDL3-${RELEASE#release-}.tar.gz"
         URL="https://github.com/webosbrew/SDL-webOS/releases/download/{{.SDL3_RELEASE}}/${ASSET}"
-        curl -sL -o "$TMP/$ASSET" "$URL"
+        curl -fsSL -o "$TMP/$ASSET" "$URL"
         rm -rf {{.SDL3_PREFIX}}
         mkdir -p {{.SDL3_PREFIX}}
         tar xzf "$TMP/$ASSET" -C {{.SDL3_PREFIX}}
