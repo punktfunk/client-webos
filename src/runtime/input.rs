@@ -6,13 +6,11 @@
 
 use super::*;
 
-/// How long a controller shortcut ([`DisconnectChord`]) must be held before its dialog
+/// How long the controller chord ([`DisconnectChord`]) must be held before its dialog
 /// opens — the in-stream disconnect dialog while streaming, the quit dialog in the menu.
-/// Every button in these shortcuts is also real game input, so a hold — not a press — is
-/// the only safe trigger (L1+R1 in particular is a common in-game bind); the hold window
-/// is the margin against a stream dying mid-play. Shared by both loops so the remote's
-/// held-Back EXIT gesture and the controller chord feel the same in either context —
-/// 1s to match webOS's own long-press threshold on the EXIT gesture.
+/// The chord's buttons are also game input, so it fires on a hold, not a press. Shared by
+/// both loops so the remote's held-Back EXIT gesture and the chord feel the same — 1s to
+/// match webOS's own long-press threshold on the EXIT gesture.
 pub(super) const EXIT_HOLD: Duration = Duration::from_millis(1000);
 
 /// How long OK must be held on a focused Home game card to pin/unpin it instead
@@ -29,17 +27,15 @@ pub(super) struct CardHold {
     pub(super) fired: bool,
 }
 
-/// The gamepad routes to the disconnect dialog (streaming) or quit dialog (menu): Guide,
-/// both shoulders, or Start+Back, each held for [`EXIT_HOLD`].
+/// The gamepad route to the disconnect dialog (streaming) or quit dialog (menu):
+/// L1+R1+Start+Select held for [`EXIT_HOLD`], the escape chord every punktfunk client uses.
+/// No subset opens it — L1+R1 and a held Guide are game input.
 ///
 /// Tracked as button state rather than read back from SDL because SDL only reports
 /// transitions here — and a chord needs to know what is down *now*, not what changed
-/// last. Three shortcuts share one timer: the gesture is "some disconnect chord has been
-/// complete for long enough", so sliding from one chord into another (releasing Start
-/// while both shoulders stay down) is one continuous hold rather than a restart.
+/// last.
 #[derive(Default)]
 pub(super) struct DisconnectChord {
-    guide: bool,
     left_shoulder: bool,
     right_shoulder: bool,
     start: bool,
@@ -53,7 +49,6 @@ impl DisconnectChord {
     pub(super) fn set(&mut self, button: sdl2::controller::Button, down: bool) {
         use sdl2::controller::Button;
         match button {
-            Button::Guide => self.guide = down,
             Button::LeftShoulder => self.left_shoulder = down,
             Button::RightShoulder => self.right_shoulder = down,
             Button::Start => self.start = down,
@@ -70,7 +65,7 @@ impl DisconnectChord {
     }
 
     fn complete(&self) -> bool {
-        self.guide || (self.left_shoulder && self.right_shoulder) || (self.start && self.back)
+        self.left_shoulder && self.right_shoulder && self.start && self.back
     }
 
     /// Whether a chord has now been held long enough to fire.
@@ -1013,5 +1008,35 @@ mod remote_gate_tests {
         assert!(gate.admits(&up_key(false, false), t));
         let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), true, false);
         assert!(gate.admits(&esc, t));
+    }
+}
+
+#[cfg(test)]
+mod disconnect_chord_tests {
+    use super::*;
+    use sdl2::controller::Button::{self, Back, Guide, LeftShoulder, RightShoulder, Start};
+
+    fn held(buttons: &[Button]) -> DisconnectChord {
+        let mut chord = DisconnectChord::default();
+        for &b in buttons {
+            chord.set(b, true);
+        }
+        chord
+    }
+
+    #[test]
+    fn only_the_full_chord_arms_the_dialog() {
+        let mut chord = held(&[LeftShoulder, RightShoulder, Start, Back]);
+        assert!(chord.held_for(Duration::ZERO));
+        chord.set(Start, false);
+        assert!(!chord.held_for(Duration::ZERO), "a released button kept the hold armed");
+        for partial in [
+            &[Guide][..],
+            &[LeftShoulder, RightShoulder],
+            &[Start, Back],
+            &[Guide, LeftShoulder, RightShoulder, Start],
+        ] {
+            assert!(!held(partial).held_for(Duration::ZERO), "{partial:?} armed the dialog");
+        }
     }
 }
