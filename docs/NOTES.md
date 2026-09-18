@@ -114,7 +114,8 @@ colour all confirmed on real hardware.
   (pad/motion/touchpad) sharing one `U: Uniq=` MAC — where `dualsense::find_address` reads it.
 - **Rumble does not use either path**: the pad's event node advertises `EV_FF` and is
   group-writable by `compositor` (the app's uid is in it), so rumble goes through SDL's evdev force
-  feedback and works for any pad. Reports in `dualsense.rs` deliberately never set the
+  feedback when SDL advertises motor support. Bluetooth DualSense uses HIDAPI with enhanced
+  reports disabled, so SDL rumble is unavailable there. Reports in `dualsense.rs` never set the
   compatible-vibration valid flag, so the paths can't fight.
 - `hid/internal/*` is undocumented vendor surface — feature-detected, failing soft, never assumed.
 - **Spawned sends must be throttled, or the video plane goes black.** The fallback route

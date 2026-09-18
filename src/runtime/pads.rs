@@ -19,7 +19,8 @@ pub(super) struct Slot {
     /// Wire pad index (`InputEvent::flags`).
     pub(super) index: u8,
     pub(super) pad: Gamepad,
-    /// Impulse-trigger motors. Read once: SDL walks its joystick list to answer.
+    /// Motor capabilities, cached while this handle is open.
+    pub(super) rumble: bool,
     pub(super) triggers: bool,
     /// The kind this pad is; `None` uses Xbox default per `gamepad::kind_of`.
     pub(super) physical: Option<GamepadType>,
@@ -95,14 +96,17 @@ impl Pads {
         let serial = pad.serial_number();
         let uniq = device_uniq(path.as_deref(), serial.as_deref());
         // SAFETY: SDL documents this as walking its joystick list for `pad`, which is open here.
-        let triggers = unsafe { pad.has_rumble_triggers() };
-        tracing::info!("controller connected: {name} (pad {index}, {physical:?})");
+        let (rumble, triggers) = unsafe { (pad.has_rumble(), pad.has_rumble_triggers()) };
+        tracing::info!(
+            "controller connected: {name} (pad {index}, {physical:?}, rumble={rumble}, triggers={triggers})"
+        );
         let at = self.slots.partition_point(|s| s.index < index);
         self.slots.insert(
             at,
             Slot {
                 id,
                 index,
+                rumble,
                 triggers,
                 pad,
                 physical,

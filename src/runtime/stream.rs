@@ -1134,7 +1134,12 @@ pub(super) fn run_inner() -> Result<()> {
             // the extras also stops each wired card writer. Rumble is likewise pad state.
             for slot in pads.iter_mut() {
                 slot.extras = pad_session::Extras::default();
-                let _ = slot.pad.set_rumble(0, 0, 0);
+                if slot.rumble {
+                    let _ = slot.pad.set_rumble(0, 0, 0);
+                }
+                if slot.triggers {
+                    let _ = slot.pad.set_rumble_triggers(0, 0, 0);
+                }
             }
             // Stopping the threads, the QUIC close and the NDL unload take a second or two; the
             // menu comes back now and they finish behind it. The next load waits for them.
