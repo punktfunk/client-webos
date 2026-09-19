@@ -139,8 +139,6 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
                 push(Row::Delete, None);
             } else {
                 push(Row::Kit(K::AutoWake), Some("Session"));
-                push(Row::Kit(K::Stats), Some("Statistics"));
-                push(Row::Kit(K::AdvancedStats), None);
                 push(Row::Kit(K::Palette), Some("Interface"));
                 push(Row::Kit(K::GamepadUi), None);
                 push(Row::Kit(K::GamepadUiMode), None);
@@ -193,6 +191,10 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
             push(Row::Version, None);
             push(Row::LogLevel, Some("Diagnostics"));
             push(Row::ShowLogs, None);
+            if !profile {
+                push(Row::Kit(K::Stats), Some("Statistics"));
+                push(Row::Kit(K::AdvancedStats), None);
+            }
             push(Row::Licences, Some("Legal"));
         }
     }
