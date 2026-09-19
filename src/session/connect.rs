@@ -12,7 +12,6 @@ use punktfunk_core::config::{CompositorPref, Mode};
 use punktfunk_core::quic;
 
 use crate::core::caps::video_caps;
-use crate::platform::webos::device::{self, NdlGeneration};
 use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::services::store::{CodecPref, GamepadType};
 use crate::session::pipeline::MediaPipeline;
@@ -134,10 +133,11 @@ pub struct ConnectParams {
     /// Let the host cut a picture into several slices (`webos.multi_slice`, Experimental).
     ///
     /// Without the cap the host pins `max_slices = 1` for every client, deliberately — "single-slice
-    /// frames for TV-SoC decoders". A sliced picture is what lets the host emit and this client feed
-    /// the front of a frame while its tail is still being encoded, so it compounds with the
-    /// slice-progressive delivery already on. Off by default until a set is measured, because the
-    /// failure mode it guards against is a wedged hardware decoder, not a slow one.
+    /// frames for TV-SoC decoders". A sliced picture is what lets the host emit the front of a
+    /// frame while its tail is still being encoded — the pipelining survives this
+    /// client reassembling whole AUs (slice-progressive feeding is off). Off by default until a set
+    /// is measured, because the failure mode it guards against is a wedged hardware decoder, not a
+    /// slow one.
     pub multi_slice: bool,
     pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
@@ -163,9 +163,6 @@ struct Negotiated {
     /// A single `quic::CODEC_*` bit, or 0 for auto.
     preferred_codec: u8,
     display_hdr: Option<quic::HdrMeta>,
-    /// Whether to ask the host for slice-progressive AU prefixes — on wherever the backend can
-    /// take them.
-    frame_parts: bool,
 }
 
 impl Negotiated {
@@ -235,7 +232,6 @@ impl Negotiated {
             // Core may replace this through `PUNKTFUNK_CLIENT_PEAK_NITS`; the host echoes that
             // effective volume on the metadata plane, so NDL converges after startup.
             display_hdr: hdr.then_some(params.display_hdr),
-            frame_parts: device::ndl_generation() == NdlGeneration::V2,
         }
     }
 }
@@ -279,11 +275,9 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         } else {
             0
         },
-        // Slice-progressive delivery: AU prefixes reach the decoder while the rest is still on the
-        // wire, so a frame no longer waits for its own last datagram (`session::stage`'s `AuParts`).
-        // On wherever it can be — NDL v2 only, per `Negotiated::clamp`: v1's feed has no timestamp
-        // to repeat across pieces.
-        negotiated.frame_parts,
+        // NDL takes complete AUs: multi-slice still overlaps host encode and transport, but the
+        // reassembler waits for every slice before this submit-only decoder sees the picture.
+        false,
         params.launch.clone(),
         // Device name for the host's pending-approval list. `None` keeps the host's
         // fingerprint-derived label ("device abcd1234"), i.e. exactly the behaviour before
