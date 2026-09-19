@@ -4,10 +4,13 @@
 //! releases whatever the host still holds, and while the dial is open every press drives it
 //! instead. Buttons still down when it closes stay the dial's until they release, so the B that
 //! closed it never lands in the game.
+//!
+//! A, B and Y here are labels (`face`): the wire bits stay positional, the dial reads like the
+//! menus do.
 
 use pf_client_core::menu_nav::{ring_sector, MenuDir, MenuEvent};
 use punktfunk_core::input::gamepad::{
-    BTN_A, BTN_B, BTN_BACK, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_DPAD_UP, BTN_Y,
+    BTN_A, BTN_B, BTN_BACK, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_DPAD_UP, BTN_X, BTN_Y,
 };
 
 /// What the stream loop does with one pad button edge.
@@ -23,8 +26,10 @@ pub enum PadRoute {
     Menu(MenuEvent),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PadDial {
+    /// The wire bits under the A, B, X and Y labels.
+    face: [u32; 4],
     /// Physically down.
     held: u32,
     /// Down on the host.
@@ -36,7 +41,25 @@ pub struct PadDial {
     sector: Option<u8>,
 }
 
+impl Default for PadDial {
+    fn default() -> Self {
+        Self::with_face([BTN_A, BTN_B, BTN_X, BTN_Y])
+    }
+}
+
 impl PadDial {
+    /// A dial for a pad whose A, B, X and Y labels sit on these wire bits.
+    pub fn with_face(face: [u32; 4]) -> Self {
+        Self {
+            face,
+            held: 0,
+            sent: 0,
+            owned: 0,
+            stick: (0, 0),
+            sector: None,
+        }
+    }
+
     /// Routes one button edge. `open` is whether the dial is up right now.
     pub fn button(&mut self, bit: u32, down: bool, open: bool) -> PadRoute {
         if down {
@@ -53,9 +76,9 @@ impl PadDial {
                 return PadRoute::Drop;
             }
             self.owned |= bit;
-            return menu_for(bit).map_or(PadRoute::Drop, PadRoute::Menu);
+            return self.menu_for(bit).map_or(PadRoute::Drop, PadRoute::Menu);
         }
-        if down && bit == BTN_A && self.held & BTN_BACK != 0 {
+        if down && bit == self.face[0] && self.held & BTN_BACK != 0 {
             self.owned |= bit;
             return PadRoute::Open;
         }
@@ -98,21 +121,22 @@ impl PadDial {
 
     /// The pad went away: nothing it held can release any more.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::with_face(self.face);
     }
-}
 
-fn menu_for(bit: u32) -> Option<MenuEvent> {
-    Some(match bit {
-        BTN_A => MenuEvent::Confirm,
-        BTN_B => MenuEvent::Back,
-        BTN_Y => MenuEvent::Secondary,
-        BTN_DPAD_UP => MenuEvent::Move(MenuDir::Up),
-        BTN_DPAD_DOWN => MenuEvent::Move(MenuDir::Down),
-        BTN_DPAD_LEFT => MenuEvent::Move(MenuDir::Left),
-        BTN_DPAD_RIGHT => MenuEvent::Move(MenuDir::Right),
-        _ => return None,
-    })
+    fn menu_for(&self, bit: u32) -> Option<MenuEvent> {
+        let [a, b, _, y] = self.face;
+        Some(match bit {
+            _ if bit == a => MenuEvent::Confirm,
+            _ if bit == b => MenuEvent::Back,
+            _ if bit == y => MenuEvent::Secondary,
+            BTN_DPAD_UP => MenuEvent::Move(MenuDir::Up),
+            BTN_DPAD_DOWN => MenuEvent::Move(MenuDir::Down),
+            BTN_DPAD_LEFT => MenuEvent::Move(MenuDir::Left),
+            BTN_DPAD_RIGHT => MenuEvent::Move(MenuDir::Right),
+            _ => return None,
+        })
+    }
 }
 
 #[cfg(test)]

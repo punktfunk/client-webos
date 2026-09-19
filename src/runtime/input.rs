@@ -209,6 +209,9 @@ pub(super) struct TextInputController {
     ///
     /// [`release_if_dismissed`]: Self::release_if_dismissed
     raised: Option<(std::time::Instant, bool)>,
+    /// A menu field whose panel webOS dismissed. [`set_active`](Self::set_active) leaves it off
+    /// until the screen changes or [`reopen`](Self::reopen), or it would re-summon the panel.
+    dismissed: Option<sdl3::keyboard::TextInputOptions>,
 }
 
 /// Where the IME should put the caret inside the field rect. Nothing here drives a caret, so the
@@ -221,6 +224,7 @@ impl TextInputController {
             util,
             options: None,
             raised: None,
+            dismissed: None,
         }
     }
 
@@ -254,8 +258,13 @@ impl TextInputController {
                 tracing::debug!("text input stopped");
             }
             self.options = None;
+            self.dismissed = None;
             return;
         };
+        if self.dismissed == Some(options) {
+            return;
+        }
+        self.dismissed = None;
         if let Some(r) = rect {
             // The form moves when the keyboard appears. Update its area without reopening it.
             if self.util.rect(window).ok() != Some((r, IME_CURSOR)) {
@@ -271,7 +280,23 @@ impl TextInputController {
             self.util.start(window);
         }
         self.options = Some(options);
+        self.raised = Some((std::time::Instant::now(), false));
         tracing::debug!("text input started: {options:?}");
+    }
+
+    /// The menu's [`release_if_dismissed`](Self::release_if_dismissed): ends a field's input once
+    /// its panel came up and went away, and keeps it off. No timeout: a physical keyboard types
+    /// into a field whose panel never appears.
+    pub(super) fn latch_if_dismissed(&mut self, shown: bool, window: &sdl3::video::Window) {
+        if self.dismissal(shown, None) {
+            self.dismissed = self.options;
+            self.stop(window);
+        }
+    }
+
+    /// Lets [`set_active`](Self::set_active) raise a dismissed field's panel again.
+    pub(super) fn reopen(&mut self) {
+        self.dismissed = None;
     }
 
     /// Raises the panel for a host-side field, whatever SDL thinks the current state is - the
@@ -294,18 +319,25 @@ impl TextInputController {
     /// animate in. [`SHOW_TIMEOUT`](Self::SHOW_TIMEOUT) covers a raise the compositor refuses
     /// outright, which would otherwise hold the field for the whole session.
     pub(super) fn release_if_dismissed(&mut self, shown: bool, window: &sdl3::video::Window) {
+        if self.dismissal(shown, Some(Self::SHOW_TIMEOUT)) {
+            self.stop(window);
+        }
+    }
+
+    /// Whether the raised panel is gone: it came up and went, or never came up within `timeout`.
+    fn dismissal(&mut self, shown: bool, timeout: Option<Duration>) -> bool {
         let Some((raised_at, came_up)) = &mut self.raised else {
-            return;
+            return false;
         };
         if shown {
             *came_up = true;
-            return;
+            return false;
         }
-        if !*came_up && raised_at.elapsed() < Self::SHOW_TIMEOUT {
-            return;
+        if !*came_up && timeout.is_none_or(|t| raised_at.elapsed() < t) {
+            return false;
         }
         tracing::info!("on-screen keyboard dismissed — releasing text input");
-        self.stop(window);
+        true
     }
 
     /// How long a raised panel has to appear before [`release_if_dismissed`] gives up on it.
@@ -423,11 +455,22 @@ pub(super) fn is_menu_press(event: &sdl3::event::Event, want: MenuEvent, allow_r
             repeat,
             ..
         } => (allow_repeat || !repeat) && crate::platform::webos::input::menu_event_for_key(k) == Some(want),
-        Event::GamepadButtonDown { button, .. } => {
-            crate::platform::webos::input::menu_event_for_button(button) == Some(want)
+        Event::GamepadButtonDown { which, button, .. } => {
+            crate::platform::webos::input::menu_event_for_button(which, button) == Some(want)
         }
         _ => false,
     }
+}
+
+/// A physical keyboard's text key: no menu meaning and no remote digit. Its own character is
+/// lost when it reopens a dismissed field, since text input was off as it went down.
+pub(super) fn is_typed_key(event: &sdl3::event::Event) -> bool {
+    use crate::platform::webos::input::{digit_key_value, menu_event_for_key};
+    matches!(
+        *event,
+        sdl3::event::Event::KeyDown { keycode: Some(k), repeat: false, .. }
+            if menu_event_for_key(k).is_none() && digit_key_value(k).is_none()
+    )
 }
 
 /// The release half of [`is_menu_press`], for the gestures that resolve on the way up.
@@ -435,8 +478,8 @@ pub(super) fn is_menu_release(event: &sdl3::event::Event, want: MenuEvent) -> bo
     use sdl3::event::Event;
     match *event {
         Event::KeyUp { keycode: Some(k), .. } => crate::platform::webos::input::menu_event_for_key(k) == Some(want),
-        Event::GamepadButtonUp { button, .. } => {
-            crate::platform::webos::input::menu_event_for_button(button) == Some(want)
+        Event::GamepadButtonUp { which, button, .. } => {
+            crate::platform::webos::input::menu_event_for_button(which, button) == Some(want)
         }
         _ => false,
     }
@@ -967,15 +1010,15 @@ pub(super) fn handle_ui_event(
             input.release_nav_repeat(NavSource::Key(k));
             None
         }
-        Event::GamepadButtonDown { button, .. } => {
+        Event::GamepadButtonDown { which, button, .. } => {
             let ev = edge_trigger_back(
-                crate::platform::webos::input::menu_event_for_button(button),
+                crate::platform::webos::input::menu_event_for_button(which, button),
                 &mut input.menu_back_down,
             );
             input.press_nav(NavSource::Button(button), ev)
         }
-        Event::GamepadButtonUp { button, .. } => {
-            if crate::platform::webos::input::menu_event_for_button(button) == Some(MenuEvent::Back) {
+        Event::GamepadButtonUp { which, button, .. } => {
+            if crate::platform::webos::input::menu_event_for_button(which, button) == Some(MenuEvent::Back) {
                 input.menu_back_down = false;
             }
             input.release_nav_repeat(NavSource::Button(button));

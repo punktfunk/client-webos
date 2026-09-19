@@ -4,7 +4,6 @@ silent: true
 
 vars:
   SDL3_RELEASE: release-3.4.16-webos.2
-  SDL3_VERSION: 3.4.16
   SDL3_SONAME: libSDL3.so.0.4.16
   # Apt cache persists via removed docker-clean hook (otherwise ephemeral).
   DOCKER_MOUNTS: >-
@@ -53,6 +52,8 @@ tasks:
       vars: [SDL3_PREFIX]
     status:
       - test -e {{.SDL3_PREFIX}}/lib/{{.SDL3_SONAME}}
+      # Releases can share a SONAME, so the SONAME alone cannot tell a stale prefix.
+      - grep -qx '{{.SDL3_RELEASE}}' {{.SDL3_PREFIX}}/.release
     cmds:
       - |
         set -eu
@@ -67,6 +68,7 @@ tasks:
         tar xzf "$TMP/$ASSET" -C {{.SDL3_PREFIX}}
         test -e {{.SDL3_PREFIX}}/lib/{{.SDL3_SONAME}}
         test -e {{.SDL3_PREFIX}}/include/SDL3/SDL.h
+        echo "$RELEASE" > {{.SDL3_PREFIX}}/.release
 
   all:
     desc: Fetch the full webOS cross-toolchain

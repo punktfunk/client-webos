@@ -43,6 +43,17 @@ pub fn mute_unused_events() {
     }
 }
 
+/// Sleeps until an event is queued or `timeout` passes, leaving the event for the loop's own
+/// poll: an input wakes a loop at once instead of at the end of a fixed sleep.
+pub fn wait_for_event(timeout: std::time::Duration) {
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: SDL documents a null event pointer as "wait, but leave the event queued"; the
+    // call touches nothing this side owns.
+    unsafe {
+        sdl3::sys::events::SDL_WaitEventTimeout(std::ptr::null_mut(), ms);
+    }
+}
+
 pub fn menu_event_for_key(keycode: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     use sdl3::keyboard::Keycode;
     Some(match keycode {
@@ -58,19 +69,39 @@ pub fn menu_event_for_key(keycode: sdl3::keyboard::Keycode) -> Option<MenuEvent>
     })
 }
 
-pub fn menu_event_for_button(button: sdl3::gamepad::Button) -> Option<MenuEvent> {
+pub fn menu_event_for_button(which: sdl3::joystick::JoystickId, button: sdl3::gamepad::Button) -> Option<MenuEvent> {
     use sdl3::gamepad::Button;
+    let [a, b, _, y] = face_by_label(which);
     Some(match button {
         Button::DPadUp => MenuEvent::Up,
         Button::DPadDown => MenuEvent::Down,
         Button::DPadLeft => MenuEvent::Left,
         Button::DPadRight => MenuEvent::Right,
-        Button::South => MenuEvent::Confirm,
         // WHY: Magic Remote's Back doesn't arrive as B; Back is low-risk guess.
-        Button::East | Button::Back => MenuEvent::Back,
-        Button::North => MenuEvent::Secondary,
+        Button::Back => MenuEvent::Back,
+        _ if button == a => MenuEvent::Confirm,
+        _ if button == b => MenuEvent::Back,
+        _ if button == y => MenuEvent::Secondary,
         _ => return None,
     })
+}
+
+/// The positions of the A, B, X and Y labels on pad `which`. SDL3 reports face buttons by
+/// position; menus follow the labels, SDL2's default, so a Nintendo pad confirms with its A.
+/// The wire stays positional (`gamepad::button_bit`).
+pub fn face_by_label(which: sdl3::joystick::JoystickId) -> [sdl3::gamepad::Button; 4] {
+    use sdl3::gamepad::Button;
+    use sdl3::sys::gamepad as sys;
+    // SAFETY: plain queries by instance id; an unknown id yields an unknown type.
+    let south_is_b = unsafe {
+        let kind = sys::SDL_GetGamepadTypeForID(which.into());
+        sys::SDL_GetGamepadButtonLabelForType(kind, sys::SDL_GamepadButton::SOUTH) == sys::SDL_GamepadButtonLabel::B
+    };
+    if south_is_b {
+        [Button::East, Button::South, Button::North, Button::West]
+    } else {
+        [Button::South, Button::East, Button::West, Button::North]
+    }
 }
 
 /// Stick deflection threshold for directional press (well past center noise).
@@ -217,6 +248,7 @@ impl RemoteKeys {
     /// For code that mirrors held keys to the host; dropping the release would leave it held.
     /// `back_admitted` is resolved before this call; rejected echoes must not change held state.
     pub fn edge(&mut self, event: &sdl3::event::Event, back_admitted: bool) -> Option<(RemoteKey, bool)> {
+        self.forget_on_focus_loss(event);
         let (key, down) = raw_edge(event)?;
         // Reject compositor echoes before they can suppress a later real Back press.
         if key == RemoteKey::Back && !back_admitted {
@@ -231,10 +263,29 @@ impl RemoteKeys {
         Some((key, down))
     }
 
+    /// Forgets every held key, for when their releases will not arrive.
+    pub fn reset(&mut self) {
+        self.held = [false; 5];
+    }
+
+    /// Every loop gets this from its own event stream: after focus loss the releases go to
+    /// another app, and SDL's reset synthesizes them with `raw == 0`, which [`raw_edge`] cannot
+    /// resolve. A held flag left behind would swallow the next press.
+    fn forget_on_focus_loss(&mut self, event: &sdl3::event::Event) {
+        if let sdl3::event::Event::Window {
+            win_event: sdl3::event::WindowEvent::FocusLost,
+            ..
+        } = event
+        {
+            self.reset();
+        }
+    }
+
     /// Exactly one press per physical press (for menus). A release with no press counts as the
     /// press: a loop entered mid-press never saw the key go down (happens on stream return,
     /// where the stream loop ate the key-down and only key-up reaches the menu).
     pub fn press(&mut self, event: &sdl3::event::Event) -> Option<RemoteKey> {
+        self.forget_on_focus_loss(event);
         let (key, down) = raw_edge(event)?;
         let held = &mut self.held[key.index()];
         // Unheld either way: a fresh press, or an orphan release (see the doc above).

@@ -116,7 +116,7 @@ pub fn detect_type(subsystem: &sdl3::GamepadSubsystem) -> Option<crate::services
 
 /// Maps a controller's own product string to the kind to present, for a pad SDL's database has
 /// no entry for. Behind [`kind_for`], never on its own.
-pub fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
+fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
     use crate::services::store::GamepadType;
     let name = name.to_ascii_lowercase();
     // Edge before plain: the Edge's SDL name contains "dualsense" too, so testing the

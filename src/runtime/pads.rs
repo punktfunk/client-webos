@@ -19,9 +19,8 @@ pub(super) struct Slot {
     /// Wire pad index (`InputEvent::flags`).
     pub(super) index: u8,
     pub(super) pad: Gamepad,
-    /// Motor capabilities, cached while this handle is open.
-    pub(super) rumble: bool,
-    pub(super) triggers: bool,
+    /// Where its A, B, X and Y labels sit (`input::face_by_label`), fixed while open.
+    pub(super) face: [sdl3::gamepad::Button; 4],
     /// The kind this pad is; `None` uses Xbox default per `gamepad::kind_of`.
     pub(super) physical: Option<GamepadType>,
     /// The kind the host was last told this slot is; `None` before it has heard of it.
@@ -40,6 +39,17 @@ pub(super) struct Slot {
 }
 
 impl Slot {
+    /// Motor capabilities, read live: SDL can publish them after open, with no event to say so.
+    pub(super) fn rumble(&self) -> bool {
+        // SAFETY: `pad` is open for the call.
+        unsafe { self.pad.has_rumble() }
+    }
+
+    pub(super) fn triggers(&self) -> bool {
+        // SAFETY: as in `rumble`.
+        unsafe { self.pad.has_rumble_triggers() }
+    }
+
     /// The kind the host should build this pad as. An explicit setting emulates that pad on every
     /// slot; `Automatic` mirrors the pad, and an unrecognized one takes the host's own default so
     /// a pad joining next to a `DualSense` is not built as another one.
@@ -91,40 +101,47 @@ impl Pads {
             }
         };
         let name = pad.name().unwrap_or_default();
+        let face = crate::platform::webos::input::face_by_label(id);
         let physical = gamepad::kind_of(&pad);
         let path = pad.path();
         let serial = pad.serial_number();
         let uniq = device_uniq(path.as_deref(), serial.as_deref());
-        // SAFETY: SDL documents this as walking its joystick list for `pad`, which is open here.
-        let (rumble, triggers) = unsafe { (pad.has_rumble(), pad.has_rumble_triggers()) };
-        tracing::info!(
-            "controller connected: {name} (pad {index}, {physical:?}, rumble={rumble}, triggers={triggers})"
-        );
+        // Player LEDs follow the wire index where the backend drives them; most do not.
+        if let Err(e) = pad.set_player_index(u16::from(index)) {
+            tracing::debug!("player index not set: {e}");
+        }
         let at = self.slots.partition_point(|s| s.index < index);
         self.slots.insert(
             at,
             Slot {
                 id,
                 index,
-                rumble,
-                triggers,
                 pad,
+                face,
                 physical,
                 declared: None,
                 chord: DisconnectChord::default(),
-                dial: PadDial::default(),
+                dial: PadDial::with_face(face.map(|b| gamepad::button_bit(b).unwrap_or(0))),
                 path,
                 serial,
                 uniq,
                 extras: Default::default(),
             },
         );
-        self.slots.get(at)
+        let slot = &self.slots[at];
+        tracing::info!(
+            "controller connected: {name} (pad {index}, {physical:?}, rumble={}, triggers={})",
+            slot.rumble(),
+            slot.triggers(),
+        );
+        Some(slot)
     }
 
     /// Brings the table in line with what SDL has attached now: drops pads that went away and
     /// opens ones that arrived. For entering a loop, since a loop that was not running — the
     /// connect wait, the launch animation — consumed or never saw the hotplug events.
+    ///
+    /// Drops tell the host nothing: call only before this session's slots are announced.
     pub(super) fn sync(&mut self, subsystem: &sdl3::GamepadSubsystem) {
         self.slots.retain(|slot| {
             let attached = slot.pad.connected();
@@ -220,7 +237,8 @@ impl Pads {
 
     /// [`Self::first`]'s name, for the legend.
     pub(super) fn first_name(&self) -> Option<String> {
-        self.first().and_then(|slot| slot.pad.name())
+        // An unnamed pad is still a pad: the shell reads `Some` as "controllers attached".
+        self.first().map(|slot| slot.pad.name().unwrap_or_default())
     }
 }
 

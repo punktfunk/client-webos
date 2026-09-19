@@ -16,7 +16,8 @@ x11vnc -forever -shared -nopw -quiet -rfbport 5900 \
 websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
 echo "preview: http://localhost:6080/vnc.html" >&2
 
-nc -lk 9000 & export SDL_AUDIO_DRIVER=dummy
+nc -lk 9000 &
+export SDL_AUDIO_DRIVER=dummy
 # `vendored-sdl3`: this builds for the HOST target, which has no libSDL3 to link against
 # (Debian bookworm ships none) and no webOS prefix to point at — see Cargo.toml.
 exec cargo run --bin punktfunk-webos --release --features vendored-sdl3 -- \

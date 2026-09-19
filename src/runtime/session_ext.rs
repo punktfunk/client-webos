@@ -236,7 +236,7 @@ impl Connected {
             }
             // SDL treats 0 as "until changed" not "stop now" — desired since the policy
             // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
-            if slot.rumble && slot.pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms).is_ok() {
+            if slot.rumble() && slot.pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms).is_ok() {
                 let n = RUMBLE_APPLIED.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 || n % 30 == 0 {
                     tracing::debug!(
@@ -251,7 +251,7 @@ impl Connected {
             // Dropping the trigger pair on a pad without those motors is the correct degrade;
             // folding it into the handles would turn a racing title's continuous trigger stream
             // into a handle motor droning flat-out for the whole race.
-            if slot.triggers {
+            if slot.triggers() {
                 let _ = slot
                     .pad
                     .set_rumble_triggers(cmd.left_trigger, cmd.right_trigger, cmd.backstop_ms);
@@ -261,7 +261,7 @@ impl Connected {
         for slot in pads.iter_mut() {
             if let Some((low, high)) = slot.extras.audio.as_ref().and_then(|a| a.envelope.take_change()) {
                 // 0 = until changed; envelope sends the stop.
-                if slot.rumble {
+                if slot.rumble() {
                     let _ = slot.pad.set_rumble(low, high, 0);
                 }
             }

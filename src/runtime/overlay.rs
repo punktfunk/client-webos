@@ -377,8 +377,8 @@ impl ConfirmDialog {
                     repeat: false,
                     ..
                 } => crate::platform::webos::input::menu_event_for_key(*k),
-                Event::GamepadButtonDown { button, .. } => {
-                    crate::platform::webos::input::menu_event_for_button(*button)
+                Event::GamepadButtonDown { which, button, .. } => {
+                    crate::platform::webos::input::menu_event_for_button(*which, *button)
                 }
                 _ => None,
             }

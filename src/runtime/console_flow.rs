@@ -300,7 +300,7 @@ pub(super) fn run(
         // match every other client rather than being re-invented here. The remote is never
         // opened; its buttons still reach the shell, as keys.
         if !open_pads.is_empty() {
-            sample = merge_samples(open_pads.iter().map(|slot| pad_sample(&slot.pad)));
+            sample = merge_samples(open_pads.iter().map(pad_sample));
         }
         menu_out.clear();
         nav.poll(&sample, Instant::now(), &mut menu_out);
@@ -612,14 +612,16 @@ fn exit_plan(service: &Service, identity: &(String, String)) -> Option<crate::se
 
 /// The pad as the shared synthesizer reads it: face buttons, shoulders, the left stick in wire
 /// units, and the d-pad.
-fn pad_sample(pad: &sdl3::gamepad::Gamepad) -> MenuSample {
+fn pad_sample(slot: &pads::Slot) -> MenuSample {
     use sdl3::gamepad::{Axis, Button};
+    let pad = &slot.pad;
+    let [a, b, x, y] = slot.face.map(|button| pad.button(button));
     MenuSample {
         buttons: [
-            pad.button(Button::South),
-            pad.button(Button::East),
-            pad.button(Button::West),
-            pad.button(Button::North),
+            a,
+            b,
+            x,
+            y,
             pad.button(Button::LeftShoulder),
             pad.button(Button::RightShoulder),
         ],

@@ -248,6 +248,14 @@ pub(super) fn run_ui_flow(
             if mouse::is_touch_emulated(&event) {
                 continue;
             }
+            // The ways back into a field whose panel Back dismissed: a click, Confirm, or typing.
+            // Confirm still acts, so a complete form submits instead; an incomplete one no-ops.
+            if matches!(event, Event::MouseButtonDown { .. })
+                || is_menu_press(&event, MenuEvent::Confirm, false)
+                || is_typed_key(&event)
+            {
+                text_input.reopen();
+            }
             into_layout_units(&mut event, crate::app::draw::panel_k());
             // Launch committed: the menu is behind the loading screen and its input would
             // move a grid the user can no longer see. Only shutdown still counts.
@@ -290,6 +298,13 @@ pub(super) fn run_ui_flow(
                     slot.chord.set(button, matches!(event, Event::GamepadButtonDown { .. }));
                 }
             }
+            // Global diagnostic shortcut: ahead of the quit dialog, which owns input when open.
+            if remote == Some(RemoteKey::Yellow) {
+                cycle_log_overlay();
+                dirty = true;
+                log_overlay_last = None;
+                continue;
+            }
             // The quit dialog owns input while open — navigate it only, don't let the
             // event reach the menu underneath (same split as the streaming loop).
             if quit_dialog.is_open() {
@@ -301,12 +316,6 @@ pub(super) fn run_ui_flow(
                     Some(_) => dirty = true,
                     None => {}
                 }
-                continue;
-            }
-            if remote == Some(RemoteKey::Yellow) {
-                cycle_log_overlay();
-                dirty = true;
-                log_overlay_last = None;
                 continue;
             }
             let remote_back = remote == Some(RemoteKey::Back);
@@ -349,6 +358,7 @@ pub(super) fn run_ui_flow(
                 dirty = true;
                 tracing::debug!("on-screen keyboard shown: {keyboard_shown}");
             }
+            text_input.latch_if_dismissed(keyboard_shown, canvas.window());
         }
         let rect = wants_text.and_then(|_| {
             app.address_field_rect(layout.w, layout.h)

@@ -30,7 +30,7 @@ vars:
   TV_DEVICE: webos-tv
   SSH_KEY: '{{.SSH_KEY | default "$HOME/.ssh/id_rsa"}}'
   NDK_DIR: .toolchains/arm-webos-linux-gnueabi_sdk-buildroot
-  SDL3_PREFIX: '{{.ROOT_DIR}}/.toolchains/SDL3-3.4.16-webos'
+  SDL3_PREFIX: '{{.ROOT_DIR}}/.toolchains/SDL3-webos'
   SYSROOT: '{{.NDK_DIR}}/arm-webos-linux-gnueabi/sysroot'
   TARGET: armv7-unknown-linux-gnueabi
   # One image for all container tasks (shared cargo/target volumes). trixie for glibc 2.41 (host packages).

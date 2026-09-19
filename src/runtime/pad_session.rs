@@ -150,7 +150,7 @@ pub(super) fn bring_up(
     };
     let audio_transport = matches!(link, Some(Link::Bluetooth(_))) || card.is_some();
     let caps = if registry.is_some() && slot.is_dualsense(setting) {
-        pad_audio::caps_for(settings, slot.rumble || audio_transport, audio_transport)
+        pad_audio::caps_for(settings, slot.rumble() || audio_transport, audio_transport)
     } else {
         0
     };

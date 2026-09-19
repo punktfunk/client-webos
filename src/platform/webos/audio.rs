@@ -46,6 +46,8 @@ const DEVICE_BUFFER_FRAMES: u16 = 512;
 
 /// Chunks in flight between the decode thread and the callback. 5 ms each.
 const CHUNK_QUEUE: usize = 64;
+/// Device periods of callback scratch preallocated; see `open`.
+const SCRATCH_PERIODS: usize = 4;
 
 /// Pre-allocate to satisfy both the policy cap and device period, accounting for chunks in flight.
 fn ring_capacity(device_samples: u32, channels: u8) -> usize {
@@ -157,9 +159,11 @@ impl AudioPlayer {
                 .lock()
                 .ok_or_else(|| anyhow::anyhow!("SDL lock audio stream"))?;
             callback.ring.reserve(ring_capacity(source_frames, channels));
+            // Headroom: SDL may ask for more than a period when resampling or re-buffering,
+            // and growing `scratch` would allocate on the audio thread.
             callback
                 .scratch
-                .resize(source_frames as usize * usize::from(channels), 0.0);
+                .resize(SCRATCH_PERIODS * source_frames as usize * usize::from(channels), 0.0);
         }
         player
             .stream
