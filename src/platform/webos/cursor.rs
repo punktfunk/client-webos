@@ -25,9 +25,8 @@ use std::sync::OnceLock;
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-use sdl2::mouse::MouseUtil;
-use sdl2::sys::SDL_bool;
-use sdl2::video::Window;
+use sdl3::mouse::MouseUtil;
+use sdl3::video::Window;
 
 use super::sdl_webos;
 
@@ -64,27 +63,29 @@ impl Cursor {
     /// Stop asking SDL for relative mode, for when motion is read via `super::evdev` instead:
     /// the fork emulates relative mode with a screen-centre warp per motion event, which is
     /// pure waste for a source we don't read. aurora-tv does the same under `hardware_mouse`.
-    pub fn disable_sdl_relative(&mut self) {
+    pub fn disable_sdl_relative(&mut self, window: &Window) {
         self.sdl_relative = false;
-        self.apply();
+        self.apply(window);
     }
 
     /// Capture the pointer for the host — hidden on both layers, and SDL switched to
     /// relative mode so motion arrives as unbounded deltas instead of coordinates that
     /// stop at the panel edge. Uncaptured is the menu/desktop state: visible, absolute.
-    pub fn set_captured(&mut self, captured: bool) {
+    pub fn set_captured(&mut self, captured: bool, window: &Window) {
         self.captured = captured;
-        self.apply();
+        self.apply(window);
     }
 
     pub fn is_captured(&self) -> bool {
         self.captured
     }
 
-    fn apply(&mut self) {
+    /// SDL3 scopes relative mode per window.
+    fn apply(&mut self, window: &Window) {
         let _ = OWNER_THREAD.set(std::thread::current().id());
         self.mouse.show_cursor(!self.captured);
-        self.mouse.set_relative_mouse_mode(self.captured && self.sdl_relative);
+        self.mouse
+            .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
         self.compositor_layer = set_compositor_visible(!self.captured);
         COMPOSITOR_HIDDEN.store(self.captured, Ordering::Relaxed);
         self.last_assert = Instant::now();
@@ -103,25 +104,29 @@ impl Cursor {
     /// motion event arrives, and warping there would fling a pointer the TV is drawing mid-screen
     /// into the corner, and forward that jump to the host as an absolute move.
     ///
-    /// No-op where the compositor layer isn't ours to drive (stock SDL2, or a TV without
+    /// SDL3 exposes `SDL_GetMouseState` through `EventPump::mouse_state`, not globally.
+    ///
+    /// No-op where the compositor layer isn't ours to drive (stock SDL3, or a TV without
     /// `wl_webos_input_manager`): there is no pending visibility change to flush, so the warp
     /// would be pure pointer displacement.
-    pub fn flush(&mut self, window: &Window) {
+    pub fn flush(&mut self, window: &Window, events: &sdl3::EventPump) {
         if !self.compositor_layer {
             return;
         }
         let (x, y) = if self.captured {
             let (w, h) = window.size();
-            (w as i32 / 2, h as i32 / 2)
+            (w as f32 / 2.0, h as f32 / 2.0)
         } else {
-            match global_position() {
-                (0, 0) => return,
+            let state = events.mouse_state();
+            match (state.x(), state.y()) {
+                (0.0, 0.0) => return,
                 pos => pos,
             }
         };
-        self.mouse.set_relative_mouse_mode(false);
+        self.mouse.set_relative_mouse_mode(window, false);
         self.mouse.warp_mouse_in_window(window, x, y);
-        self.mouse.set_relative_mouse_mode(self.captured && self.sdl_relative);
+        self.mouse
+            .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
     }
 
     /// Asks the compositor once more to drop its pointer. For the point where the evdev grab has
@@ -138,11 +143,11 @@ impl Cursor {
 }
 
 fn set_compositor_visible(visible: bool) -> bool {
-    // Unresolved (stock SDL2) reports "unsupported", same as a TV without
+    // Unresolved (stock SDL3) reports "unsupported", same as a TV without
     // `wl_webos_input_manager`; the caller then uses SDL's own `show_cursor`.
     let supported = sdl_webos::fns().is_ok_and(|fns| {
         // SAFETY: plain integer argument, no pointers; caller is the SDL video thread.
-        unsafe { (fns.cursor_visibility)(bool_to_sdl(!visible)) == SDL_bool::SDL_TRUE }
+        unsafe { (fns.cursor_visibility)(!visible) }
     });
     // Logged once, for stray-cursor bug reports.
     if !SUPPORT_LOGGED.swap(true, Ordering::Relaxed) {
@@ -152,23 +157,6 @@ fn set_compositor_visible(visible: bool) -> bool {
         );
     }
     supported
-}
-
-/// Window-relative pointer position, straight from SDL: [`MouseUtil`] exposes no query, and
-/// `MouseState` needs the event pump this type deliberately doesn't hold.
-fn global_position() -> (i32, i32) {
-    let (mut x, mut y) = (0, 0);
-    // SAFETY: both out-pointers are valid locals; caller is the SDL video thread.
-    unsafe { sdl2::sys::SDL_GetMouseState(&mut x, &mut y) };
-    (x, y)
-}
-
-const fn bool_to_sdl(value: bool) -> SDL_bool {
-    if value {
-        SDL_bool::SDL_TRUE
-    } else {
-        SDL_bool::SDL_FALSE
-    }
 }
 
 /// Put the compositor pointer back if a [`Cursor`] hid it — for exits that skip its teardown

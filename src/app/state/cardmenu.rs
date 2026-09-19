@@ -84,7 +84,7 @@ impl CardMenu {
     ///
     /// Both report `true` on the tick their clock *expires*, not just while it runs. That
     /// last tick is the one that draws the animation at its final value: report `false`
-    /// there and the render loop parks in `wait_for_event` one frame short, leaving the
+    /// there and the render loop parks in its idle wait one frame short, leaving the
     /// panel a percent below its resting place until some unrelated event sets `dirty` —
     /// which, during a hold, is the button coming back up. It reads as the panel stalling
     /// just before the end and then finishing on release. `focus_anim` and friends avoid it

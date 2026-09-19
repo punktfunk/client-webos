@@ -206,9 +206,10 @@ impl Connected {
     /// Every command is routed by its pad index to that pad's own handle and `DualSense` link. The
     /// two planes go to different places, because each has one route that works for every
     /// controller rather than only one:
-    ///   * **rumble** → SDL's evdev force feedback (`GameController::set_rumble`, plus
+    ///   * **rumble** → SDL's evdev force feedback (`Gamepad::set_rumble`, plus
     ///     `set_rumble_triggers` for the impulse-trigger motors on pads that have them), which
-    ///     works on any pad the TV has bound, `DualSense` included;
+    ///     works on any pad the TV has bound, except a Bluetooth `DualSense` on SDL's HIDAPI
+    ///     driver (rumble needs enhanced reports, which stay off);
     ///   * **`DualSense` HID feedback** (adaptive triggers, lightbar, player LEDs) → the pad's
     ///     Bluetooth address or wired hidraw node (see [`crate::platform::webos::dualsense`]).
     ///
@@ -233,28 +234,24 @@ impl Connected {
             if slot.extras.audio.as_ref().is_some_and(|audio| audio.envelope.active()) {
                 continue;
             }
-            // SDL2 treats 0 as "until changed" not "stop now" — desired since the policy
+            // SDL treats 0 as "until changed" not "stop now" — desired since the policy
             // engine sends explicit zeros to stop. Don't floor to avoid cutting held rumble short.
-            //
-            // Errors here are the common "this pad has no rumble motors" case, not a fault:
-            // logging per command would spam a tick loop, and there is no recovery to attempt.
-            let n = RUMBLE_APPLIED.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 30 == 0 {
-                tracing::debug!(
-                    "rumble applied #{n}: pad={} low={} high={} lt={} rt={} backstop={}ms",
-                    cmd.pad,
-                    cmd.low,
-                    cmd.high,
-                    cmd.left_trigger,
-                    cmd.right_trigger,
-                    cmd.backstop_ms
-                );
+            if slot.rumble() && slot.pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms).is_ok() {
+                let n = RUMBLE_APPLIED.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n % 30 == 0 {
+                    tracing::debug!(
+                        "rumble applied #{n}: pad={} low={} high={} backstop={}ms",
+                        cmd.pad,
+                        cmd.low,
+                        cmd.high,
+                        cmd.backstop_ms
+                    );
+                }
             }
-            let _ = slot.pad.set_rumble(cmd.low, cmd.high, cmd.backstop_ms);
             // Dropping the trigger pair on a pad without those motors is the correct degrade;
             // folding it into the handles would turn a racing title's continuous trigger stream
             // into a handle motor droning flat-out for the whole race.
-            if slot.triggers {
+            if slot.triggers() {
                 let _ = slot
                     .pad
                     .set_rumble_triggers(cmd.left_trigger, cmd.right_trigger, cmd.backstop_ms);
@@ -264,7 +261,9 @@ impl Connected {
         for slot in pads.iter_mut() {
             if let Some((low, high)) = slot.extras.audio.as_ref().and_then(|a| a.envelope.take_change()) {
                 // 0 = until changed; envelope sends the stop.
-                let _ = slot.pad.set_rumble(low, high, 0);
+                if slot.rumble() {
+                    let _ = slot.pad.set_rumble(low, high, 0);
+                }
             }
         }
 

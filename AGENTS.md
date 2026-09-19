@@ -26,8 +26,8 @@ A host `cargo check` proves nothing: `app`/`platform` are cfg-gated out on macOS
 Layered, deps point inward, acyclic:
 
 `core` (pure domain: `Settings`, `Screen`, events, `caps`) ← `ui` (geometry, animation clocks, the
-focus map, **no sdl2**) and `services` (portable I/O: store, discovery, mTLS, art, wol) ←
-`session` (streaming on `punktfunk-core`, **no sdl2**) and `platform/webos` (the SDL2 and hardware
+focus map, **no sdl3**) and `services` (portable I/O: store, discovery, mTLS, art, wol) ←
+`session` (streaming on `punktfunk-core`, **no sdl3**) and `platform/webos` (the SDL3 and hardware
 boundary — input, NDL video, audio, evdev) ← `app` (the `App` state machine and its painters) ←
 `runtime` (the two top-level loops).
 

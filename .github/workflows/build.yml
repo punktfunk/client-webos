@@ -65,12 +65,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: target-clippy
 
-      # SDL2 for the window, fontconfig and FreeType for Skia's text layout (the console kit).
-      - name: Install native SDL2 and Skia's text libs for the test build
+      # fontconfig and FreeType for Skia's text layout (the console kit); the X11 headers are
+      # for `vendored-sdl3`'s source build of SDL3, which the test target has no package for.
+      - name: Install Skia's text libs and SDL3's build deps for the test build
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: libsdl2-dev libfontconfig-dev libfreetype-dev
-          version: 1
+          packages: >-
+            libfontconfig-dev libfreetype-dev libx11-dev libxext-dev libxrandr-dev
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev
+          version: 2
 
       # Runs the tests `lint` only type-checks: the byte-exact report/CRC/resample paths
       # fail silently on the pad, so a green cross-compile proves nothing about them.

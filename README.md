@@ -24,7 +24,7 @@ older NDL interface. Built directly on the upstream `punktfunk-core` crate (a pi
 The app is originally developed by [dyptan.io](https://github.com/dyptan-io) and donated to
 [punktfunk](https://github.com/punktfunk) organization. Built on the [punktfunk](https://git.unom.io/unom/punktfunk)
 project by **Enrico Bühler ([unom](https://unom.io))** — all credit for the protocol and host implementation belongs there.
-This repo is only the webOS-specific client: an SDL2 UI, NDL DirectMedia hardware video decode, and webOS packaging.
+This repo is only the webOS-specific client: an SDL3 UI, NDL DirectMedia hardware video decode, and webOS packaging.
 
 <details>
 <summary><b>Screenshots</b></summary>

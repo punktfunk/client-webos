@@ -17,14 +17,11 @@ const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 pub(crate) const GPU_CACHE_BYTES: usize = 64 << 20;
 
 pub(crate) struct ConsoleGl {
-    /// Held for the process rather than per menu entry. Dropping it throws away every compiled
-    /// shader and the glyph atlas, and a cold shell spends 372 ms rebuilding them across its
-    /// first ~90 frames (`design/webos-console-port-handoff.md` §1) — once is a splash screen,
-    /// once per menu entry is a stutter every time a stream ends.
-    ctx: sdl2::video::GLContext,
-    context: DirectContext,
-    /// Skia over framebuffer 0; cached to avoid re-wrapping on every frame.
+    // Field order is drop order: GPU resources must die before their GL context.
     surface: Option<(Surface, u32, u32)>,
+    context: DirectContext,
+    /// Preserved across menu entries to retain compiled shaders and glyph atlases.
+    ctx: sdl3::video::GLContext,
     /// What the window's config actually granted, not what was asked for — Skia must be told
     /// the truth or it clips paths against a buffer that is not there.
     stencil: usize,
@@ -34,8 +31,20 @@ pub(crate) struct ConsoleGl {
     swap_vsync: Option<bool>,
 }
 
+impl Drop for ConsoleGl {
+    fn drop(&mut self) {
+        // Cached images can outlive this owner. Make their eventual drops safe too.
+        if self.ctx.is_current() {
+            self.context.release_resources_and_abandon();
+        } else {
+            // Another context is current; let SDL reclaim GPU objects with this context.
+            self.context.abandon();
+        }
+    }
+}
+
 impl ConsoleGl {
-    pub(crate) fn new(window: &sdl2::video::Window, video: &sdl2::VideoSubsystem) -> Result<Self> {
+    pub(crate) fn new(window: &sdl3::video::Window, video: &sdl3::VideoSubsystem) -> Result<Self> {
         let ctx = window
             .gl_create_context()
             .map_err(|e| anyhow!("console GL context: {e}"))?;
@@ -51,9 +60,13 @@ impl ConsoleGl {
         );
         // Through SDL's resolver, not Skia's `new_native()`: the native assembler has no reason
         // to find webOS's loader, and SDL already knows it (proven by `tools/webos-glprobe`).
-        let interface =
-            gpu::gl::Interface::new_load_with(|name| video.gl_get_proc_address(name) as *const std::ffi::c_void)
-                .ok_or_else(|| anyhow!("Skia: no GL interface from SDL's resolver"))?;
+        // The resolver returns Option<FnPtr>; Skia wants a pointer, so None becomes null.
+        let interface = gpu::gl::Interface::new_load_with(|name| {
+            video
+                .gl_get_proc_address(name)
+                .map_or(std::ptr::null(), |f| f as *const std::ffi::c_void)
+        })
+        .ok_or_else(|| anyhow!("Skia: no GL interface from SDL's resolver"))?;
         let mut context = gpu::direct_contexts::make_gl(interface, None)
             .ok_or_else(|| anyhow!("Skia: DirectContext over GLES failed"))?;
         context.set_resource_cache_limit(GPU_CACHE_BYTES);
@@ -70,7 +83,7 @@ impl ConsoleGl {
 
     /// Called on every console entry; old menus and the stream have both made their own
     /// context current in between.
-    pub(crate) fn make_current(&self, window: &sdl2::video::Window) -> Result<()> {
+    pub(crate) fn make_current(&self, window: &sdl3::video::Window) -> Result<()> {
         window
             .gl_make_current(&self.ctx)
             .map_err(|e| anyhow!("console: gl_make_current: {e}"))
@@ -85,11 +98,11 @@ impl ConsoleGl {
     /// which SDL's renderer context shares, so it is pushed after every `make_current` rather than
     /// once at construction. Best-effort: a driver that refuses leaves the caller's cadence in
     /// charge.
-    pub(crate) fn set_swap_interval(&mut self, video: &sdl2::VideoSubsystem, vsync: bool) {
+    pub(crate) fn set_swap_interval(&mut self, video: &sdl3::VideoSubsystem, vsync: bool) {
         let interval = if vsync {
-            sdl2::video::SwapInterval::VSync
+            sdl3::video::SwapInterval::VSync
         } else {
-            sdl2::video::SwapInterval::Immediate
+            sdl3::video::SwapInterval::Immediate
         };
         let result = video.gl_set_swap_interval(interval);
         if self.swap_vsync != Some(vsync) {

@@ -1,4 +1,4 @@
-//! webOS NDL `DirectMedia` video. Video only; audio goes through SDL2
+//! webOS NDL `DirectMedia` video. Video only; audio goes through SDL
 //! (`platform::webos::audio`).
 //!
 //! Two generations of the same C API, in the same device library, chosen by

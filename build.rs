@@ -28,7 +28,19 @@ fn main() {
     println!("cargo:rustc-link-arg={obj}");
     println!("cargo:rerun-if-changed=src/platform/webos/glibc_compat_shim.c");
 
-    // On-device libSDL2 is too old; bundle newer version in ipk/lib/ and use $ORIGIN-relative rpath.
+    // SDL3's prefix lies outside the sysroot (buildroot's pkg-config breaks on external .pc files),
+    // so we emit the search path manually. sdl3-sys supplies `-lSDL3` without probing.
+    let sdl3_prefix = std::env::var("SDL3_PREFIX")
+        .expect("SDL3_PREFIX set by taskfiles/toolchain.yml — run via `task build`/`task check`");
+    assert!(
+        std::path::Path::new(&sdl3_prefix).join("lib/libSDL3.so").exists(),
+        "no libSDL3.so under SDL3_PREFIX={sdl3_prefix} — run `task toolchain:sdl3`"
+    );
+    // Search path only; `-lSDL3` itself comes from sdl3-sys once its pkg-config/vcpkg probes are off.
+    println!("cargo:rustc-link-search=native={sdl3_prefix}/lib");
+    println!("cargo:rerun-if-env-changed=SDL3_PREFIX");
+
+    // The TV has no libSDL3 at all; it ships in ipk/lib/ and is found by $ORIGIN-relative rpath.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
 }
 
@@ -39,8 +51,8 @@ fn generate_third_party_notices(manifest_dir: &str) {
     use std::process::Command;
 
     const BUNDLED_COMPONENTS: &[(&str, &str, Option<&str>, &str)] = &[
-        ("SDL2 (webosbrew/SDL-webOS backport)",
-         "Bundled as lib/libSDL2-2.0.so.0 in the .ipk (the on-device system copy is too old — see docs/NOTES.md). Zlib license.",
+        ("SDL3 (webosbrew/SDL-webOS)",
+         "Bundled as lib/libSDL3.so.0 in the .ipk (webOS lacks native SDL3; see docs/NOTES.md). Zlib license.",
          None,
          "https://github.com/webosbrew/SDL-webOS"),
         ("FreeType",

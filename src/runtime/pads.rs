@@ -1,11 +1,12 @@
-//! Every attached game pad, each on its own wire pad index — the SDL2 port of
+//! Every attached game pad, each on its own wire pad index — the SDL3 port of
 //! `pf_client_core::gamepad`'s slot table (the Linux client's).
 //!
 //! Every non-remote controller is opened, in the menus as in the stream: a second pad left shut
 //! is dead for navigation too. Indices are lowest-free and stable for a slot's life, so an unplug
 //! frees only its own index and a game never sees players shuffle.
 
-use sdl2::controller::GameController;
+use sdl3::gamepad::Gamepad;
+use sdl3::joystick::JoystickId;
 
 use super::input::DisconnectChord;
 use crate::core::dial::PadDial;
@@ -13,21 +14,21 @@ use crate::platform::webos::gamepad;
 use crate::services::store::GamepadType;
 
 pub(super) struct Slot {
-    /// SDL instance id — what every controller event's `which` names.
-    pub(super) id: u32,
+    /// SDL instance id — SDL3 names pads by ID only, no device indices.
+    pub(super) id: JoystickId,
     /// Wire pad index (`InputEvent::flags`).
     pub(super) index: u8,
-    pub(super) pad: GameController,
-    /// Impulse-trigger motors. Read once: SDL walks its joystick list to answer.
-    pub(super) triggers: bool,
-    /// The kind this pad's name maps to; `None` for one the Xbox default already fits.
+    pub(super) pad: Gamepad,
+    /// Where its A, B, X and Y labels sit (`input::face_by_label`), fixed while open.
+    pub(super) face: [sdl3::gamepad::Button; 4],
+    /// The kind this pad is; `None` uses Xbox default per `gamepad::kind_of`.
     pub(super) physical: Option<GamepadType>,
     /// The kind the host was last told this slot is; `None` before it has heard of it.
     pub(super) declared: Option<GamepadType>,
     /// Per pad: two pads' halves of a chord are not one person holding it.
     pub(super) chord: DisconnectChord,
     pub(super) dial: PadDial,
-    /// `SDL_GameControllerPath` and serial: what ties this pad to its own `DualSense` link.
+    /// `SDL_GetGamepadPath` and serial: what ties this pad to its own `DualSense` link.
     pub(super) path: Option<String>,
     pub(super) serial: Option<String>,
     /// The controller's `Uniq` (its MAC, for a `PlayStation` pad): what its touchpad and motion
@@ -38,6 +39,17 @@ pub(super) struct Slot {
 }
 
 impl Slot {
+    /// Motor capabilities, read live: SDL can publish them after open, with no event to say so.
+    pub(super) fn rumble(&self) -> bool {
+        // SAFETY: `pad` is open for the call.
+        unsafe { self.pad.has_rumble() }
+    }
+
+    pub(super) fn triggers(&self) -> bool {
+        // SAFETY: as in `rumble`.
+        unsafe { self.pad.has_rumble_triggers() }
+    }
+
     /// The kind the host should build this pad as. An explicit setting emulates that pad on every
     /// slot; `Automatic` mirrors the pad, and an unrecognized one takes the host's own default so
     /// a pad joining next to a `DualSense` is not built as another one.
@@ -66,10 +78,14 @@ fn lowest_free_index(taken: &[u8]) -> Option<u8> {
 }
 
 impl Pads {
-    /// Opens the pad at SDL device index `device` (`ControllerDeviceAdded::which`). `None` for the
-    /// TV's remote, an already-open pad, a full table or a failed open.
-    pub(super) fn add(&mut self, subsystem: &sdl2::GameControllerSubsystem, device: u32) -> Option<&Slot> {
-        if gamepad::is_remote_at(subsystem, device) {
+    /// Opens pad `id`. `None` if remote, duplicate, table full, or open fails.
+    pub(super) fn add(&mut self, subsystem: &sdl3::GamepadSubsystem, id: JoystickId) -> Option<&Slot> {
+        if gamepad::is_remote_at(subsystem, id) {
+            return None;
+        }
+        // Both `sync` and a queued `Added` event can name the same pad instance.
+        // Check before open: SDL3 IDs the pad upfront, nothing new after opening.
+        if self.slots.iter().any(|s| s.id == id) {
             return None;
         }
         let taken: Vec<u8> = self.slots.iter().map(|s| s.index).collect();
@@ -77,68 +93,71 @@ impl Pads {
             tracing::warn!("gamepad slots full — controller not forwarded");
             return None;
         };
-        let pad = match subsystem.open(device) {
+        let pad = match subsystem.open(id) {
             Ok(pad) => pad,
             Err(e) => {
                 tracing::warn!("controller open failed: {e}");
                 return None;
             }
         };
-        let id = pad.instance_id();
-        // `sync` and a queued `Added` can both name the same device.
-        if self.slots.iter().any(|s| s.id == id) {
-            return None;
-        }
-        let physical = gamepad::type_for_name(&pad.name());
-        // SAFETY: `device` is an index SDL just opened a controller at.
-        let path = cstr(unsafe { sdl2::sys::SDL_GameControllerPathForIndex(device as i32) });
-        // SAFETY: `id` is a joystick this subsystem just opened; the handle is borrowed, not owned.
-        let serial =
-            cstr(unsafe { sdl2::sys::SDL_JoystickGetSerial(sdl2::sys::SDL_JoystickFromInstanceID(id as i32)) });
+        let name = pad.name().unwrap_or_default();
+        let face = crate::platform::webos::input::face_by_label(id);
+        let physical = gamepad::kind_of(&pad);
+        let path = pad.path();
+        let serial = pad.serial_number();
         let uniq = device_uniq(path.as_deref(), serial.as_deref());
-        tracing::info!("controller connected: {} (pad {index}, {physical:?})", pad.name());
+        // Player LEDs follow the wire index where the backend drives them; most do not.
+        if let Err(e) = pad.set_player_index(u16::from(index)) {
+            tracing::debug!("player index not set: {e}");
+        }
         let at = self.slots.partition_point(|s| s.index < index);
         self.slots.insert(
             at,
             Slot {
                 id,
                 index,
-                triggers: pad.has_rumble_triggers(),
                 pad,
+                face,
                 physical,
                 declared: None,
                 chord: DisconnectChord::default(),
-                dial: PadDial::default(),
+                dial: PadDial::with_face(face.map(|b| gamepad::button_bit(b).unwrap_or(0))),
                 path,
                 serial,
                 uniq,
                 extras: Default::default(),
             },
         );
-        self.slots.get(at)
+        let slot = &self.slots[at];
+        tracing::info!(
+            "controller connected: {name} (pad {index}, {physical:?}, rumble={}, triggers={})",
+            slot.rumble(),
+            slot.triggers(),
+        );
+        Some(slot)
     }
 
     /// Brings the table in line with what SDL has attached now: drops pads that went away and
     /// opens ones that arrived. For entering a loop, since a loop that was not running — the
     /// connect wait, the launch animation — consumed or never saw the hotplug events.
-    pub(super) fn sync(&mut self, subsystem: &sdl2::GameControllerSubsystem) {
+    ///
+    /// Drops tell the host nothing: call only before this session's slots are announced.
+    pub(super) fn sync(&mut self, subsystem: &sdl3::GamepadSubsystem) {
         self.slots.retain(|slot| {
-            let attached = slot.pad.attached();
+            let attached = slot.pad.connected();
             if !attached {
                 tracing::info!("controller gone while unwatched: pad {}", slot.index);
             }
             attached
         });
-        for device in 0..subsystem.num_joysticks().unwrap_or(0) {
-            if subsystem.is_game_controller(device) {
-                self.add(subsystem, device);
-            }
+        for id in subsystem.gamepads().unwrap_or_default() {
+            self.add(subsystem, id);
         }
     }
 
     /// Closes the slot for instance `id`. `None` for anything not held — the Magic Remote drops
     /// and re-adds constantly.
-    pub(super) fn remove(&mut self, id: u32) -> Option<Slot> {
+    pub(super) fn remove(&mut self, id: JoystickId) -> Option<Slot> {
         let i = self.slots.iter().position(|s| s.id == id)?;
         let slot = self.slots.remove(i);
         tracing::info!("controller disconnected: pad {}", slot.index);
@@ -146,7 +165,7 @@ impl Pads {
     }
 
     /// The slot for SDL instance `id`.
-    pub(super) fn get_mut(&mut self, id: u32) -> Option<&mut Slot> {
+    pub(super) fn get_mut(&mut self, id: JoystickId) -> Option<&mut Slot> {
         self.slots.iter_mut().find(|s| s.id == id)
     }
 
@@ -189,7 +208,7 @@ impl Pads {
         self.slots
             .iter()
             .map(|s| crate::app::DetectedPad {
-                name: s.pad.name(),
+                name: s.pad.name().unwrap_or_default(),
                 kind: s.physical,
                 index: s.index,
             })
@@ -203,7 +222,7 @@ impl Pads {
     ) -> impl Iterator<Item = pf_client_core::menu_nav::PadInfo> + '_ {
         self.slots.iter().map(move |s| {
             crate::app::DetectedPad {
-                name: s.pad.name(),
+                name: s.pad.name().unwrap_or_default(),
                 kind: Some(s.host_kind(setting)),
                 index: s.index,
             }
@@ -214,6 +233,12 @@ impl Pads {
     /// The pad the single-pad surfaces describe (the legend): player 1.
     pub(super) fn first(&self) -> Option<&Slot> {
         self.slots.first()
+    }
+
+    /// [`Self::first`]'s name, for the legend.
+    pub(super) fn first_name(&self) -> Option<String> {
+        // An unnamed pad is still a pad: the shell reads `Some` as "controllers attached".
+        self.first().map(|slot| slot.pad.name().unwrap_or_default())
     }
 }
 
@@ -260,10 +285,4 @@ fn device_uniq(path: Option<&str>, serial: Option<&str>) -> Option<String> {
         _ => None,
     }
     .or_else(|| serial.and_then(crate::platform::webos::dualsense::mac_from_serial))
-}
-
-/// An SDL-owned C string, copied. SDL returns NULL for "none".
-fn cstr(ptr: *const std::ffi::c_char) -> Option<String> {
-    // SAFETY: SDL hands back NULL or a NUL-terminated string that lives while the device does.
-    (!ptr.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
 }

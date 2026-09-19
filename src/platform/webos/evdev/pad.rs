@@ -1,8 +1,9 @@
 //! `PlayStation` pad nodes: the touchpad and the motion sensors.
 //!
 //! The kernel's `hid-playstation` publishes a `DualSense` as three evdev nodes — the pad itself,
-//! its touchpad and its motion sensors. SDL2 reads only the first, so the other two reach the
-//! host's virtual pad only if this reader claims them: [`RichInput::Touchpad`] contacts for a
+//! its touchpad and its motion sensors. SDL reads only the first here (see
+//! `input::mute_unused_events`), so the other two reach the host's virtual pad only if this
+//! reader claims them: [`RichInput::Touchpad`] contacts for a
 //! game's swipes, [`RichInput::Motion`] samples for gyro aiming. Claiming is not optional either
 //! way — both advertise absolute axes the compositor would otherwise turn into a second cursor,
 //! the touchpad with a stuck left button (see [`is_pad_touchpad`]).
@@ -172,7 +173,7 @@ fn is_pad_touchpad(absolute_pointer: bool, has_btn_touch: bool, vendor: impl FnO
 }
 
 /// A `PlayStation` pad's motion sensors, published as a third node beside the pad and its
-/// touchpad. SDL2 never reads it, so gyro aiming reaches the host only if this reader forwards it
+/// touchpad. SDL never reads it here, so gyro aiming reaches the host only if this reader forwards it
 /// as [`RichInput::Motion`].
 ///
 /// Matched on capability bits and vendor, like [`is_pad_touchpad`]: all six sensor axes and no
