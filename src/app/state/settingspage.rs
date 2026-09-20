@@ -140,6 +140,9 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
             } else {
                 push(Row::Kit(K::AutoWake), Some("Session"));
                 push(Row::Kit(K::Palette), Some("Interface"));
+                // The console-shell row is global-only: it is a device flag, and a TV's
+                // weak GPU is why the shell defaults it on (`webos.reduce_ui_resolution`).
+                push(Row::Kit(K::ReduceUiResolution), None);
                 push(Row::Kit(K::GamepadUi), None);
                 push(Row::Kit(K::GamepadUiMode), None);
             }
@@ -879,7 +882,8 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::AutoWake
         | RowId::Palette
         | RowId::GamepadUi
-        | RowId::GamepadUiMode => return None,
+        | RowId::GamepadUiMode
+        | RowId::ReduceUiResolution => return None,
         // This page draws its own scope switcher and profile rows.
         RowId::Preset(_) | RowId::NoPresets => "the page builds its own profile rows",
         // The client's own screens, not the kit's action rows.
@@ -893,11 +897,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Fullscreen
         | RowId::Shortcuts => "the kit gates it off WebOS",
         // Android hardware, and one MediaCodec flag.
-        RowId::LowLatency
-        | RowId::PhoneRumble
-        | RowId::PhoneGyro
-        | RowId::Sc2Passthrough
-        | RowId::ReduceUiResolution => "Android-only in the kit",
+        RowId::LowLatency | RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => "Android-only in the kit",
         // `ConnectParams` takes ten settings-derived fields, and none of these keys has a
         // reader anywhere in this crate. A row would write a value nothing ever sends.
         RowId::Compositor
