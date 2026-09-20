@@ -97,6 +97,7 @@ fn generate_third_party_notices(manifest_dir: &str) {
     let metadata_output = Command::new("cargo")
         .args([
             "metadata",
+            "--locked",
             "--format-version",
             "1",
             "--filter-platform",

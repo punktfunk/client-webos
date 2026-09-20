@@ -17,6 +17,19 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 - **Shipped builds use fat LTO, one codegen unit** (`Cargo.toml`'s `[profile.release]`). Cross-crate inlining (AEAD, FEC, QUIC parsing) required for armv7 hot loops. Docker tasks default thin LTO/16 units for speed; override with `RELEASE_LTO=fat|thin|false`.
 - **libstdc++ is linked statically, never bundled.** Bundled `lib/libstdc++.so.6` via `DT_RPATH` outranks `LD_LIBRARY_PATH`. webOS 11's `libNDL_media_impl.so.1` needs `GLIBCXX_3.4.32` (missing in SDK copy); webOS 10 needs 3.4.30. Static works on every firmware. No C++ crosses boundary — SDL, NDL, Luna are all C.
 
+## Dependency resolution
+
+`Cargo.lock` here controls shared core's dependencies too; Cargo ignores the upstream lockfile.
+Build/check/lint/test, preview, and license metadata use `--locked` to preserve this resolution.
+
+- Keep `quinn-proto` at 0.11.18 or newer: 0.11.17 double-subtracts evicted datagram bytes,
+  causing `datagrams.outgoing.payload_bytes desynchronized` under send-buffer pressure.
+- `flate2` 1.1.9 shares `miniz_oxide` 0.8 with PNG; 1.1.10 introduces a second version.
+  Recheck both consumers when updating compression dependencies.
+- Audit the shipping target with `cargo tree --locked --target armv7-unknown-linux-gnueabi -d`.
+  Repeated identical versions can be separate host build dependencies. Core's SPAKE2 and
+  session crypto require incompatible crypto/RNG generations; lockfile pins cannot unify them.
+
 ## UI preview (container)
 
 `task docker:deploy` runs the app in a container on a virtual 1080p display, served over VNC (`http://localhost:6080/vnc.html`). UI work needs no TV.

@@ -65,7 +65,7 @@ tasks:
       SDL3_PREFIX: '{{.SDL3_PREFIX}}'
     cmds:
       - rustup target add {{.TARGET}}
-      - cargo build --release --target {{.TARGET}}
+      - cargo build --locked --release --target {{.TARGET}}
 
   check:
     desc: Cross-target cargo check without Docker (CI entry point)
@@ -74,7 +74,7 @@ tasks:
       SDL3_PREFIX: '{{.SDL3_PREFIX}}'
     cmds:
       - rustup target add {{.TARGET}}
-      - cargo check --target {{.TARGET}}
+      - cargo check --locked --target {{.TARGET}}
 
   test:
     desc: >-
@@ -86,7 +86,7 @@ tasks:
       SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
     cmds:
       # `vendored-sdl3`: the host target has no libSDL3 to link against — see Cargo.toml.
-      - cargo test --bins --features vendored-sdl3
+      - cargo test --locked --bins --features vendored-sdl3
 
   lint:
     desc: rustfmt check plus cross-target cargo clippy (Cargo.toml [lints.clippy])
@@ -98,7 +98,7 @@ tasks:
       - cargo fmt --check
       - rustup target add {{.TARGET}}
       - rustup component add clippy
-      - cargo clippy --target {{.TARGET}} --all-targets -- -D warnings
+      - cargo clippy --locked --target {{.TARGET}} --all-targets -- -D warnings
 
   package:
     desc: >-
