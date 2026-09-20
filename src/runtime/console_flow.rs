@@ -85,6 +85,7 @@ pub(super) fn run(
         av1_ok: false,
         store: Some(store.clone()),
         platform: Platform::WebOS,
+        screen: None,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
     };
     // Land back on the shelf the last stream was launched from, the way the classic menus
