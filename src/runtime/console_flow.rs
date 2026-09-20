@@ -85,8 +85,8 @@ pub(super) fn run(
         av1_ok: false,
         store: Some(store.clone()),
         platform: Platform::WebOS,
-        screen: None,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
+        screen: None,
     };
     // Land back on the shelf the last stream was launched from, the way the classic menus
     // restore `selected_host` on entry. The fetch is seeded here because the shell only asks
