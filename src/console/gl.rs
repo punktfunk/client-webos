@@ -12,9 +12,8 @@ use skia_safe::{ColorType, Surface};
 
 const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 
-/// Skia's resource budget. A quarter of the desktop's 160 MB: this `SoC` shares one memory pool
-/// with the NDL decoder, and covers are the only large thing the console caches.
-pub(crate) const GPU_CACHE_BYTES: usize = 64 << 20;
+/// Skia's resource budget: the shell's measured 1080p working-set floor.
+pub(crate) const GPU_CACHE_BYTES: usize = pf_console_ui::MIN_GPU_CACHE_BYTES;
 
 pub(crate) struct ConsoleGl {
     // Field order is drop order: GPU resources must die before their GL context.
