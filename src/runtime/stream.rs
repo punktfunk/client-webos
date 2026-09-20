@@ -4,8 +4,7 @@ use crate::core::dial::PadRoute;
 use crate::core::settings::TvSettings;
 use crate::platform::webos::device;
 use crate::platform::webos::input::{
-    webos_scancode_down as key_down, WEBOS_BLUE_KEYCODE, WEBOS_EXIT_SCANCODE, WEBOS_GREEN_SCANCODE,
-    WEBOS_HOME_SCANCODE, WEBOS_YELLOW_SCANCODE,
+    webos_scancode_down as key_down, RemoteKey, RemoteKeys, WEBOS_EXIT_SCANCODE, WEBOS_HOME_SCANCODE,
 };
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
 use punktfunk_core::hud::{self, Extra, HudLine, Role, StatsSnapshot, StatsVerbosity};
@@ -53,7 +52,7 @@ fn overlay_drawn(result: Result<()>, warned: &mut bool) -> bool {
 fn redial(
     attempt: u8,
     gl: &mut Option<console_flow::ConsoleGl>,
-    canvas: &sdl2::render::WindowCanvas,
+    canvas: &sdl3::render::WindowCanvas,
     fonts: &pf_console_ui::theme::Fonts,
     display: (u32, u32),
     identity: &(String, String),
@@ -69,31 +68,55 @@ fn redial(
     spawn_connect(identity.clone(), dial.0.clone(), dial.1.clone())
 }
 
-/// Waits for a reconnect's handshake with the toast up, reading input meanwhile: a Back tap,
-/// the EXIT gesture or a quit gives up (`true`). The worker runs to completion and drops what
-/// it built, which is the cancel — nothing joins it.
-fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl2::EventPump) -> bool {
+/// How a reconnect wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum DialWait {
+    /// The handshake finished; join it.
+    Done,
+    /// Back or the EXIT gesture: give up and return to the menu.
+    Cancel,
+    /// An SDL quit or a signal: leave the app.
+    Quit,
+}
+
+/// Waits for a reconnect's handshake with the toast up, reading input meanwhile. The worker
+/// runs to completion and drops what it built on a give-up, which is the cancel: nothing joins it.
+fn wait_for_dial(handle: &crate::runtime::PendingConnect, events: &mut sdl3::EventPump) -> DialWait {
     let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
-    while !handle.is_finished() {
+    let mut remote_keys = RemoteKeys::default();
+    loop {
+        if handle.is_finished() {
+            return DialWait::Done;
+        }
+        if QUIT_REQUESTED.load(Ordering::Relaxed) {
+            return DialWait::Quit;
+        }
+        // Bounded, not blocking: completion and the signal flag never wake SDL.
+        crate::platform::webos::input::wait_for_event(Duration::from_millis(20));
         for event in events.poll_iter() {
-            if let sdl2::event::Event::KeyDown {
+            if matches!(event, sdl3::event::Event::Quit { .. }) {
+                return DialWait::Quit;
+            }
+            // Back has no keycode in SDL3; check before keycodes (see RemoteKeys). Down edge only:
+            // `press` would read the release of a Back tapped as the link dropped as a cancel.
+            if remote_keys.edge(&event, true) == Some((RemoteKey::Back, true)) {
+                return DialWait::Cancel;
+            }
+            if let sdl3::event::Event::KeyDown {
                 keycode: Some(k),
-                scancode: None,
                 repeat: false,
                 ..
             } = event
             {
                 if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back) {
-                    return true;
+                    return DialWait::Cancel;
                 }
             }
         }
-        if exit_gesture_fired(&mut exit_held) || QUIT_REQUESTED.load(Ordering::Relaxed) {
-            return true;
+        if exit_gesture_fired(&mut exit_held) {
+            return DialWait::Cancel;
         }
-        crate::platform::webos::input::wait_for_event(Duration::from_millis(20));
     }
-    false
 }
 
 /// How long a freeze-until-reanchor hold must last before the toast names it. An RFI recovery
@@ -104,35 +127,45 @@ const HOLD_TOAST_AFTER: Duration = Duration::from_millis(300);
 pub(super) fn run_inner() -> Result<()> {
     // Stops webOS's launcher intercepting Back/Guide as its own shortcut (see `gamepad.rs`'s
     // BTN_GUIDE mapping). Must be set before window creation — these hints only latch there.
-    sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+    sdl3::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
     // Without this webOS SIGTERMs the app on a held/root-level Back before it can react.
-    sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+    sdl3::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
     // Same for the remote's Home button, which otherwise backgrounds and kills the app; the
     // input loop re-opens the launcher itself via `luna::launch_home` instead. No `KEYS_META`
     // alongside it: a keyboard's Super key is Home-class, so that hint never suppressed it, and
     // in-stream it now reaches the host over evdev anyway (`platform::webos::evdev`).
-    sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_HOME", "true");
-    sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
+    sdl3::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_HOME", "true");
+    sdl3::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
     // Suppress webOS's launcher ribbon popping over the foregrounded app.
-    sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
-    // Linear texture filtering — the focus-pop scale shimmers on SDL's default nearest.
-    sdl2::hint::set("SDL_RENDER_SCALE_QUALITY", "1");
+    sdl3::hint::set("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
+    // Magic Remote sleeps pointer after 5m; streams need it awake (remote IS the host mouse).
+    // Set to 24h to make idle sleep a non-event. A webOS fork hint.
+    sdl3::hint::set("SDL_WEBOS_CURSOR_SLEEP_TIME", "86400000");
     // Nothing here wants a mouse synthesized from touch — the Magic Remote is a real pointer,
     // and a pad's touchpad must not be one at all (`mouse::is_touch_emulated`).
-    sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
-    let sdl = sdl2::init().map_err(|e| anyhow::anyhow!("SDL_Init: {e}"))?;
+    sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+    // Same for a pen: muting pen events does not stop SDL synthesizing clicks from one.
+    sdl3::hint::set("SDL_PEN_MOUSE_EVENTS", "0");
+    // Keep Bluetooth PlayStation pads on their simple reports, SDL2's default. SDL3 defaults this to on.
+    sdl3::hint::set("SDL_JOYSTICK_ENHANCED_REPORTS", "0");
+    let sdl = sdl3::init().map_err(|e| anyhow::anyhow!("SDL_Init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow::anyhow!("SDL video subsystem: {e}"))?;
     let game_controller = sdl
-        .game_controller()
-        .map_err(|e| anyhow::anyhow!("SDL game controller subsystem: {e}"))?;
+        .gamepad()
+        .map_err(|e| anyhow::anyhow!("SDL gamepad subsystem: {e}"))?;
     let sdl_audio = sdl.audio().map_err(|e| anyhow::anyhow!("SDL audio subsystem: {e}"))?;
     tracing::info!("SDL video subsystem up (driver: {})", video.current_video_driver());
+    // Once per thread. native_mode read from connect thread; both fork entries touch compositor.
+    crate::platform::webos::device::probe_panel();
 
+    // SDL3 hangs modes off a `Display` instead of a bare index, and reports the rate as a float
+    // (59.94 is no longer rounded to 60 — see `SDL_DisplayMode`'s numerator/denominator pair).
     let display_mode = video
-        .current_display_mode(0)
-        .map_err(|e| anyhow::anyhow!("current_display_mode: {e}"))?;
+        .get_primary_display()
+        .and_then(|display| display.get_mode())
+        .map_err(|e| anyhow::anyhow!("current display mode: {e}"))?;
     tracing::info!(
-        "display mode: {}x{}@{}",
+        "display mode: {}x{}@{:.3}",
         display_mode.w,
         display_mode.h,
         display_mode.refresh_rate
@@ -154,16 +187,15 @@ pub(super) fn run_inner() -> Result<()> {
         .fullscreen()
         .build()
         .map_err(|e| anyhow::anyhow!("create window: {e}"))?;
-    let mut canvas = window
-        .into_canvas()
-        // Explicit, so a GLES2 renderer that won't come up is a hard error rather than a silent
-        // fall back to SDL's software path — ~25-45ms/frame on this SoC.
-        .accelerated()
-        .build()
-        .map_err(|e| anyhow::anyhow!("create canvas: {e}"))?;
-    tracing::info!("window + canvas created (renderer: {})", canvas.info().name);
+    // Named, so a GLES2 renderer that won't come up is a hard error rather than a silent fall back
+    // to SDL's software path (~25-45ms/frame on this SoC). The fork builds no Vulkan and webOS has
+    // no desktop GL, so GLES2 is the only accelerated renderer there is.
+    let mut canvas =
+        sdl3::render::create_renderer(window, Some(c"opengles2")).map_err(|e| anyhow::anyhow!("create canvas: {e}"))?;
+    tracing::info!("window + canvas created (renderer: {})", canvas.renderer_name);
 
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("event pump: {e}"))?;
+    crate::platform::webos::input::mute_unused_events();
 
     let identity = store::load_or_create_identity().context("load_or_create_identity")?;
 
@@ -173,17 +205,15 @@ pub(super) fn run_inner() -> Result<()> {
     // The menu's layout box: the real mode divided by the panel-size correction, so a smaller
     // set lays out fewer, larger units and the canvas scale below makes them back up to
     // pixels. The window, the stream and the IME rect all keep the real mode.
-    let ui_mode = {
+    let ui_layout = {
         let k = crate::app::draw::panel_k();
-        sdl2::video::DisplayMode::new(
-            display_mode.format,
-            (display_mode.w as f32 / k).round() as i32,
-            (display_mode.h as f32 / k).round() as i32,
-            display_mode.refresh_rate,
-        )
+        LayoutBox {
+            w: (display_mode.w as f32 / k).round() as u32,
+            h: (display_mode.h as f32 / k).round() as u32,
+        }
     };
 
-    // Owned above the loop, not re-declared per iteration: `ControllerDeviceAdded` fires only
+    // Owned above the loop, not re-declared per iteration: `GamepadAdded` fires only
     // once per physical (re)connection, so pads opened earlier must carry across screens.
     let mut pads = pads::Pads::default();
     // Why the *last* stream attempt bounced to the menu, shown on the fresh Home screen.
@@ -221,7 +251,7 @@ pub(super) fn run_inner() -> Result<()> {
                 &game_controller,
                 &mut pads,
                 &identity,
-                ui_mode,
+                ui_layout,
                 menu_status.take(),
                 menu_toast.take(),
             )?
@@ -250,9 +280,17 @@ pub(super) fn run_inner() -> Result<()> {
         let outcome = 'session: loop {
             // A reconnect dial can be given up on from the remote; the first dial was waited
             // out by the loading screen, which read the remote itself.
-            if reconnects > 0 && wait_for_dial(&connect_thread, &mut events) {
-                tracing::info!("reconnect given up — returning to the menu");
+            let gave_up = if reconnects > 0 {
+                wait_for_dial(&connect_thread, &mut events)
+            } else {
+                DialWait::Done
+            };
+            if gave_up != DialWait::Done {
+                tracing::info!("reconnect given up: {gave_up:?}");
                 drop(connect_thread);
+                if gave_up == DialWait::Quit {
+                    break 'session StreamOutcome::Quit;
+                }
                 menu_toast = Some("Connection lost".to_string());
                 break 'session StreamOutcome::ReturnToMenu;
             }
@@ -309,8 +347,8 @@ pub(super) fn run_inner() -> Result<()> {
             // Local pointer hidden unless "Cursor capture" is off — otherwise it and the host's own
             // forwarded-position cursor read as "the pointer doesn't match the mouse".
             let mut cursor = cursor::Cursor::new(sdl.mouse());
-            cursor.set_captured(settings.cursor_capture());
-            cursor.flush(canvas.window());
+            cursor.set_captured(settings.cursor_capture(), canvas.window());
+            cursor.flush(canvas.window(), &events);
 
             // `None` when the session decodes audio somewhere other than here (punktfunk's NDL Opus
             // offload) — a second unfed audio device would still claim a PulseAudio sink.
@@ -339,8 +377,8 @@ pub(super) fn run_inner() -> Result<()> {
                             tracing::error!("audio player init failed: {e:#}");
                             connected.disconnect_quit();
                             connected.shutdown_and_quit();
-                            cursor.set_captured(false);
-                            cursor.flush(canvas.window());
+                            cursor.set_captured(false, canvas.window());
+                            cursor.flush(canvas.window(), &events);
                             menu_status = Some(format!("Couldn't start audio: {e:#}"));
                             break 'session StreamOutcome::ReturnToMenu;
                         }
@@ -388,16 +426,16 @@ pub(super) fn run_inner() -> Result<()> {
             for slot in pads.iter_mut() {
                 slot.begin_session(settings.gamepad_type());
             }
-            let ids: Vec<u32> = pads.iter().map(|slot| slot.id).collect();
+            let ids: Vec<sdl3::joystick::JoystickId> = pads.iter().map(|slot| slot.id).collect();
             for id in ids {
                 pad_session::bring_up(&connected, &mut pads, id, kind_setting, &settings, pad_audio.as_ref());
             }
 
-            let mut scroll_acc = mouse::ScrollAccumulator::default();
             // Every button the client synthesizes rather than forwards: the remote's OK gestures and
             // its Red key — see `RemoteButtons`. Fed only the remote's own input; a real HID mouse's
             // clicks never reach it.
             let mut buttons = mouse::RemoteButtons::default();
+            let mut relative_motion = mouse::RelativeMotion::default();
             // Raw evdev HID, sending on the reader thread rather than queued for the ~2ms main loop
             // so a 1000 Hz mouse isn't re-resampled. Keyboards are grabbed whatever Capture says, or
             // the compositor sees Ctrl/Alt/Shift and warps its pointer mid-click; mouse nodes follow
@@ -444,9 +482,14 @@ pub(super) fn run_inner() -> Result<()> {
             // gesture in particular — a synthetic press whose key-up may never arrive) would read as
             // a fresh press on the first tick and, for EXIT, open the disconnect dialog over the
             // video the instant the stream began.
-            let mut green_held = key_down(WEBOS_GREEN_SCANCODE);
-            let mut yellow_held = key_down(WEBOS_YELLOW_SCANCODE);
             let mut home_held = key_down(WEBOS_HOME_SCANCODE);
+            // Remote-key arm sets these; consumed once/tick. SDL3 gives color keys no scancode;
+            // state-array bits latch for the session (see RemoteKey).
+            let (mut green_pressed, mut yellow_pressed, mut blue_pressed) = (false, false, false);
+            // The one resolver for the remote's own keys in this loop — see `RemoteKeys`. The
+            // stream takes both edges: it mirrors held keys to the host (Back as Esc, Red as the
+            // right button), so dropping a release would leave the host holding one down.
+            let mut remote_keys = RemoteKeys::default();
             // Blue controls text input because streams have no focused text field.
             let mut text_input = TextInputController::new(canvas.window().subsystem().text_input());
             // Transient toasts. `overlay_was_active` catches the fade-out edge so the canvas gets
@@ -496,6 +539,8 @@ pub(super) fn run_inner() -> Result<()> {
             // The link died under a session the user did not end: the one end worth dialling again.
             let mut lost = false;
             let mut input_suspended = false;
+            // Off while webOS has another app or panel up: evdev reads the devices regardless.
+            let mut focused = true;
             let outcome = 'running: loop {
                 if QUIT_REQUESTED.load(Ordering::Relaxed) {
                     tracing::warn!("SIGTERM/SIGINT received — disconnecting before exit");
@@ -509,12 +554,12 @@ pub(super) fn run_inner() -> Result<()> {
                         .is_some_and(crate::platform::webos::evdev::HidInput::has_mouse)
                 {
                     hid_device_seen = true;
-                    cursor.disable_sdl_relative();
+                    cursor.disable_sdl_relative(canvas.window());
                     // Only now is the node grabbed, so only now can a compositor hide stick — the one
                     // at connect raced the reader thread's scan. Usually a no-op, since the call
                     // above re-issued it already; kept so the retract doesn't hinge on that.
                     cursor.reassert_hidden();
-                    cursor.flush(canvas.window());
+                    cursor.flush(canvas.window(), &events);
                 }
                 // The remote's presses, read before SDL's events so each is there to claim the key it
                 // caused. A key the remote did not press is a pad's echo (webOS 23+), unless the
@@ -525,8 +570,10 @@ pub(super) fn run_inner() -> Result<()> {
                 }
                 remote_gate.poll(now);
                 let osk = text_input.is_shown(canvas.window());
+                text_input.release_if_dismissed(osk, canvas.window());
                 for event in events.poll_iter() {
-                    use sdl2::event::Event;
+                    use sdl3::event::Event;
+
                     // Never real pointer input, so never the host's — see `mouse::is_touch_emulated`.
                     if mouse::is_touch_emulated(&event) {
                         continue;
@@ -548,12 +595,38 @@ pub(super) fn run_inner() -> Result<()> {
                         }
                         None => (false, false, false),
                     };
+                    // Preserve HID ownership: outside local overlays its scancode events
+                    // must not consume a remote press. All other events visit the gate once.
+                    let hid_owned_key = hid_keys
+                        && !disconnect.is_open()
+                        && !ring.open()
+                        && matches!(
+                            event,
+                            Event::KeyDown { scancode: Some(_), .. } | Event::KeyUp { scancode: Some(_), .. }
+                        );
+                    let key_admitted = !hid_owned_key && remote_gate.admits(&event, now);
+                    let remote = remote_keys.edge(&event, key_admitted);
+                    let remote_press = remote.and_then(|(key, down)| down.then_some(key));
                     match event {
                         Event::Quit { .. } => {
                             connected.disconnect_quit();
                             break 'running StreamOutcome::Quit;
                         }
-                        Event::ControllerDeviceAdded { which, .. } => {
+                        // Home or a TV panel took focus: releases for what is held go elsewhere,
+                        // so the host would keep them down.
+                        Event::Window {
+                            win_event: sdl3::event::WindowEvent::FocusLost,
+                            ..
+                        } => {
+                            tracing::debug!("focus lost — releasing held input");
+                            focused = false;
+                            release_all(&mut pads, &connected, &mut buttons, &mut remote_keys);
+                        }
+                        Event::Window {
+                            win_event: sdl3::event::WindowEvent::FocusGained,
+                            ..
+                        } => focused = true,
+                        Event::GamepadAdded { which, .. } => {
                             // Under `Automatic` the handshake settled the pad kind from whatever was
                             // attached at connect time — usually nothing — so a pad arriving now has
                             // to declare itself or the host keeps driving its default Xbox pad.
@@ -570,7 +643,7 @@ pub(super) fn run_inner() -> Result<()> {
                             }
                         }
                         // Only pads we hold: the Magic Remote drops and re-adds constantly.
-                        Event::ControllerDeviceRemoved { which, .. } => {
+                        Event::GamepadRemoved { which, .. } => {
                             if let Some(mut slot) = pads.remove(which) {
                                 pads.publish_routes(&pad_routes);
                                 // A dial tap's owed release would re-create the removed pad on the host.
@@ -589,8 +662,14 @@ pub(super) fn run_inner() -> Result<()> {
                         // Dialog open: navigate it only, don't forward input to the host. A key only if
                         // the remote pressed it: a pad's echo would move it a second time.
                         _ if disconnect.is_open() => {
-                            if remote_gate.admits(&event, now) {
-                                match disconnect.handle_event(&event, &overlay_fonts, display.0, display.1) {
+                            if key_admitted {
+                                match disconnect.handle_event(
+                                    &event,
+                                    remote_press,
+                                    &overlay_fonts,
+                                    display.0,
+                                    display.1,
+                                ) {
                                     Some(ConfirmAction::Confirmed) => {
                                         tracing::info!("disconnecting to menu");
                                         client_initiated_disconnect = true;
@@ -605,33 +684,47 @@ pub(super) fn run_inner() -> Result<()> {
                         }
                         // Dial open: the remote's keys drive it, and no key or pointer input reaches
                         // the host. The pad drives it through `dial`, so its echo must not.
+                        // Back first: it closes the dial and SDL3 gives it no keycode.
+                        _ if ring.open() && remote_press == Some(RemoteKey::Back) && key_admitted => {
+                            ring.menu(pf_client_core::menu_nav::MenuEvent::Back);
+                        }
                         Event::KeyDown {
                             keycode: Some(k),
                             repeat: false,
                             ..
-                        } if ring.open() && remote_gate.admits(&event, now) => {
+                        } if ring.open() && key_admitted => {
                             if let Some(ev) = ring_event_for_key(k) {
                                 ring.menu(ev);
                             }
                         }
-                        Event::KeyDown { .. }
-                        | Event::KeyUp { .. }
-                        | Event::TextInput { .. }
-                        | Event::MouseMotion { .. }
-                        | Event::MouseButtonDown { .. }
-                        | Event::MouseButtonUp { .. }
-                        | Event::MouseWheel { .. }
-                            if ring.open() =>
-                        {
-                            // Still shown to the gate, so a key admitted into the dial releases there.
-                            remote_gate.admits(&event, now);
-                        }
+                        _ if ring.open() && (event.is_keyboard() || event.is_text() || event.is_mouse()) => {}
                         // Scancode keys are real game input — forward only, never open the dialog.
-                        Event::KeyDown { scancode: Some(sc), .. }
-                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
-                        {
+                        Event::KeyDown { scancode: Some(sc), .. } if !hid_keys && (key_admitted || osk) => {
                             if let Some(ev) = keyboard::key_event(sc, true) {
                                 connected.send_input(&ev);
+                            }
+                        }
+                        // The Magic Remote's own keys, all matched on the event's `raw` — SDL3
+                        // gives them no scancode and no keycode, so every arm that reads those
+                        // misses them (see `RemoteKey`). A HELD Back never arrives at all;
+                        // webOS turns that into the EXIT gesture polled separately.
+                        _ if remote.is_some() => {
+                            let Some((key, down)) = remote else { continue };
+                            match key {
+                                // Forwarded as Esc. `remote_keys.edge` already refused a pad
+                                // echoing Back, so it never reaches the host as a phantom press.
+                                RemoteKey::Back => {
+                                    if let Some(ev) = keyboard::key_event(sdl3::keyboard::Scancode::Escape, down) {
+                                        connected.send_input(&ev);
+                                    }
+                                }
+                                // The right button. BOTH edges matter — a press whose release is
+                                // dropped leaves the host holding the button down.
+                                RemoteKey::Red => buttons.red(down, |ev| connected.send_input(ev)),
+                                RemoteKey::Green if down => green_pressed = true,
+                                RemoteKey::Yellow if down => yellow_pressed = true,
+                                RemoteKey::Blue if down => blue_pressed = true,
+                                _ => {}
                             }
                         }
                         // Forward composed IME text, which has no scancode.
@@ -640,71 +733,14 @@ pub(super) fn run_inner() -> Result<()> {
                                 connected.send_input(&ev);
                             }
                         }
-                        // Magic Remote Red — the right button (see `RemoteButtons::red`). Like Back
-                        // it carries only a keycode (see `WEBOS_RED_KEYCODE`); `repeat: false` so the
-                        // OS's auto-repeat while it's held doesn't restate the press.
-                        Event::KeyDown {
-                            keycode: Some(k),
-                            repeat: false,
-                            ..
-                        } if k.into_i32() == crate::platform::webos::input::WEBOS_RED_KEYCODE => {
-                            buttons.red(true, |ev| connected.send_input(ev));
-                        }
-                        Event::KeyUp { keycode: Some(k), .. }
-                            if k.into_i32() == crate::platform::webos::input::WEBOS_RED_KEYCODE =>
-                        {
-                            buttons.red(false, |ev| connected.send_input(ev));
-                        }
-                        // Magic Remote Blue — raises the on-screen keyboard, so a game needing text
-                        // (chat, a search box) doesn't require dropping back to the menu. Like Red
-                        // it's matched by keycode, not polled by scancode: confirmed on-device that
-                        // `WEBOS_BLUE_SCANCODE`'s bit misses the first press of a session, while the
-                        // keycode arrives reliably from the very first press (see
-                        // `WEBOS_BLUE_KEYCODE`'s doc). `repeat: false` so a held Blue doesn't re-raise
-                        // on every OS auto-repeat tick. Hiding is Back's job — webOS's IME dismisses
-                        // on it, and this app never calls `stop()` in response to that.
-                        Event::KeyDown {
-                            keycode: Some(k),
-                            repeat: false,
-                            ..
-                        } if k.into_i32() == WEBOS_BLUE_KEYCODE => {
-                            raise_keyboard(&mut text_input, display_mode.w, display_mode.h);
-                        }
-                        // Magic Remote Back has no scancode — forwarded as Esc. A held Back never
-                        // arrives here; webOS delivers it as the EXIT gesture polled below instead.
-                        Event::KeyDown {
-                            keycode: Some(k),
-                            scancode: None,
-                            repeat: false,
-                            ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
-                            && remote_gate.admits(&event, now) =>
-                        {
-                            if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, true) {
-                                connected.send_input(&ev);
-                            }
-                        }
-                        Event::KeyUp {
-                            keycode: Some(k),
-                            scancode: None,
-                            ..
-                        } if crate::platform::webos::input::menu_event_for_key(k) == Some(MenuEvent::Back)
-                            && remote_gate.admits(&event, now) =>
-                        {
-                            if let Some(ev) = keyboard::key_event(sdl2::keyboard::Scancode::Escape, false) {
-                                connected.send_input(&ev);
-                            }
-                        }
-                        Event::KeyUp { scancode: Some(sc), .. }
-                            if !hid_keys && (remote_gate.admits(&event, now) || osk) =>
-                        {
+                        Event::KeyUp { scancode: Some(sc), .. } if !hid_keys && (key_admitted || osk) => {
                             if let Some(ev) = keyboard::key_event(sc, false) {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::ControllerButtonDown { which, button, .. }
-                        | Event::ControllerButtonUp { which, button, .. } => {
-                            let down = matches!(event, Event::ControllerButtonDown { .. });
+                        Event::GamepadButtonDown { which, button, .. }
+                        | Event::GamepadButtonUp { which, button, .. } => {
+                            let down = matches!(event, Event::GamepadButtonDown { .. });
                             let open = ring.open();
                             let Some(slot) = pads.get_mut(which) else {
                                 continue;
@@ -712,11 +748,16 @@ pub(super) fn run_inner() -> Result<()> {
                             if !open {
                                 slot.chord.set(button, down);
                             }
+                            // A button the wire has no bit for is not forwarded and cannot
+                            // work the chord either.
+                            let Some(bit) = gamepad::button_bit(button) else {
+                                continue;
+                            };
                             // Forwarded buttons still reach the host: the hold requirement is what
                             // keeps game input and the disconnect shortcut apart.
-                            match slot.dial.button(gamepad::button_bit(button), down, open) {
+                            match slot.dial.button(bit, down, open) {
                                 PadRoute::Forward => {
-                                    connected.send_input(&gamepad::button_event(button, down, slot.index));
+                                    connected.send_input(&gamepad::bit_event(bit, down, slot.index));
                                 }
                                 PadRoute::Open => {
                                     ring.set_facts(&ring_facts(&settings, &connected, stats_tier, native_mode, true));
@@ -731,14 +772,13 @@ pub(super) fn run_inner() -> Result<()> {
                                 PadRoute::Drop => {}
                             }
                         }
-                        Event::ControllerAxisMotion { which, axis, value, .. } => {
+                        Event::GamepadAxisMotion { which, axis, value, .. } => {
                             let open = ring.open();
                             let Some(slot) = pads.get_mut(which) else {
                                 continue;
                             };
-                            if matches!(axis, sdl2::controller::Axis::LeftX | sdl2::controller::Axis::LeftY) {
-                                if let Some(ev) =
-                                    slot.dial.left_stick(axis == sdl2::controller::Axis::LeftX, value, open)
+                            if matches!(axis, sdl3::gamepad::Axis::LeftX | sdl3::gamepad::Axis::LeftY) {
+                                if let Some(ev) = slot.dial.left_stick(axis == sdl3::gamepad::Axis::LeftX, value, open)
                                 {
                                     ring.menu(ev);
                                 }
@@ -747,14 +787,21 @@ pub(super) fn run_inner() -> Result<()> {
                                 connected.send_input(&gamepad::axis_event(axis, value, slot.index));
                             }
                         }
-                        // Magic Remote pointer mode surfaces as plain SDL2 mouse events, forwarded
+                        // Magic Remote pointer mode surfaces as plain SDL3 mouse events, forwarded
                         // to the host instead of driving local UI focus (see `mouse.rs`).
                         Event::MouseMotion { x, y, xrel, yrel, .. } => {
+                            // SDL3 gives f32; wire and injector take whole pixels.
+                            let (x, y) = (x as i32, y as i32);
                             if !hid_motion {
                                 // Relative only for the remote alone: SDL's warp emulation is off
                                 // whenever the evdev reader owns motion, so the remote sends
                                 // absolute — also the better fit for a device the user aims.
                                 let relative = settings.cursor_capture() && !hid_device_seen;
+                                let (xrel, yrel) = if relative {
+                                    relative_motion.take(xrel, yrel)
+                                } else {
+                                    (0, 0)
+                                };
                                 let ev = if relative {
                                     mouse::move_relative_event(xrel, yrel)
                                 } else {
@@ -780,13 +827,13 @@ pub(super) fn run_inner() -> Result<()> {
                         // a real mouse's clicks, the arms below pass the press straight through
                         // as they always have.
                         Event::MouseButtonDown {
-                            mouse_btn: sdl2::mouse::MouseButton::Left,
+                            mouse_btn: sdl3::mouse::MouseButton::Left,
                             x,
                             y,
                             ..
-                        } if !hid_clicks && settings.cursor_gestures() => buttons.ok_press(x, y),
+                        } if !hid_clicks && settings.cursor_gestures() => buttons.ok_press(x as i32, y as i32),
                         Event::MouseButtonUp {
-                            mouse_btn: sdl2::mouse::MouseButton::Left,
+                            mouse_btn: sdl3::mouse::MouseButton::Left,
                             ..
                         } if !hid_clicks && settings.cursor_gestures() => {
                             buttons.ok_release(|ev| connected.send_input(ev))
@@ -801,16 +848,26 @@ pub(super) fn run_inner() -> Result<()> {
                                 connected.send_input(&ev);
                             }
                         }
-                        Event::MouseWheel { x, y, .. } if !hid_clicks => {
+                        // integer_x/y, not x/y: the wire takes whole detents. Un-flipped to the
+                        // physical direction: the host applies its own scroll preference, as it
+                        // does for evdev. Local menus keep SDL's flip, which is the user's choice.
+                        Event::MouseWheel {
+                            integer_x,
+                            integer_y,
+                            direction,
+                            ..
+                        } if !hid_clicks => {
+                            let sign = if direction == sdl3::mouse::MouseWheelDirection::Flipped {
+                                -1
+                            } else {
+                                1
+                            };
+                            let (x, y) = (integer_x * sign, integer_y * sign);
                             if y != 0 {
-                                if let Some(ev) = scroll_acc.scroll_event(y, false) {
-                                    connected.send_input(&ev);
-                                }
+                                connected.send_input(&mouse::scroll_event(y, false));
                             }
                             if x != 0 {
-                                if let Some(ev) = scroll_acc.scroll_event(x, true) {
-                                    connected.send_input(&ev);
-                                }
+                                connected.send_input(&mouse::scroll_event(x, true));
                             }
                         }
                         _ => {}
@@ -822,12 +879,7 @@ pub(super) fn run_inner() -> Result<()> {
                 if ring_open != ring_was_open {
                     ring_was_open = ring_open;
                     if ring_open {
-                        for slot in pads.iter_mut() {
-                            slot.chord.clear();
-                            slot.release_held(&connected);
-                        }
-                        connected.release_input();
-                        buttons.release_held(|ev| connected.send_input(ev));
+                        release_all(&mut pads, &connected, &mut buttons, &mut remote_keys);
                     } else {
                         for slot in pads.iter_mut() {
                             slot.dial.closed();
@@ -857,7 +909,9 @@ pub(super) fn run_inner() -> Result<()> {
                             break 'running StreamOutcome::ReturnToMenu;
                         }
                         RingCommand::CycleStats => ring_stats = true,
-                        RingCommand::Keyboard => raise_keyboard(&mut text_input, display_mode.w, display_mode.h),
+                        RingCommand::Keyboard => {
+                            raise_keyboard(&mut text_input, display_mode.w, display_mode.h, canvas.window());
+                        }
                         RingCommand::RequestMode {
                             width,
                             height,
@@ -925,12 +979,9 @@ pub(super) fn run_inner() -> Result<()> {
                 if home_key_fired(&mut home_held) {
                     crate::platform::webos::luna::launch_home();
                 }
-                // SDL2 lacks these colour scancodes. Ignore them while the dialog owns input.
                 let dialog_open = disconnect.is_open();
                 // `|`, not `||`: the green key's edge must be read every tick, and so must the dial's.
-                if rising_edge(!dialog_open && key_down(WEBOS_GREEN_SCANCODE), &mut green_held)
-                    | std::mem::take(&mut ring_stats)
-                {
+                if (std::mem::take(&mut green_pressed) && !dialog_open) | std::mem::take(&mut ring_stats) {
                     stats_tier = stats_tier.next();
                     let was_enabled = stats_enabled;
                     stats_enabled = stats_tier != StatsVerbosity::Off;
@@ -945,9 +996,19 @@ pub(super) fn run_inner() -> Result<()> {
                         stats_lines = hud::format(snap, stats_tier, advanced_stats);
                     }
                 }
-                if rising_edge(!dialog_open && key_down(WEBOS_YELLOW_SCANCODE), &mut yellow_held) {
+                if std::mem::take(&mut yellow_pressed) && !dialog_open {
                     cycle_log_overlay();
                     overlay_last = None; // force an immediate redraw with the new state
+                }
+                // Blue raises the IME, so a game needing text (chat, a search box) doesn't require
+                // dropping back to the menu.
+                //
+                // Raise only, never dismiss. While the panel is
+                // up webOS routes every remote key to it, so a second Blue is not something this
+                // app can hear; Back is the way out and webOS's IME dismisses on it without being
+                // told. A toggle here looks symmetric and cannot work.
+                if std::mem::take(&mut blue_pressed) && !osk {
+                    raise_keyboard(&mut text_input, display_mode.w, display_mode.h, canvas.window());
                 }
                 // Connection-issue toast, once per hold that outlasts `HOLD_TOAST_AFTER` — the same
                 // "network trouble" signal the stats overlay's "Beat" line reads, visible without the
@@ -971,10 +1032,11 @@ pub(super) fn run_inner() -> Result<()> {
                 // as its pointer, and holding a grab would only leave a HID device dead meanwhile.
                 let want_captured = settings.cursor_capture() && !disconnect.is_open();
                 if want_captured != cursor.is_captured() {
-                    cursor.set_captured(want_captured);
+                    cursor.set_captured(want_captured, canvas.window());
                 }
                 if let Some(hid) = &hid {
-                    hid.set_active(!disconnect.is_open() && !ring.open());
+                    // Deactivating releases whatever HID held on the host.
+                    hid.set_active(focused && !disconnect.is_open() && !ring.open());
                 }
                 input_suspended = disconnect.is_open();
                 // True during fade-out, past `is_open()`; gates the stats overlay below.
@@ -1113,7 +1175,7 @@ pub(super) fn run_inner() -> Result<()> {
                 crate::platform::webos::input::wait_for_event(Duration::from_millis(2));
             };
             connected.release_input();
-            text_input.stop();
+            text_input.stop(canvas.window());
 
             // Hand the Bluetooth links back to the TV's sniff policy.
             drop(pad_link);
@@ -1122,7 +1184,12 @@ pub(super) fn run_inner() -> Result<()> {
             // the extras also stops each wired card writer. Rumble is likewise pad state.
             for slot in pads.iter_mut() {
                 slot.extras = pad_session::Extras::default();
-                let _ = slot.pad.set_rumble(0, 0, 0);
+                if slot.rumble() {
+                    let _ = slot.pad.set_rumble(0, 0, 0);
+                }
+                if slot.triggers() {
+                    let _ = slot.pad.set_rumble_triggers(0, 0, 0);
+                }
             }
             // Stopping the threads, the QUIC close and the NDL unload take a second or two; the
             // menu comes back now and they finish behind it. The next load waits for them.
@@ -1148,8 +1215,8 @@ pub(super) fn run_inner() -> Result<()> {
                 crate::platform::webos::game_mode::restore(restore_tv_modes);
                 tracing::info!("session torn down");
             });
-            cursor.set_captured(false);
-            cursor.flush(canvas.window());
+            cursor.set_captured(false, canvas.window());
+            cursor.flush(canvas.window(), &events);
             // A lost link is dialled again with the same target and settings, the toast up over
             // the (now empty) video plane while the handshake runs. Anything else ends here.
             if session_started.elapsed() >= RECONNECT_RESET_AFTER {
@@ -1215,6 +1282,23 @@ fn ring_facts(
     }
 }
 
+/// Lets go of everything the host holds from this client, and forgets it here too: for when
+/// the matching releases will not arrive (the dial took input, or focus left the app).
+fn release_all(
+    pads: &mut pads::Pads,
+    connected: &crate::session::Connected,
+    buttons: &mut mouse::RemoteButtons,
+    remote_keys: &mut RemoteKeys,
+) {
+    for slot in pads.iter_mut() {
+        slot.chord.clear();
+        slot.release_held(connected);
+    }
+    connected.release_input();
+    buttons.release_held(|ev| connected.send_input(ev));
+    remote_keys.reset();
+}
+
 /// Flips pad 0 between controller mouse and the game.
 fn toggle_pad_mouse(connected: &crate::session::Connected, pad: bool) {
     if !pad {
@@ -1258,13 +1342,16 @@ fn send_shortcut(connected: &crate::session::Connected, keys: &[String]) {
 }
 
 /// Raises the on-screen keyboard. webOS wants a rectangle before it enables the IME.
-fn raise_keyboard(text_input: &mut TextInputController, w: i32, h: i32) {
+fn raise_keyboard(text_input: &mut TextInputController, w: i32, h: i32, window: &sdl3::video::Window) {
     let width = 400i32.min(w);
-    text_input.raise(sdl2::rect::Rect::new((w - width) / 2, h - 120, width as u32, 60));
+    text_input.raise(
+        sdl3::rect::Rect::new((w - width) / 2, h - 120, width as u32, 60),
+        window,
+    );
 }
 
 /// The remote's keys as dial events.
-fn ring_event_for_key(k: sdl2::keyboard::Keycode) -> Option<pf_client_core::menu_nav::MenuEvent> {
+fn ring_event_for_key(k: sdl3::keyboard::Keycode) -> Option<pf_client_core::menu_nav::MenuEvent> {
     use crate::core::event::MenuEvent as E;
     use pf_client_core::menu_nav::{MenuDir, MenuEvent as K};
     Some(match crate::platform::webos::input::menu_event_for_key(k)? {

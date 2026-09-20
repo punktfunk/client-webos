@@ -45,10 +45,10 @@ pub(super) fn wanted(pad_connected: bool) -> bool {
 
 /// Run the shell until it commits a launch or asks to leave.
 pub(super) fn run(
-    canvas: &mut sdl2::render::Canvas<sdl2::video::Window>,
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
     gl: &mut Option<ConsoleGl>,
-    events: &mut sdl2::EventPump,
-    game_controller: &sdl2::GameControllerSubsystem,
+    events: &mut sdl3::EventPump,
+    game_controller: &sdl3::GamepadSubsystem,
     open_pads: &mut pads::Pads,
     identity: &(String, String),
     // Why the last stream bounced back here, if it did. The old menus put this on the Home
@@ -122,7 +122,7 @@ pub(super) fn run(
     // The open pad's name, or `None` when what SDL has open is the Magic Remote. Refreshed on
     // hotplug only to avoid per-frame string allocations.
     open_pads.sync(game_controller);
-    let mut pad_name: Option<String> = open_pads.first().map(|slot| slot.pad.name());
+    let mut pad_name: Option<String> = open_pads.first_name();
     // Both answers SDL's device list can give, sampled on the same hotplug events. Polling them
     // per frame walked every device and allocated a name for each.
     let mut pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
@@ -134,10 +134,8 @@ pub(super) fn run(
     let mut last_input = Instant::now();
     let mut home_held = false;
     let mut exit_held = false;
-    let mut green_held = false;
-    // Where the Magic Remote's pointer last was. SDL's wheel event carries no position, and
-    // the pump cannot be asked for one from inside its own `poll_iter`.
-    let mut pointer_at = (0.0f32, 0.0f32);
+    // The one resolver for the remote's own keys in this loop — see `RemoteKeys`.
+    let mut remote_keys = crate::platform::webos::input::RemoteKeys::default();
     // A launch the shell committed: the connect runs while the shell keeps drawing its
     // Connecting card, exactly as the old menus overlap it with the loading screen.
     let mut connect: Option<(
@@ -164,26 +162,38 @@ pub(super) fn run(
             tracing::info!("console: EXIT gesture — quitting app");
             break 'ui UiOutcome::Quit(exit_plan(&service, identity));
         }
-        // Green is polled (it is a scancode with no keycode), Red arrives as a keycode in the
-        // loop below. Both exist to make the shell's Secondary/Tertiary REACHABLE from a Magic
-        // Remote at all: the library screen puts Collections on Secondary and Options — the
-        // whole host menu — on Tertiary, and unlike the home screen it has no d-pad fallback.
-        let green =
-            crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_GREEN_SCANCODE);
-        if green && !green_held {
-            last_input = Instant::now();
-            console.menu(MenuEvent::Tertiary, InputSource::Keys);
-        }
-        green_held = green;
         // webOS is documented to hand back a drawable that is not the window it was asked for
         // (handoff trap 10), while SDL reports pointer events in WINDOW coordinates. The shell
         // hit-tests in surface pixels, so the two have to be reconciled before it sees them.
         let scale = pointer_scale(canvas);
 
         for event in events.poll_iter() {
-            use sdl2::event::Event;
+            use sdl3::event::Event;
+            // Resolved once, here, and read just below. Never re-derive it.
+            let remote = remote_keys.press(&event);
             // A thumb resting on a pad's touchpad must not hover and click rows.
             if crate::platform::webos::mouse::is_touch_emulated(&event) {
+                continue;
+            }
+            // The Magic Remote's own keys, ahead of the match because SDL3 gives them neither a
+            // scancode nor a keycode — the keycode arm would never see them (see
+            // `platform::webos::input::RemoteKeys`). Read off the answer `remote_keys` already
+            // gave, not a second look at the event: an OS auto-repeat resolves to `None` here
+            // and is left to arms that cannot match a keycode-less key anyway.
+            if let Some(key) = remote {
+                use crate::platform::webos::input::RemoteKey;
+                last_input = Instant::now();
+                let ev = match key {
+                    RemoteKey::Back => MenuEvent::Back,
+                    // Green and Red make the shell's Secondary/Tertiary REACHABLE from a
+                    // Magic Remote at all: the library screen puts Collections on Secondary
+                    // and Options — the whole host menu — on Tertiary, and unlike the home
+                    // screen it has no d-pad fallback.
+                    RemoteKey::Red => MenuEvent::Secondary,
+                    RemoteKey::Green => MenuEvent::Tertiary,
+                    _ => continue,
+                };
+                console.menu(ev, InputSource::Keys);
                 continue;
             }
             match event {
@@ -191,15 +201,15 @@ pub(super) fn run(
                     tracing::info!("quit during the console");
                     break 'ui UiOutcome::Quit(exit_plan(&service, identity));
                 }
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
                     if open_pads.add(game_controller, which).is_some() {
-                        pad_name = open_pads.first().map(|slot| slot.pad.name());
+                        pad_name = open_pads.first_name();
                         // The legend describes the handle, so it is rebuilt with it.
                         last_pref = None;
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
+                Event::GamepadRemoved { which, .. } => {
                     // Only pads we hold: webOS enumerates the Magic Remote as a controller and it
                     // drops constantly, and clearing on its removal took the real pad's input
                     // away with it.
@@ -207,7 +217,7 @@ pub(super) fn run(
                         // An unplugged pad sends no releases: drop what the synthesizer holds.
                         nav.reset();
                         sample = MenuSample::default();
-                        pad_name = open_pads.first().map(|slot| slot.pad.name());
+                        pad_name = open_pads.first_name();
                         last_pref = None;
                     }
                     pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
@@ -219,13 +229,7 @@ pub(super) fn run(
                     ..
                 } => {
                     last_input = Instant::now();
-                    // Red is the remote's Secondary — see the Green note above for why the
-                    // colour keys carry these at all. `!repeat` so a held key fires once.
-                    if !repeat && k.into_i32() == crate::platform::webos::input::WEBOS_RED_KEYCODE {
-                        console.menu(MenuEvent::Secondary, InputSource::Keys);
-                        continue;
-                    }
-                    let shift = keymod.intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD);
+                    let shift = keymod.intersects(sdl3::keyboard::Mod::LSHIFTMOD | sdl3::keyboard::Mod::RSHIFTMOD);
                     // While a field is being edited the shell wants keys, not menu moves —
                     // an arrow has to walk the caret rather than the row under it.
                     if console.editing() {
@@ -254,19 +258,16 @@ pub(super) fn run(
                 }
                 Event::MouseMotion { x, y, .. } => {
                     last_input = Instant::now();
-                    pointer_at = scale.at(x, y);
-                    console.pointer(PointerInput::Move {
-                        x: pointer_at.0,
-                        y: pointer_at.1,
-                    });
+                    let (x, y) = scale.at(x, y);
+                    console.pointer(PointerInput::Move { x, y });
                 }
                 Event::MouseButtonDown { x, y, mouse_btn, .. } => {
                     last_input = Instant::now();
                     if let Some(button) = pointer_button(mouse_btn) {
-                        pointer_at = scale.at(x, y);
+                        let (x, y) = scale.at(x, y);
                         console.pointer(PointerInput::Down {
-                            x: pointer_at.0,
-                            y: pointer_at.1,
+                            x,
+                            y,
                             button,
                             // The Magic Remote is a real pointer, never a finger — its press
                             // acts immediately rather than waiting for a lift.
@@ -277,21 +278,19 @@ pub(super) fn run(
                 Event::MouseButtonUp { x, y, mouse_btn, .. } => {
                     last_input = Instant::now();
                     if let Some(button) = pointer_button(mouse_btn) {
-                        pointer_at = scale.at(x, y);
-                        console.pointer(PointerInput::Up {
-                            x: pointer_at.0,
-                            y: pointer_at.1,
-                            button,
-                        });
+                        let (x, y) = scale.at(x, y);
+                        console.pointer(PointerInput::Up { x, y, button });
                     }
                 }
-                Event::MouseWheel { y, .. } => {
+                Event::MouseWheel {
+                    y: dy,
+                    mouse_x,
+                    mouse_y,
+                    ..
+                } => {
                     last_input = Instant::now();
-                    console.pointer(PointerInput::Wheel {
-                        x: pointer_at.0,
-                        y: pointer_at.1,
-                        dy: y as f32,
-                    });
+                    let (x, y) = scale.at(mouse_x, mouse_y);
+                    console.pointer(PointerInput::Wheel { x, y, dy });
                 }
                 _ => {}
             }
@@ -301,7 +300,7 @@ pub(super) fn run(
         // match every other client rather than being re-invented here. The remote is never
         // opened; its buttons still reach the shell, as keys.
         if !open_pads.is_empty() {
-            sample = merge_samples(open_pads.iter().map(|slot| pad_sample(&slot.pad)));
+            sample = merge_samples(open_pads.iter().map(pad_sample));
         }
         menu_out.clear();
         nav.poll(&sample, Instant::now(), &mut menu_out);
@@ -406,7 +405,7 @@ pub(super) fn run(
             std::thread::sleep(IDLE_FRAME_STEP);
             idled = IDLE_FRAME_STEP;
         }
-        let (w, h) = canvas.window().drawable_size();
+        let (w, h) = canvas.window().size_in_pixels();
         // The switch, watched the way the cursor menus watch theirs: the shell's own
         // "Controller-optimized UI" row writes it, and under "With a controller" an unplugged
         // pad withdraws it without writing anything. Plain `Reenter` — `leave_for_classic`
@@ -507,7 +506,7 @@ fn art_snapshot() -> ArtSnapshot {
 /// false over live video — see [`ConsoleGl::set_swap_interval`].
 pub(super) fn bring_up<'a>(
     gl: &'a mut Option<ConsoleGl>,
-    canvas: &sdl2::render::Canvas<sdl2::video::Window>,
+    canvas: &sdl3::render::Canvas<sdl3::video::Window>,
     vsync: bool,
 ) -> Result<&'a mut ConsoleGl> {
     if gl.is_none() {
@@ -551,7 +550,7 @@ struct Launch {
 fn start_launch(
     store: &Arc<ConsoleStore>,
     identity: &(String, String),
-    game_controller: &sdl2::GameControllerSubsystem,
+    game_controller: &sdl3::GamepadSubsystem,
     want: Launch,
 ) -> Result<(
     crate::runtime::PendingConnect,
@@ -613,14 +612,16 @@ fn exit_plan(service: &Service, identity: &(String, String)) -> Option<crate::se
 
 /// The pad as the shared synthesizer reads it: face buttons, shoulders, the left stick in wire
 /// units, and the d-pad.
-fn pad_sample(pad: &sdl2::controller::GameController) -> MenuSample {
-    use sdl2::controller::{Axis, Button};
+fn pad_sample(slot: &pads::Slot) -> MenuSample {
+    use sdl3::gamepad::{Axis, Button};
+    let pad = &slot.pad;
+    let [a, b, x, y] = slot.face.map(|button| pad.button(button));
     MenuSample {
         buttons: [
-            pad.button(Button::A),
-            pad.button(Button::B),
-            pad.button(Button::X),
-            pad.button(Button::Y),
+            a,
+            b,
+            x,
+            y,
             pad.button(Button::LeftShoulder),
             pad.button(Button::RightShoulder),
         ],
@@ -669,34 +670,36 @@ struct PointerScale {
 }
 
 impl PointerScale {
-    fn at(&self, x: i32, y: i32) -> (f32, f32) {
-        (x as f32 * self.x, y as f32 * self.y)
+    /// SDL3 reports the pointer in f32 window pixels; the shell hit-tests in surface pixels.
+    fn at(&self, x: f32, y: f32) -> (f32, f32) {
+        (x * self.x, y * self.y)
     }
 }
 
-fn pointer_scale(canvas: &sdl2::render::Canvas<sdl2::video::Window>) -> PointerScale {
+fn pointer_scale(canvas: &sdl3::render::Canvas<sdl3::video::Window>) -> PointerScale {
     let (win_w, win_h) = canvas.window().size();
-    let (draw_w, draw_h) = canvas.window().drawable_size();
+    let (draw_w, draw_h) = canvas.window().size_in_pixels();
     PointerScale {
         x: draw_w as f32 / win_w.max(1) as f32,
         y: draw_h as f32 / win_h.max(1) as f32,
     }
 }
 
-fn pointer_button(button: sdl2::mouse::MouseButton) -> Option<PointerButton> {
+fn pointer_button(button: sdl3::mouse::MouseButton) -> Option<PointerButton> {
     match button {
-        sdl2::mouse::MouseButton::Left => Some(PointerButton::Primary),
+        sdl3::mouse::MouseButton::Left => Some(PointerButton::Primary),
         // The console reads a secondary press as Back.
-        sdl2::mouse::MouseButton::Right => Some(PointerButton::Secondary),
+        sdl3::mouse::MouseButton::Right => Some(PointerButton::Secondary),
         _ => None,
     }
 }
 
 /// A remote or keyboard key as a menu move. The same vocabulary
-/// `platform::webos::input::menu_event_for_key` maps for the classic menus, in the shell's terms
-/// — including the Magic Remote's own Back keycode, which is not Escape or Backspace.
-fn menu_event(k: sdl2::keyboard::Keycode) -> Option<MenuEvent> {
-    use sdl2::keyboard::Keycode as K;
+/// `platform::webos::input::menu_event_for_key` maps for the classic menus, in the shell's terms.
+/// The Magic Remote's own Back is NOT here: it has no `Keycode` rust-sdl3 can name, so the arm
+/// above matches it — with the colour keys — on the key event's `raw` evdev code instead.
+fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
+    use sdl3::keyboard::Keycode as K;
     Some(match k {
         K::Up => MenuEvent::Move(MenuDir::Up),
         K::Down => MenuEvent::Move(MenuDir::Down),
@@ -707,14 +710,13 @@ fn menu_event(k: sdl2::keyboard::Keycode) -> Option<MenuEvent> {
         K::Delete => MenuEvent::Secondary,
         K::PageUp => MenuEvent::JumpBack,
         K::PageDown => MenuEvent::JumpForward,
-        k if k.into_i32() == crate::platform::webos::input::WEBOS_BACK_KEYCODE => MenuEvent::Back,
         _ => return None,
     })
 }
 
 /// The keys a text field wants while it is being edited.
-fn editing_key(k: sdl2::keyboard::Keycode) -> Option<Key> {
-    use sdl2::keyboard::Keycode as K;
+fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
+    use sdl3::keyboard::Keycode as K;
     Some(match k {
         K::Left => Key::Left,
         K::Right => Key::Right,

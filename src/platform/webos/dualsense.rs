@@ -1,7 +1,7 @@
 //! Adaptive triggers, lightbar and player LEDs on a real `DualSense`, over webOS's
 //! Bluetooth HID plane.
 //!
-//! **Why this route exists.** SDL's own `DualSense` support (`SDL_GameControllerSendEffect`,
+//! **Why this route exists.** SDL's own `DualSense` support (`SDL_SendGamepadEffect`,
 //! present in the bundled fork) drives the pad through `/dev/hidraw*`. A **wired** pad does get
 //! such a node and this client writes it directly (see [`super::hidraw`]); a **Bluetooth** pad
 //! got none in the jail on webOS 10.3, and there is no `hidraw` class in `/sys` to look one up
@@ -20,8 +20,9 @@
 //!     seed byte. Without it the pad silently ignores a call the service reports as success.
 //!
 //! Rumble deliberately does **not** go through here: it reaches the pad as ordinary evdev
-//! force feedback via SDL (`GameController::set_rumble`), which works for every controller
-//! type rather than only this one. Reports built here never set the vibration valid-flag, so
+//! force feedback via SDL (`Gamepad::set_rumble`), which covers other controller types too.
+//! A Bluetooth `DualSense` on SDL's HIDAPI driver refuses it: rumble needs enhanced reports,
+//! which stay off on this TV. Reports built here never set the vibration valid-flag, so
 //! they cannot fight the kernel's force-feedback state — see [`build_report`].
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -163,7 +164,7 @@ pub enum Link {
     Usb(crate::platform::webos::hidraw::Hidraw),
 }
 
-/// The link for the `DualSense` SDL opened at `path` (`SDL_GameControllerPath`) with `serial`,
+/// The link for the `DualSense` SDL opened at `path` (`SDL_GetGamepadPath`) with `serial`,
 /// so each of several pads gets its own effects. `None` when no route is found.
 ///
 /// SDL's evdev backend names `/dev/input/eventN`, matched to its `/proc/bus/input/devices` record

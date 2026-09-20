@@ -2,6 +2,7 @@ use super::overlay::{self, ConfirmAction, ConfirmDialog, Notification};
 use super::*;
 use crate::console::ConsoleGl;
 use crate::core::settings::TvSettings;
+use crate::platform::webos::input::RemoteKey;
 use crate::services::store::ExitAction;
 use crate::ui::render::Size;
 
@@ -15,13 +16,13 @@ use crate::ui::render::Size;
 /// screen draws itself on the kit (`app::draw`), the overlays too (`runtime::overlay`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_ui_flow(
-    canvas: &mut sdl2::render::Canvas<sdl2::video::Window>,
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
     gl: &mut Option<ConsoleGl>,
-    events: &mut sdl2::EventPump,
-    game_controller: &sdl2::GameControllerSubsystem,
+    events: &mut sdl3::EventPump,
+    game_controller: &sdl3::GamepadSubsystem,
     pads: &mut pads::Pads,
     identity: &(String, String),
-    display_mode: sdl2::video::DisplayMode,
+    layout: LayoutBox,
     initial_status: Option<String>,
     initial_toast: Option<String>,
 ) -> Result<UiOutcome> {
@@ -36,11 +37,7 @@ pub(super) fn run_ui_flow(
     canvas.window_mut().show();
     let gl = console_flow::bring_up(gl, canvas, true).context("menu: GL host")?;
     let kit_fonts = std::rc::Rc::new(pf_console_ui::theme::build_fonts().context("menu: kit fonts")?);
-    gl.warm_glass(
-        &kit_fonts,
-        canvas.window().drawable_size(),
-        (display_mode.w as u32, display_mode.h as u32),
-    )?;
+    gl.warm_glass(&kit_fonts, canvas.window().size_in_pixels(), (layout.w, layout.h))?;
     tracing::info!(
         "menu fonts: {} (the kit's embedded faces)",
         kit_fonts
@@ -51,7 +48,7 @@ pub(super) fn run_ui_flow(
     let mut app = App::new(identity.clone(), kit_fonts.clone());
     // The kit widgets step on real time, like the shell's do.
     let mut last_frame = Instant::now();
-    // Re-poll pads (ControllerDeviceAdded fires once per connect, not per menu entry).
+    // Re-poll pads (GamepadAdded fires once per connect, not per menu entry).
     pads.sync(game_controller);
     app.set_pads(pads.detected());
     // Seeded here for the same reason: the hotplug events fire once per connect, and this
@@ -65,10 +62,6 @@ pub(super) fn run_ui_flow(
     if let Some(msg) = initial_toast {
         notif.show(msg);
     }
-    // Rasterized-text cache (created once, threaded through every render call).
-    // lifetime so repeat draws of the same (font, text, color) reuse an
-    // already-rasterized+premultiplied `Pixmap` instead of re-rasterizing
-    // freetype glyphs on every ~60fps tick.
     let mut input = UiInput::default();
     // Owned handle (it just clones the video subsystem's refcount), so taking it
     // here doesn't hold a borrow on `canvas` for the rest of the loop.
@@ -96,8 +89,8 @@ pub(super) fn run_ui_flow(
     // What the launch in flight is, for `services::recents` — captured where the target is
     // still in hand, spent only if the connect actually takes.
     let mut launched: Option<(String, u16, String)> = None;
-    // Yellow button log overlay works here too (see streaming loop).
-    let mut yellow_held = false;
+    // Remote key resolver (see `RemoteKeys`).
+    let mut remote_keys = crate::platform::webos::input::RemoteKeys::default();
     let mut home_held = false;
     let mut log_overlay_last: Option<Instant> = None;
     // The log tail's lines, refreshed on the ~2Hz cadence rather than read per frame.
@@ -120,8 +113,10 @@ pub(super) fn run_ui_flow(
     // frame block.
     let mut page: Option<crate::app::draw::glass::Page> = None;
     let mut page_refresh = crate::ui::backdrop::BackdropRefresh::default();
-    let mut drawable_size = canvas.window().drawable_size();
+    let mut drawable_size = canvas.window().size_in_pixels();
     let mut backdrop_was_moving = false;
+    // Event from idle sleep; dequeued by `wait_event_timeout`, so must save or drop it.
+    let mut woke_on: Option<sdl3::event::Event> = None;
     'ui: loop {
         // Start of this tick, for the loop's own pacing against `TICK_BUDGET`.
         let frame_start = Instant::now();
@@ -129,15 +124,6 @@ pub(super) fn run_ui_flow(
             tracing::warn!("SIGTERM/SIGINT received during UI");
             return Ok(quit(&app));
         }
-        // Raw scancode poll (not SDL2 event); edge-detected like streaming loop.
-        let yellow_down =
-            crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_YELLOW_SCANCODE);
-        if yellow_down && !yellow_held {
-            cycle_log_overlay();
-            dirty = true;
-            log_overlay_last = None;
-        }
-        yellow_held = yellow_down;
         // Home key re-opens the webOS launcher (captured, or webOS kills the app instead of
         // backgrounding it); works from any menu state, a long Back never trips it.
         if home_key_fired(&mut home_held) {
@@ -167,7 +153,7 @@ pub(super) fn run_ui_flow(
         if crate::app::menu::CONSOLE_UI_BUILT && app.settings_ui.settings.gamepad_ui_active(pad_connected) {
             tracing::info!("controller UI applies — handing the menu over");
             app.persist();
-            text_input.stop();
+            text_input.stop(canvas.window());
             return Ok(UiOutcome::Reenter);
         }
         // Held D-pad/stick autorepeat (see `NAV_REPEAT_DELAY`) — the pad's stand-in for the
@@ -176,7 +162,7 @@ pub(super) fn run_ui_flow(
         if app.launch_anim.is_none() {
             if let Some(ev) = input.nav_repeat_due() {
                 dirty = true;
-                match dispatch_menu_event(&mut app, ev, display_mode) {
+                match dispatch_menu_event(&mut app, ev, layout) {
                     EventAction::Next => {}
                     EventAction::Launch => break 'ui,
                 }
@@ -193,7 +179,7 @@ pub(super) fn run_ui_flow(
             hold.fired = true;
             let still_there = matches!(app.nav.screen, Screen::Home) && hold.focus == app.home_focus;
             if still_there {
-                app.open_card_menu(display_mode.w as u32);
+                app.open_card_menu(layout.w);
             }
             dirty = true;
         }
@@ -252,12 +238,23 @@ pub(super) fn run_ui_flow(
                 break 'ui;
             }
         }
-        for mut event in events.poll_iter() {
-            use sdl2::event::Event;
+        for mut event in woke_on.take().into_iter().chain(events.poll_iter()) {
+            use sdl3::event::Event;
+
+            // Compute once per event, read below; never re-derive.
+            let remote = remote_keys.press(&event);
             // Dropped in the menu too, or a thumb resting on a pad's touchpad hovers rows and
             // clicks them — see `mouse::is_touch_emulated`.
             if mouse::is_touch_emulated(&event) {
                 continue;
+            }
+            // The ways back into a field whose panel Back dismissed: a click, Confirm, or typing.
+            // Confirm still acts, so a complete form submits instead; an incomplete one no-ops.
+            if matches!(event, Event::MouseButtonDown { .. })
+                || is_menu_press(&event, MenuEvent::Confirm, false)
+                || is_typed_key(&event)
+            {
+                text_input.reopen();
             }
             into_layout_units(&mut event, crate::app::draw::panel_k());
             // Launch committed: the menu is behind the loading screen and its input would
@@ -274,14 +271,14 @@ pub(super) fn run_ui_flow(
                     tracing::info!("quit during UI");
                     return Ok(quit(&app));
                 }
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
                     if pads.add(game_controller, which).is_some() {
                         app.set_pads(pads.detected());
                     }
                     continue;
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
+                Event::GamepadRemoved { which, .. } => {
                     pad_connected = gamepad::any_pad_connected(game_controller);
                     // Magic Remote enumerates as controller; only pads we hold count.
                     if pads.remove(which).is_some() {
@@ -295,18 +292,23 @@ pub(super) fn run_ui_flow(
             }
             // Track chord state for the quit shortcut without consuming the event — the
             // buttons still flow through `handle_ui_event` for normal menu navigation.
-            if let Event::ControllerButtonDown { which, button, .. } | Event::ControllerButtonUp { which, button, .. } =
-                event
+            if let Event::GamepadButtonDown { which, button, .. } | Event::GamepadButtonUp { which, button, .. } = event
             {
                 if let Some(slot) = pads.get_mut(which) {
-                    slot.chord
-                        .set(button, matches!(event, Event::ControllerButtonDown { .. }));
+                    slot.chord.set(button, matches!(event, Event::GamepadButtonDown { .. }));
                 }
+            }
+            // Global diagnostic shortcut: ahead of the quit dialog, which owns input when open.
+            if remote == Some(RemoteKey::Yellow) {
+                cycle_log_overlay();
+                dirty = true;
+                log_overlay_last = None;
+                continue;
             }
             // The quit dialog owns input while open — navigate it only, don't let the
             // event reach the menu underneath (same split as the streaming loop).
             if quit_dialog.is_open() {
-                match quit_dialog.handle_event(&event, &kit_fonts, display_mode.w as u32, display_mode.h as u32) {
+                match quit_dialog.handle_event(&event, remote, &kit_fonts, layout.w, layout.h) {
                     Some(ConfirmAction::Confirmed) => {
                         tracing::info!("quit confirmed from menu");
                         return Ok(quit(&app));
@@ -316,40 +318,53 @@ pub(super) fn run_ui_flow(
                 }
                 continue;
             }
+            let remote_back = remote == Some(RemoteKey::Back);
             // Short Back tap on Home with sidebar focus opens the quit dialog. From a
             // game card / the ⋯ column, Back first steps focus back to the sidebar
             // (see `App::back`), so it falls through to normal dispatch instead.
-            if matches!(app.nav.screen, Screen::Home)
-                && matches!(app.home_focus, HomeFocus::Sidebar(_))
-                && is_menu_press(&event, MenuEvent::Back, false)
-            {
+            let back_tap = remote_back || is_menu_press(&event, MenuEvent::Back, false);
+            if matches!(app.nav.screen, Screen::Home) && matches!(app.home_focus, HomeFocus::Sidebar(_)) && back_tap {
                 tracing::info!("Back tap on Home sidebar — opening quit dialog");
                 open_quit_dialog(&mut quit_dialog, &mut input, &app);
                 dirty = true;
                 continue;
             }
-            match handle_ui_event(&mut app, event, &mut input, display_mode, &mut dirty) {
+            // Remote Back elsewhere: dispatch here to prevent both acting on one press.
+            if remote_back {
+                // Dispatching here skips `handle_ui_event`'s claim, so make it here: Back moves
+                // focus (out of the grid, back to the sidebar) without moving the cursor, exactly
+                // as an arrow key does, and the pointer must stay off until deliberately moved.
+                input.claim_nav_focus();
+                dirty = true;
+                match dispatch_menu_event(&mut app, MenuEvent::Back, layout) {
+                    EventAction::Next => continue,
+                    // `App::back` may resolve to a connect target; can't drop it.
+                    EventAction::Launch => break 'ui,
+                }
+            }
+            match handle_ui_event(&mut app, event, &mut input, layout, &mut dirty) {
                 EventAction::Next => {}
                 EventAction::Launch => break 'ui,
             }
         }
         // Toggle text input off screen state — a no-op unless it actually changed.
-        let wants_text = text_input_screen(app.nav.screen);
+        let wants_text = text_input_options(app.nav.screen);
         // Track actual keyboard state (user can dismiss while field focused; moves card).
         // Only worth polling while a text screen is up or the panel is still closing.
-        if wants_text || app.keyboard_shown {
+        if wants_text.is_some() || app.keyboard_shown {
             let keyboard_shown = text_input.is_shown(canvas.window());
             if keyboard_shown != app.keyboard_shown {
                 app.set_keyboard_shown(keyboard_shown);
                 dirty = true;
                 tracing::debug!("on-screen keyboard shown: {keyboard_shown}");
             }
+            text_input.latch_if_dismissed(keyboard_shown, canvas.window());
         }
-        let rect = wants_text.then(|| {
-            app.address_field_rect(display_mode.w as u32, display_mode.h as u32)
-                .map(|r| sdl2::rect::Rect::new(r.x(), r.y(), r.width(), r.height()))
+        let rect = wants_text.and_then(|_| {
+            app.address_field_rect(layout.w, layout.h)
+                .map(|r| layout.window_rect(r, canvas.window().size()))
         });
-        text_input.set_active(wants_text, rect.flatten());
+        text_input.set_active(wants_text, rect, canvas.window());
         // Redraw once after the quit dialog's close fade clears.
         let quit_dialog_animating = quit_dialog.tick();
         let quit_dialog_active = quit_dialog.frame().is_some();
@@ -374,7 +389,7 @@ pub(super) fn run_ui_flow(
             || !app.render.grid.reveal.is_revealed()
             || quit_dialog_animating
             || notif_frame.is_some();
-        let (dw, dh) = canvas.window().drawable_size();
+        let (dw, dh) = canvas.window().size_in_pixels();
         if drawable_size != (dw, dh) {
             dirty = true;
             page = None;
@@ -388,7 +403,7 @@ pub(super) fn run_ui_flow(
             // Wake on input; the timeout preserves background polling cadence.
             let elapsed = frame_start.elapsed();
             if elapsed < TICK_BUDGET {
-                crate::platform::webos::input::wait_for_event(TICK_BUDGET - elapsed);
+                woke_on = events.wait_event_timeout(TICK_BUDGET - elapsed);
             }
             continue;
         }
@@ -400,8 +415,8 @@ pub(super) fn run_ui_flow(
         dirty = false;
         // Publish the palette before clearing or caching any pixels from this frame.
         app.apply_ink();
-        app.advance_frame(display_mode.w as u32);
-        app.prepare_frame(Size::new(display_mode.w as u32, display_mode.h as u32));
+        app.advance_frame(layout.w);
+        app.prepare_frame(Size::new(layout.w, layout.h));
         // Cache log lines between refreshes to avoid locking the log per frame.
         if log_overlay_due {
             log_overlay_last = Some(Instant::now());
@@ -409,21 +424,18 @@ pub(super) fn run_ui_flow(
         } else if log_overlay_state() == LogOverlayState::Off {
             log_lines = None;
         }
-        // webOS drawable dimensions can differ from the layout's display_mode units.
+        // webOS drawable dimensions may differ from layout units.
         let dt = last_frame.elapsed().as_secs_f64().min(0.1);
         last_frame = Instant::now();
         {
             let surface = gl.surface(dw, dh)?;
             let c = surface.canvas();
             c.clear(app.frame_clear_color());
-            c.scale((
-                dw as f32 / display_mode.w.max(1) as f32,
-                dh as f32 / display_mode.h.max(1) as f32,
-            ));
+            c.scale((dw as f32 / layout.w.max(1) as f32, dh as f32 / layout.h.max(1) as f32));
             kit_fonts.begin_frame();
             // Scoped so the frame's borrow of the canvas ends before the snapshot below.
             {
-                let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32);
+                let frame = crate::app::draw::Frame::new(c, &kit_fonts, layout.w, layout.h);
                 app.draw_home(&frame, dt);
             }
             // Coalesce refreshes through row arrivals as well as the 75ms panel fade,
@@ -439,7 +451,7 @@ pub(super) fn run_ui_flow(
                 page_refresh = Default::default();
             } else if page_refresh.due(Instant::now(), modal_motion) {
                 let snap = surface.image_snapshot_with_bounds(skia_safe::IRect::from_wh(dw as i32, dh as i32));
-                let sigma = crate::app::draw::glass::page_sigma(display_mode.h as u32, dh);
+                let sigma = crate::app::draw::glass::page_sigma(layout.h, dh);
                 // Allocation failure must not turn an existing glass card opaque.
                 let captured =
                     snap.and_then(|snap| crate::app::draw::glass::Page::capture(surface.canvas(), &snap, sigma));
@@ -449,7 +461,7 @@ pub(super) fn run_ui_flow(
                 }
             }
             let c = surface.canvas();
-            let frame = crate::app::draw::Frame::new(c, &kit_fonts, display_mode.w as u32, display_mode.h as u32)
+            let frame = crate::app::draw::Frame::new(c, &kit_fonts, layout.w, layout.h)
                 .with_backdrop(page.as_ref().map(crate::app::draw::glass::Page::backdrop));
             app.draw_modals(&frame, dt);
             app.draw_launch(&frame);
@@ -468,7 +480,7 @@ pub(super) fn run_ui_flow(
             std::thread::sleep(TICK_BUDGET - elapsed);
         }
     }
-    text_input.stop();
+    text_input.stop(canvas.window());
     // Atlases go back before a stream takes the GPU; the context and its compiled shaders
     // stay, so the next entry is not a cold start. The page blur first: `free_gpu_resources`
     // cannot reclaim a texture a live `Image` still holds.
@@ -496,12 +508,13 @@ pub(super) fn run_ui_flow(
 /// SDL reports the pointer in window pixels while the menu lays out in a box shrunk by
 /// `app::draw::panel_k`, so a hover lands where it was drawn only after this. Relative motion
 /// rides along: it steers the cursor over the same layout.
-fn into_layout_units(event: &mut sdl2::event::Event, k: f32) {
-    use sdl2::event::Event;
+fn into_layout_units(event: &mut sdl3::event::Event, k: f32) {
+    use sdl3::event::Event;
     if (k - 1.0).abs() < f32::EPSILON {
         return;
     }
-    let to_box = |v: i32| (v as f32 / k).round() as i32;
+    // SDL3 pointer fields are f32; round at the end, not on the way in.
+    let to_box = |v: f32| (v / k).round();
     match event {
         Event::MouseMotion { x, y, xrel, yrel, .. } => {
             (*x, *y, *xrel, *yrel) = (to_box(*x), to_box(*y), to_box(*xrel), to_box(*yrel));

@@ -26,7 +26,7 @@ use pf_client_core::trust::Settings;
 
 /// Arrival-flag / `set_pad_audio_caps` bit: this client renders the coil lane.
 pub const CAP_HAPTICS: u8 = 0x01;
-/// Same, for the speaker lane — declared only for a Bluetooth pad, the one transport that plays it.
+/// Same, for the speaker lane, played through Bluetooth or a USB audio card.
 pub const CAP_SPEAKER: u8 = 0x02;
 
 /// Stereo 48 kHz samples the Bluetooth sender pulls per speaker report: 512, resampled to the
@@ -62,15 +62,14 @@ pub fn wanted(settings: &Settings) -> bool {
     settings.pad_haptics || settings.pad_speaker_on()
 }
 
-/// The render capabilities to declare, from Settings. `bt_pad` is whether a Bluetooth `DualSense` is
-/// attached: the speaker lane has no other route, and a declared-but-silent lane would make the
-/// host stream it for nothing.
-pub fn caps_for(settings: &Settings, bt_pad: bool) -> u8 {
+/// Requested lanes with an available renderer. Haptics can use motor rumble;
+/// the speaker requires an audio transport.
+pub fn caps_for(settings: &Settings, haptics: bool, speaker: bool) -> u8 {
     let mut caps = 0;
-    if settings.pad_haptics {
+    if settings.pad_haptics && haptics {
         caps |= CAP_HAPTICS;
     }
-    if settings.pad_speaker_on() && bt_pad {
+    if settings.pad_speaker_on() && speaker {
         caps |= CAP_SPEAKER;
     }
     caps
@@ -473,6 +472,22 @@ fn peaks(pcm: &[f32]) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capabilities_require_both_settings_and_a_renderer() {
+        let mut settings = Settings {
+            pad_haptics: true,
+            pad_speaker: "pad".into(),
+            ..Settings::default()
+        };
+        assert_eq!(caps_for(&settings, false, false), 0);
+        assert_eq!(caps_for(&settings, true, false), CAP_HAPTICS);
+        assert_eq!(caps_for(&settings, false, true), CAP_SPEAKER);
+        assert_eq!(caps_for(&settings, true, true), CAP_HAPTICS | CAP_SPEAKER);
+        settings.pad_haptics = false;
+        settings.pad_speaker = "off".into();
+        assert_eq!(caps_for(&settings, true, true), 0);
+    }
 
     #[test]
     fn envelope_applies_once_then_releases_once() {

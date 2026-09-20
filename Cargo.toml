@@ -1,6 +1,6 @@
 [package]
 name = "punktfunk-webos"
-description = "Native LG webOS TV client for punktfunk — session pump direct on punktfunk-core, NDL DirectMedia hardware video decode, SDL2 window/gamepad/remote input."
+description = "Native LG webOS TV client for punktfunk — session pump direct on punktfunk-core, NDL DirectMedia hardware video decode, SDL3 window/gamepad/remote input."
 version = "0.0.1"
 edition = "2021"
 # Pinned to 1.85: edition-2024 deps (v0.28.0+) require it; only the compiler floor rises.
@@ -49,13 +49,24 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sdl2 = { version = "0.38", default-features = false }
+sdl3 = { version = "0.20", default-features = false }
+# 🛑 `default-features = false` on purpose: sdl3-sys's default `use-pkg-config` would run
+# buildroot's pkg-config wrapper, which mangles the webOS release's relocatable `sdl3.pc`
+# because it sits outside the NDK sysroot. With no probe feature it falls through to a plain
+# `-lSDL3`, and build.rs supplies the search path from $SDL3_PREFIX.
+sdl3-sys = { version = "0.7", default-features = false }
 opus = "0.3"
 libc = "0.2"
 # skia-bindings silently builds from ~1hr source if archive missing; logs must say "DOWNLOAD AND INSTALL SUCCEEDED".
 # Keep default features for archive. textlayout pinned to avoid icudt74_dat (10.5 MB, 43% of binary).
 pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "4ddc3a3cf", default-features = false, features = ["gl"] }
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
+
+[features]
+# Builds SDL3 from source (cmake) instead of linking a prebuilt one. For `task test` only: it
+# runs on the host target, which has no webOS prefix to point at and no distro libSDL3 either
+# (Debian bookworm ships none). The webOS build never wants this — it links the fork.
+vendored-sdl3 = ["sdl3-sys/build-from-source"]
 
 [build-dependencies]
 serde_json = "1"

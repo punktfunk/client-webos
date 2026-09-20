@@ -1,9 +1,9 @@
-//! Maps SDL2 keyboard events to punktfunk wire `InputEvents`.
+//! Maps SDL3 keyboard events to punktfunk wire `InputEvents`.
 //! Magic Remote 5-way pad → arrow keys. USB keyboards → QWERTY-positional VKs.
 use punktfunk_core::input::{InputEvent, InputKind};
-use sdl2::keyboard::Scancode;
+use sdl3::keyboard::Scancode;
 
-/// SDL2 scancode → Windows VK code (`vk_to_evdev` on the host side).
+/// SDL3 scancode → Windows VK code (`vk_to_evdev` on the host side).
 /// `None` for keys not in that table.
 fn vk_code(sc: Scancode) -> Option<u32> {
     Some(match sc {
@@ -28,16 +28,16 @@ fn vk_code(sc: Scancode) -> Option<u32> {
         Scancode::Delete => 0x2E,                     // VK_DELETE
 
         // ── Digit row ─────────────────────────────────────────────────────────
-        Scancode::Num0 => 0x30, // VK_0
-        Scancode::Num1 => 0x31, // VK_1
-        Scancode::Num2 => 0x32, // VK_2
-        Scancode::Num3 => 0x33, // VK_3
-        Scancode::Num4 => 0x34, // VK_4
-        Scancode::Num5 => 0x35, // VK_5
-        Scancode::Num6 => 0x36, // VK_6
-        Scancode::Num7 => 0x37, // VK_7
-        Scancode::Num8 => 0x38, // VK_8
-        Scancode::Num9 => 0x39, // VK_9
+        Scancode::_0 => 0x30, // VK_0
+        Scancode::_1 => 0x31, // VK_1
+        Scancode::_2 => 0x32, // VK_2
+        Scancode::_3 => 0x33, // VK_3
+        Scancode::_4 => 0x34, // VK_4
+        Scancode::_5 => 0x35, // VK_5
+        Scancode::_6 => 0x36, // VK_6
+        Scancode::_7 => 0x37, // VK_7
+        Scancode::_8 => 0x38, // VK_8
+        Scancode::_9 => 0x39, // VK_9
 
         // ── Letters A–Z (QWERTY positional) ──────────────────────────────────
         Scancode::A => 0x41,
@@ -258,16 +258,16 @@ const VK_SHIFT: u32 = 0x10;
 /// apart the way two separate tables could.
 fn char_scancode(c: char) -> Option<(Scancode, bool)> {
     Some(match c {
-        '0' | ')' => (Scancode::Num0, c == ')'),
-        '1' | '!' => (Scancode::Num1, c == '!'),
-        '2' | '@' => (Scancode::Num2, c == '@'),
-        '3' | '#' => (Scancode::Num3, c == '#'),
-        '4' | '$' => (Scancode::Num4, c == '$'),
-        '5' | '%' => (Scancode::Num5, c == '%'),
-        '6' | '^' => (Scancode::Num6, c == '^'),
-        '7' | '&' => (Scancode::Num7, c == '&'),
-        '8' | '*' => (Scancode::Num8, c == '*'),
-        '9' | '(' => (Scancode::Num9, c == '('),
+        '0' | ')' => (Scancode::_0, c == ')'),
+        '1' | '!' => (Scancode::_1, c == '!'),
+        '2' | '@' => (Scancode::_2, c == '@'),
+        '3' | '#' => (Scancode::_3, c == '#'),
+        '4' | '$' => (Scancode::_4, c == '$'),
+        '5' | '%' => (Scancode::_5, c == '%'),
+        '6' | '^' => (Scancode::_6, c == '^'),
+        '7' | '&' => (Scancode::_7, c == '&'),
+        '8' | '*' => (Scancode::_8, c == '*'),
+        '9' | '(' => (Scancode::_9, c == '('),
         ' ' => (Scancode::Space, false),
         ';' | ':' => (Scancode::Semicolon, c == ':'),
         '=' | '+' => (Scancode::Equals, c == '+'),

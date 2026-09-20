@@ -5,7 +5,7 @@
 /// wherever the user learns it.
 pub const LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Menu event (debounced from raw SDL2 input: keyboard arrows, gamepad d-pad).
+/// Menu event (debounced from raw SDL input: keyboard arrows, gamepad d-pad).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuEvent {
     Up,
