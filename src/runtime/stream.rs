@@ -936,7 +936,10 @@ pub(super) fn run_inner() -> Result<()> {
                         RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, !pads.is_empty()),
                         // No microphone and no touch surface on a TV. Stream mute needs a zeroed
                         // decoded frame, and NDL's audio plane decodes Opus itself.
-                        RingCommand::ToggleMic | RingCommand::CycleTouchMode | RingCommand::ToggleStreamMute => {}
+                        RingCommand::ToggleMic
+                        | RingCommand::CycleTouchMode
+                        | RingCommand::ToggleScrollInvert
+                        | RingCommand::ToggleStreamMute => {}
                     }
                 }
                 // Host actions: this client keeps no action cache, so their slots stay dimmed.

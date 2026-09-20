@@ -386,6 +386,7 @@ impl App {
             settings,
             store: &store,
             platform: pf_console_ui::Platform::WebOS,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: true,
