@@ -20,5 +20,5 @@ nc -lk 9000 &
 export SDL_AUDIO_DRIVER=dummy
 # `vendored-sdl3`: this builds for the HOST target, which has no libSDL3 to link against
 # (Debian bookworm ships none) and no webOS prefix to point at — see Cargo.toml.
-exec cargo run --bin punktfunk-webos --release --features vendored-sdl3 -- \
+exec cargo run --locked --bin punktfunk-webos --release --features vendored-sdl3 -- \
   "{\"telemetry\":\"127.0.0.1:9000\",\"telemetry_level\":\"${TELEMETRY_LEVEL}\",\"webos_sdk\":\"${WEBOS_SDK}\"}"
