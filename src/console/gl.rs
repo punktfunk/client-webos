@@ -154,6 +154,11 @@ impl ConsoleGl {
         self.context.flush_and_submit();
     }
 
+    /// Submit, then wait until the GPU has drawn it.
+    pub(crate) fn finish(&mut self) {
+        self.context.flush_submit_and_sync_cpu();
+    }
+
     pub(crate) fn warm_glass(
         &mut self,
         fonts: &pf_console_ui::theme::Fonts,
