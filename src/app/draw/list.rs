@@ -387,9 +387,8 @@ mod tests {
         // The card is lighter than the ground; the switch's knob (on → right end) is white.
         assert!(px(l.card.left + 10.0, l.card.center_y())[0] > px(10.0, 10.0)[0]);
         let row0_cy = l.rows.top + (ROW_H as f32 / 2.0) * k;
-        // The kit narrows its rows to the rect: `min(ROW_MAX_W, width − 48)` design units.
-        let row_w = (620.0 * k).min(l.rows.width() - 48.0 * k);
-        let row_right = l.rows.center_x() + row_w / 2.0;
+        // The kit's form column: its right end is the switch's.
+        let row_right = pf_console_ui::widgets::column(l.rows, f64::from(k)).right;
         let knob = px(row_right - 16.0 * k - 10.0 * k, row0_cy);
         assert!(
             knob.iter().all(|c| *c > 200),
