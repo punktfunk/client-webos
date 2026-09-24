@@ -108,6 +108,18 @@ pub(super) fn run(
             return Ok(leave_for_classic(&store));
         }
     };
+    // Every tab drawn once, unseen, so the GL driver compiles their programs now rather than
+    // stalling 50–170 ms on the first visit to each. Waited out behind the splash: the tour
+    // queues ~50 frames of GPU work, which otherwise stalls the first real frames.
+    {
+        let warm = Instant::now();
+        let (w, h) = canvas.window().size_in_pixels();
+        if let Ok(surface) = console_gl.surface(w, h) {
+            console.warm_up(surface.canvas(), &Viewport::plain(w, h));
+        }
+        console_gl.finish();
+        tracing::info!("console: warmed the tabs in {} ms", warm.elapsed().as_millis());
+    }
     if let Some(notice) = notice {
         handles.console.set_notice(notice);
     }
