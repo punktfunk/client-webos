@@ -888,6 +888,9 @@ fn absence(id: RowId) -> Option<&'static str> {
         RowId::Preset(_) | RowId::NoPresets => "the page builds its own profile rows",
         // The client's own screens, not the kit's action rows.
         RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
+        RowId::Version => "the page draws its own version row",
+        // An action row into the shell's Games tab, which these menus do not have.
+        RowId::LibrarySections => "the shell's Games tab only",
         // The kit answers `false` for WebOS, so a page entry would draw nothing.
         RowId::Decoder
         | RowId::Chroma444
