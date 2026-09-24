@@ -110,6 +110,9 @@ pub(crate) struct Service {
     /// Deliberately NOT through `services::art`, which decodes to a card-sized pixmap for the
     /// old UI's tiny-skia compositor.
     art: Option<ArtReceiver>,
+    /// Per host, the covers already handed over decoded. The shell shares a decoded cover
+    /// between its screens, so a re-fetch sends these as bytes and spends no decode on them.
+    delivered: HashMap<(String, u16), Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     pair: Option<Receiver<PairOutcome>>,
     /// A Request access knock in flight — see [`Service::request_access`].
     access: Option<Receiver<PairOutcome>>,
@@ -134,6 +137,7 @@ impl Service {
             rows_dirty: true,
             games: None,
             art: None,
+            delivered: HashMap::new(),
             pair: None,
             access: None,
             wake_cancel: None,
@@ -490,6 +494,11 @@ impl Service {
         self.note_reachable(&loaded.host, loaded.port, true);
         self.handles.library.set_games(to_model(&games));
         self.handles.library.set_stale(Stale::No);
+        let delivered = self
+            .delivered
+            .entry((loaded.host.clone(), loaded.port))
+            .or_default()
+            .clone();
         self.art = Some(spawn_art(
             loaded.host,
             loaded.mgmt_port,
@@ -497,22 +506,22 @@ impl Service {
             self.identity.clone(),
             games,
             self.handles.library.clone(),
+            delivered,
         ));
     }
 
     fn drain_art(&mut self) {
         let Some(rx) = &self.art else { return };
-        // Time budget prevents render-thread decode of encoded posters (~50ms each). Count-based
-        // limit cannot stop mid-decode.
+        // A budget keeps one tick short when a whole shelf of covers lands at once.
         let started = Instant::now();
         loop {
             if started.elapsed() >= ART_DRAIN_BUDGET {
                 return;
             }
             let Some((id, item)) = rx.try_recv() else { return };
-            match item {
-                ArtItem::Decoded(poster) => self.handles.library.push_decoded(id, poster),
-                ArtItem::Encoded(bytes) => self.handles.library.push_art(id, bytes),
+            self.handles.library.push_art(id.clone(), item.bytes);
+            if let Some(poster) = item.decoded {
+                self.handles.library.push_decoded(id, poster);
             }
         }
     }
@@ -1042,11 +1051,12 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
 
 /// Fetch every title's poster in the background, encoded. One agent for the whole run, so the
 /// covers cost one mTLS handshake rather than one each.
-/// A cover on its way to the shelf: decoded here where there is a thread to spare, or still
-/// encoded when this one could not do it.
-enum ArtItem {
-    Decoded(pf_console_ui::DecodedPoster),
-    Encoded(Vec<u8>),
+/// A cover on its way to the shelf: its bytes, and decoded here where there is a thread to
+/// spare. The bytes go to the model either way, so a screen that missed the decoded copy, or
+/// evicted it, can decode its own.
+struct ArtItem {
+    bytes: Vec<u8>,
+    decoded: Option<pf_console_ui::DecodedPoster>,
 }
 
 /// Fetch every game's cover, and decode it here rather than on the thread that draws.
@@ -1057,7 +1067,8 @@ enum ArtItem {
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
-/// reason returning to the host list felt slow.
+/// reason returning to the host list felt slow. A cover in `delivered` goes as bytes only: the
+/// shell already shares its decoded copy between screens.
 fn spawn_art(
     addr: String,
     mgmt: u16,
@@ -1065,6 +1076,7 @@ fn spawn_art(
     identity: (String, String),
     games: Vec<GameEntry>,
     library: pf_console_ui::LibraryShared,
+    delivered: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> ArtReceiver {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1091,11 +1103,8 @@ fn spawn_art(
                 std::thread::sleep(Duration::from_millis(16));
             };
             let mut cache = crate::services::art::CoverCache::new(&addr, port);
-            for game in games {
-                if worker_cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                let bytes = crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
+            let mut fetch = |game: &GameEntry| {
+                crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
                     // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
                         .into_iter()
@@ -1110,16 +1119,54 @@ fn spawn_art(
                                 None
                             }
                         })
-                });
-                // A closed channel means the shelf moved on; stop fetching for it.
-                if let Some(bytes) = bytes {
-                    if worker_cancel.load(Ordering::Relaxed) {
-                        return;
+                })
+            };
+            // False once the shelf moved on: its channel closed, or it was cancelled.
+            let send = |id: String, bytes: Vec<u8>| {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let known = delivered.lock().is_ok_and(|d| d.contains(&id));
+                let item = if known {
+                    ArtItem { bytes, decoded: None }
+                } else {
+                    decode_at(bytes, library.art_scale().or(scale))
+                };
+                if item.decoded.is_some() {
+                    if let Ok(mut d) = delivered.lock() {
+                        d.insert(id.clone());
                     }
-                    if tx
-                        .send((game.id, decode_at(&bytes, library.art_scale().or(scale))))
-                        .is_err()
-                    {
+                }
+                tx.send((id, item)).is_ok()
+            };
+            let mut missed = Vec::new();
+            for game in games {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match fetch(&game) {
+                    Some(bytes) => {
+                        if !send(game.id, bytes) {
+                            return;
+                        }
+                    }
+                    None => missed.push(game),
+                }
+            }
+            // A cover no candidate answered gets one more pass once the rest are in: a Wi-Fi
+            // hiccup must not leave a title blank for the session.
+            missed.retain(|g| {
+                [&g.art.portrait, &g.art.header, &g.art.hero]
+                    .iter()
+                    .any(|p| p.is_some())
+            });
+            if missed.is_empty() {
+                return;
+            }
+            std::thread::sleep(ART_RETRY_AFTER);
+            for game in missed {
+                if let Some(bytes) = fetch(&game) {
+                    if !send(game.id, bytes) {
                         return;
                     }
                 }
@@ -1131,6 +1178,9 @@ fn spawn_art(
 
 /// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
+
+/// How long the covers that failed wait before their one retry.
+const ART_RETRY_AFTER: Duration = Duration::from_secs(3);
 
 /// Timeout for covers waiting on decode scale. If shelf never publishes, deliver encoded.
 const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
@@ -1152,10 +1202,10 @@ impl Drop for ArtReceiver {
     }
 }
 
-/// Decode at scale, or hand over encoded for shell to size.
-fn decode_at(bytes: &[u8], k: Option<f64>) -> ArtItem {
-    k.and_then(|k| pf_console_ui::decode_poster_off_thread(bytes, k))
-        .map_or_else(|| ArtItem::Encoded(bytes.to_vec()), ArtItem::Decoded)
+/// Decode at scale when the shelf has published one; the shell sizes the rest itself.
+fn decode_at(bytes: Vec<u8>, k: Option<f64>) -> ArtItem {
+    let decoded = k.and_then(|k| pf_console_ui::decode_poster_off_thread(&bytes, k));
+    ArtItem { bytes, decoded }
 }
 
 /// The wire catalog in the shell's terms.
