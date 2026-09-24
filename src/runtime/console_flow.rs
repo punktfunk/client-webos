@@ -243,6 +243,14 @@ pub(super) fn run(
                 } => {
                     last_input = Instant::now();
                     let shift = keymod.intersects(sdl3::keyboard::Mod::LSHIFTMOD | sdl3::keyboard::Mod::RSHIFTMOD);
+                    // OK acts on release; held, it opens the focused card's menu. In a field it
+                    // presses the on-screen key: as a keyboard Enter it would close the field.
+                    if is_ok(k) {
+                        if !repeat {
+                            console.ok(true, InputSource::Keys);
+                        }
+                        continue;
+                    }
                     // While a field is being edited the shell wants keys, not menu moves —
                     // an arrow has to walk the caret rather than the row under it.
                     if console.editing() {
@@ -257,13 +265,6 @@ pub(super) fn run(
                             console.key(key, shift, repeat);
                             continue;
                         }
-                    }
-                    // OK acts on release; held, it opens the focused card's menu.
-                    if is_ok(k) {
-                        if !repeat {
-                            console.ok(true, InputSource::Keys);
-                        }
-                        continue;
                     }
                     if let Some(ev) = menu_event(k) {
                         if let Some(_pulse) = console.menu(ev, InputSource::Keys) {
@@ -743,7 +744,7 @@ fn is_ok(k: sdl3::keyboard::Keycode) -> bool {
     matches!(k, K::Return | K::Return2 | K::KpEnter)
 }
 
-/// The keys a text field wants while it is being edited.
+/// The keys a text field wants while it is being edited. OK is not one: see [`is_ok`].
 fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
     use sdl3::keyboard::Keycode as K;
     Some(match k {
@@ -751,7 +752,6 @@ fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
         K::Right => Key::Right,
         K::Up => Key::Up,
         K::Down => Key::Down,
-        K::Return | K::Return2 | K::KpEnter => Key::Return,
         K::Space => Key::Space,
         K::Escape => Key::Escape,
         K::Backspace => Key::Backspace,
