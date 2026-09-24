@@ -57,20 +57,26 @@ fn handshake_only(
     )
 }
 
-/// The no-PIN "request access" trust step: open a trust-on-first-use connection
-/// (`pin = None`) presenting our identity, which a host requiring pairing PARKS until
-/// its operator approves this device, then return the host's now-verified fingerprint
-/// to pin and tear the connection straight back down.
+/// The no-PIN "request access" trust step: connect presenting our identity, which a host
+/// requiring pairing PARKS until its operator approves this device, then return the host's
+/// fingerprint to pin and tear the connection straight back down. `pin` is an advertised
+/// fingerprint to hold the host to; `None` trusts whoever answers.
 ///
 /// Uses `handshake_only`, so the video plane is never touched — this needs the handshake to reach
 /// `Welcome`, not a running stream. Blocks up to `timeout` (the operator-approval window).
-pub fn request_access(host: &str, port: u16, identity: (String, String), timeout: Duration) -> Result<[u8; 32]> {
+pub fn request_access(
+    host: &str,
+    port: u16,
+    pin: Option<[u8; 32]>,
+    identity: (String, String),
+    timeout: Duration,
+) -> Result<[u8; 32]> {
     let client = handshake_only(
         host,
         port,
         1_000, // minimal bitrate — connection is closed as soon as trust is established
         quic::CODEC_H264,
-        None, // pin = None → trust-on-first-use, host parks until operator approval
+        pin,
         identity,
         timeout,
     )

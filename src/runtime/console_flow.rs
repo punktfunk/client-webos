@@ -157,6 +157,8 @@ pub(super) fn run(
         store::Settings,
         bool,
     )> = None;
+    // A Request access launch waiting on the host's approval — see `Service::request_access`.
+    let mut access: Option<Launch> = None;
 
     let outcome = 'ui: loop {
         let frame_start = Instant::now();
@@ -352,15 +354,6 @@ pub(super) fn run(
                     preset: profile,
                     request_access,
                 } => {
-                    if request_access {
-                        // The shell's park-and-wait handshake. This client's own path for it
-                        // lives in the pairing modal (`session::probe::request_access`) and has
-                        // no console screen yet, so say so rather than dial and hang.
-                        handles
-                            .console
-                            .set_notice("Pair this TV from the classic menus first".into());
-                        continue;
-                    }
                     let want = Launch {
                         addr,
                         port,
@@ -368,6 +361,20 @@ pub(super) fn run(
                         launch,
                         profile,
                     };
+                    if request_access {
+                        // The host parks this TV until its operator approves; the launch
+                        // follows once the knock comes back and the pairing is saved.
+                        let Some(pin) = shared::parse_fp(&want.fp_hex) else {
+                            console.session_phase(SessionPhase::Failed(
+                                "This host didn't say who it is, so pair it with its PIN.",
+                            ));
+                            continue;
+                        };
+                        tracing::info!("console: requesting access to {}:{}", want.addr, want.port);
+                        service.request_access(want.addr.clone(), want.port, pin);
+                        access = Some(want);
+                        continue;
+                    }
                     let where_ = format!("{title} on {}:{}", want.addr, want.port);
                     match start_launch(&store, identity, game_controller, want) {
                         Ok(started) => {
@@ -389,8 +396,9 @@ pub(super) fn run(
                     // Dropping the handle IS the cancel: the worker runs to completion and
                     // drops the `Connected` it built, which tears the session down cleanly —
                     // just a handshake later than the button press.
-                    if connect.take().is_some() {
+                    if connect.take().is_some() || access.take().is_some() {
                         tracing::info!("console: connect cancelled");
+                        service.cancel_access();
                         console.session_phase(SessionPhase::Ended(None));
                     }
                 }
@@ -405,6 +413,24 @@ pub(super) fn run(
                         tracing::warn!("console: clipboard: {e}");
                     }
                 }
+            }
+        }
+
+        // Approved: the host is paired now, so the launch the knock held back goes ahead.
+        if access.is_some() {
+            match service.drain_access() {
+                Some(Ok(())) => {
+                    let want = access.take().expect("just checked");
+                    match start_launch(&store, identity, game_controller, want) {
+                        Ok(started) => connect = Some(started),
+                        Err(e) => console.session_phase(SessionPhase::Failed(&format!("Couldn't start — {e}"))),
+                    }
+                }
+                Some(Err(e)) => {
+                    access = None;
+                    console.session_phase(SessionPhase::Failed(&e));
+                }
+                None => {}
             }
         }
 

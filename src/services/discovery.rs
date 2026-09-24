@@ -15,6 +15,9 @@ pub struct DiscoveredHost {
     pub mac: Vec<String>,
     /// Generic-to-specific OS identity chain, such as `linux/fedora/bazzite`.
     pub os: String,
+    /// The advertised certificate fingerprint, lowercase hex; empty without one. An advert is
+    /// unauthenticated: only the host's approval of this TV makes it a pairing.
+    pub fp_hex: String,
 }
 
 /// IPv4 address and short instance name from a resolved record. IPv4 only (same as other
@@ -76,6 +79,12 @@ fn txt_fields(mgmt: Option<&str>, mac: Option<&str>, os: Option<&str>) -> (Optio
     )
 }
 
+/// The `fp` TXT value as canonical hex, or empty when it is not 32 bytes of hex.
+fn advertised_fp(fp: Option<&str>) -> String {
+    use crate::services::store::shared;
+    fp.and_then(shared::parse_fp).map(shared::hex).unwrap_or_default()
+}
+
 /// Turns a resolved record into a host, or `None` if it isn't usable (no IPv4).
 fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
     let (addr, name) = addr_and_name(info)?;
@@ -92,6 +101,7 @@ fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
         mgmt_port,
         mac,
         os,
+        fp_hex: advertised_fp(props.get_property_val_str("fp")),
     })
 }
 
@@ -199,5 +209,14 @@ mod tests {
         assert_eq!(os, "a/b/c/d/e", "five tokens at most");
         assert_eq!(sanitize_os("../Win dows!//"), "windows");
         assert_eq!(sanitize_os(&"x".repeat(40)), "x".repeat(32));
+    }
+
+    #[test]
+    fn advertised_fp_is_canonical_or_empty() {
+        let fp = "0C619FF7FCFBD520CC58909DEBF62500A79835877013728AC40C3EC1554A7D3B";
+        assert_eq!(advertised_fp(Some(fp)), fp.to_lowercase());
+        assert_eq!(advertised_fp(Some("0c61")), "");
+        assert_eq!(advertised_fp(Some(&"zz".repeat(32))), "");
+        assert_eq!(advertised_fp(None), "");
     }
 }

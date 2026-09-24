@@ -117,7 +117,7 @@ impl App {
         self.jobs.pairing = Some(rx);
         std::thread::spawn(move || {
             let result =
-                crate::session::probe::request_access(&host, port, identity, crate::services::budget::HOST_WAIT)
+                crate::session::probe::request_access(&host, port, None, identity, crate::services::budget::HOST_WAIT)
                     .map_err(|e| crate::core::errors::friendly(&e));
             let _ = tx.send(PairingOutcome {
                 host,

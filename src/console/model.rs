@@ -111,6 +111,8 @@ pub(crate) struct Service {
     /// old UI's tiny-skia compositor.
     art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
+    /// A Request access knock in flight — see [`Service::request_access`].
+    access: Option<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
 }
@@ -133,6 +135,7 @@ impl Service {
             games: None,
             art: None,
             pair: None,
+            access: None,
             wake_cancel: None,
         }
     }
@@ -229,7 +232,8 @@ impl Service {
                 name: d.name.clone(),
                 addr: d.addr.clone(),
                 port: d.port,
-                fp_hex: String::new(),
+                // The advert's: it is what Request access pins while the host decides.
+                fp_hex: d.fp_hex.clone(),
                 paired: false,
                 saved: false,
                 // It is answering mDNS right now, which is the whole of what "online" claims.
@@ -515,17 +519,23 @@ impl Service {
 
     // ---- pairing -----------------------------------------------------------------------
 
-    fn start_pair(&mut self, addr: String, port: u16, pin: &str, device_name: &str) {
+    /// What a new record learns from the row and the advert: name, management port, MACs, OS.
+    fn advert_facts(&self, addr: &str, port: u16) -> (String, Option<u16>, Vec<String>, String) {
         let name = self
             .rows()
             .into_iter()
             .find(|r| r.addr == addr && r.port == port)
-            .map_or_else(|| addr.clone(), |r| r.name);
+            .map_or_else(|| addr.to_string(), |r| r.name);
         let advert = self.discovered.iter().find(|d| d.addr == addr && d.port == port);
         let (mgmt_port, mac, os) = advert.map_or_else(
             || (None, Vec::new(), String::new()),
             |d| (d.mgmt_port, d.mac.clone(), d.os.clone()),
         );
+        (name, mgmt_port, mac, os)
+    }
+
+    fn start_pair(&mut self, addr: String, port: u16, pin: &str, device_name: &str) {
+        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
         self.handles.console.set_pair(PairPhase::Busy);
         let (tx, rx) = std::sync::mpsc::channel();
         self.pair = Some(rx);
@@ -562,15 +572,76 @@ impl Service {
         let Some(rx) = &self.pair else { return };
         let Ok(outcome) = rx.try_recv() else { return };
         self.pair = None;
-        let fingerprint = match outcome.result {
-            Ok(fp) => fp,
+        let fingerprint = match &outcome.result {
+            Ok(fp) => *fp,
             Err(e) => {
                 tracing::warn!("console: pairing failed: {e}");
-                self.handles.console.set_pair(PairPhase::Failed(e));
+                self.handles.console.set_pair(PairPhase::Failed(e.clone()));
                 return;
             }
         };
         tracing::info!("console: paired with {}:{}", outcome.addr, outcome.port);
+        let key = self.remember_paired(outcome, fingerprint);
+        self.handles.console.set_pair(PairPhase::Paired { key });
+    }
+
+    /// Knock on a host that parks unknown devices until its operator approves this TV,
+    /// holding it to the advertised `pin`. [`Self::drain_access`] saves the pairing.
+    pub(crate) fn request_access(&mut self, addr: String, port: u16, pin: [u8; 32]) {
+        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.access = Some(rx);
+        let identity = self.identity.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-access".into())
+            .spawn(move || {
+                let result = crate::session::probe::request_access(&addr, port, Some(pin), identity, budget::HOST_WAIT)
+                    .map_err(|e| crate::core::errors::friendly(&e));
+                let _ = tx.send(PairOutcome {
+                    name,
+                    addr,
+                    port,
+                    mgmt_port,
+                    mac,
+                    os,
+                    result,
+                });
+            })
+            .ok();
+    }
+
+    /// The knock's answer once there is one; `Ok` means the host is saved as paired.
+    pub(crate) fn drain_access(&mut self) -> Option<Result<(), String>> {
+        let outcome = match self.access.as_ref()?.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.access = None;
+                return Some(Err("Couldn't ask the host for access.".into()));
+            }
+        };
+        self.access = None;
+        match &outcome.result {
+            Ok(fp) => {
+                let fingerprint = *fp;
+                tracing::info!("console: access granted by {}:{}", outcome.addr, outcome.port);
+                self.remember_paired(outcome, fingerprint);
+                Some(Ok(()))
+            }
+            Err(e) => {
+                tracing::warn!("console: request access failed: {e}");
+                Some(Err(e.clone()))
+            }
+        }
+    }
+
+    /// Stop listening for the knock. The connection it holds ends on its own timeout.
+    pub(crate) fn cancel_access(&mut self) {
+        self.access = None;
+    }
+
+    /// Save a host this TV just paired with, returning its row key.
+    fn remember_paired(&mut self, outcome: PairOutcome, fingerprint: [u8; 32]) -> String {
         let key = shared::host_key(&shared::hex(fingerprint), &outcome.addr, outcome.port);
         self.store.edit(|state| {
             // Only reaches a genuinely new host — `upsert_known_host` keeps an existing
@@ -593,9 +664,9 @@ impl Service {
             }
             true
         });
-        self.handles.console.set_pair(PairPhase::Paired { key });
         // It answered a handshake a moment ago, so the pip should not wait for the next sweep.
         self.last_sweep = None;
+        key
     }
 
     // ---- the host list -----------------------------------------------------------------
