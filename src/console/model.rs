@@ -855,9 +855,18 @@ impl Service {
         std::thread::Builder::new()
             .name("punktfunk-webos-console-speedtest".into())
             .spawn(move || {
-                // Raise `Measuring` once; it carries nothing, so the shell's takeover narrates the wait.
+                // `Measuring` raises the takeover; every poll after it feeds the shell's graph.
                 console.advance_speed(&key, SpeedPhase::Measuring);
-                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |_| {}) {
+                let probe =
+                    crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |o| {
+                        console.advance_speed(
+                            &key,
+                            SpeedPhase::Progress {
+                                kbps: o.throughput_kbps,
+                            },
+                        )
+                    });
+                match probe {
                     Ok(r) => {
                         let kbps = r.outcome.throughput_kbps;
                         tracing::info!(
