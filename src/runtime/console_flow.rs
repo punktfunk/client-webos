@@ -246,12 +246,23 @@ pub(super) fn run(
                             continue;
                         }
                     }
+                    // OK acts on release; held, it opens the focused card's menu.
+                    if is_ok(k) {
+                        if !repeat {
+                            console.ok(true, InputSource::Keys);
+                        }
+                        continue;
+                    }
                     if let Some(ev) = menu_event(k) {
                         if let Some(_pulse) = console.menu(ev, InputSource::Keys) {
                             // Nothing to feel: the remote has no haptics, and the pad's own
                             // rumble is the stream's lane (`session::pad_audio`).
                         }
                     }
+                }
+                Event::KeyUp { keycode: Some(k), .. } if is_ok(k) => {
+                    last_input = Instant::now();
+                    console.ok(false, InputSource::Keys);
                 }
                 Event::TextInput { text, .. } => {
                     last_input = Instant::now();
@@ -706,13 +717,18 @@ fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
         K::Down => MenuEvent::Move(MenuDir::Down),
         K::Left => MenuEvent::Move(MenuDir::Left),
         K::Right => MenuEvent::Move(MenuDir::Right),
-        K::Return | K::Return2 | K::KpEnter => MenuEvent::Confirm,
         K::Backspace | K::Escape | K::AcBack => MenuEvent::Back,
         K::Delete => MenuEvent::Secondary,
         K::PageUp => MenuEvent::JumpBack,
         K::PageDown => MenuEvent::JumpForward,
         _ => return None,
     })
+}
+
+/// The remote's OK and a keyboard's Enter: [`Console::ok`] takes both edges, never `menu_event`.
+fn is_ok(k: sdl3::keyboard::Keycode) -> bool {
+    use sdl3::keyboard::Keycode as K;
+    matches!(k, K::Return | K::Return2 | K::KpEnter)
 }
 
 /// The keys a text field wants while it is being edited.
