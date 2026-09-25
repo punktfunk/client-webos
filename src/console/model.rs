@@ -361,10 +361,18 @@ impl Service {
                 fp_hex,
                 host_name,
             } => self.speed_test(key, addr, port, &fp_hex, host_name),
-            // Nothing this client draws: it has no licences screen of its own, and the pad
-            // grants and rumble tests are Android's `InputDevice` API.
+            // No platform screen here, and the pad grants and rumble tests are Android's
+            // `InputDevice` API.
             ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
             ConsoleCmd::PadAction { action, .. } => tracing::info!("console: no pad action {action} on webOS"),
+            ConsoleCmd::UnpairHost { key } => self.unpair_host(&key),
+            ConsoleCmd::SavePreset { id, name, overrides } => self.save_preset(id, name, overrides),
+            ConsoleCmd::DeletePreset { id } => self.delete_preset(&id),
+            // The notices `build.rs` writes beside the crate, compiled in: the ipk ships no copy.
+            ConsoleCmd::LoadLicenses => self.handles.console.set_licenses(vec![pf_console_ui::LicenseSection {
+                heading: "Third-party software".into(),
+                text: include_str!("../../THIRD-PARTY-NOTICES.txt").into(),
+            }]),
             // Bind (or clear) one title's profile — the shell's "Profile" row on a
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
@@ -382,13 +390,18 @@ impl Service {
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
-            // Two commands with nothing to do here, each for its own reason:
+            // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
             //   to answer it. Wiring one needs the status shape, not just another request.
             // - `SetClipboard`: `KnownHost` carries no clipboard flag and the stream has no
             //   clipboard lane to gate, so the toggle would be a control that does nothing.
-            ConsoleCmd::RefreshRunning { .. } | ConsoleCmd::SetClipboard { .. } => {}
+            // - `PadTest`: the shell offers the input test on Android and Apple only.
+            // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
+            ConsoleCmd::RefreshRunning { .. }
+            | ConsoleCmd::SetClipboard { .. }
+            | ConsoleCmd::PadTest { .. }
+            | ConsoleCmd::PromptAnswer { .. } => {}
         }
     }
 
@@ -432,6 +445,52 @@ impl Service {
     /// A pinned card on or off, through the shared edit; the carousel re-reads on a change.
     fn set_pin(&self, key: &str, profile_id: String, pin: bool) {
         if self.store.edit(|state| shared::set_pin(state, key, profile_id, pin)) {
+            self.handles.console.set_hosts(self.rows());
+        }
+    }
+
+    /// Drop the pinned certificate and keep the record: the next connect asks for a PIN
+    /// again, and the row's key changes with its fingerprint.
+    fn unpair_host(&self, key: &str) {
+        let changed = self.store.edit(|state| {
+            let Some(i) = shared::find_known(&state.known_hosts, key) else {
+                tracing::warn!(%key, "console: unpair for an unknown host");
+                return false;
+            };
+            let host = &mut state.known_hosts[i];
+            host.fp_hex.clear();
+            host.paired = false;
+            true
+        });
+        if changed {
+            self.handles.console.set_hosts(self.rows());
+        }
+    }
+
+    /// Create or replace one profile in the document; the shell reads its catalog from there.
+    fn save_preset(&self, id: String, name: String, overrides: serde_json::Value) {
+        let overrides = serde_json::from_value(overrides).unwrap_or_default();
+        self.store.edit(|state| {
+            match state.profiles.iter_mut().find(|p| p.id == id) {
+                Some(p) => {
+                    p.name = name;
+                    p.overrides = overrides;
+                }
+                None => {
+                    let mut p = pf_client_core::presets::StreamPreset::new(name);
+                    p.id = id;
+                    p.overrides = overrides;
+                    state.profiles.push(p);
+                }
+            }
+            true
+        });
+        self.handles.console.set_hosts(self.rows());
+    }
+
+    /// Drop one profile through the shared edit; the carousel re-reads on a change.
+    fn delete_preset(&self, id: &str) {
+        if self.store.edit(|state| shared::delete_profile(state, id)) {
             self.handles.console.set_hosts(self.rows());
         }
     }

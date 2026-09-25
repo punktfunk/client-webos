@@ -47,11 +47,11 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Same revision for shared types.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "74d388de9a8e0655e556b4890a04d8e6f6fa3f84", features = ["quic", "chacha-aws-lc-rs"] }
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "74d388de9a8e0655e556b4890a04d8e6f6fa3f84", default-features = false }
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "d200f5c882d4c1faf19428447ab010c6fa58355f", features = ["quic", "chacha-aws-lc-rs"] }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "d200f5c882d4c1faf19428447ab010c6fa58355f", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "74d388de9a8e0655e556b4890a04d8e6f6fa3f84", default-features = false, features = ["gl"] }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "d200f5c882d4c1faf19428447ab010c6fa58355f", default-features = false, features = ["gl"] }
 sdl3 = { version = "0.20", default-features = false }
 # Disable pkg-config: buildroot mangles the SDL prefix outside its sysroot.
 # build.rs supplies SDL3_PREFIX for direct linking.
