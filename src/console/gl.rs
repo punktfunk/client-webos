@@ -12,8 +12,10 @@ use skia_safe::{ColorType, Surface};
 
 const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 
-/// Skia's resource budget: the shell's measured 1080p working-set floor.
-pub(crate) const GPU_CACHE_BYTES: usize = pf_console_ui::MIN_GPU_CACHE_BYTES;
+/// Skia's resource budget, a ceiling and not an allocation. A cover is ~1.3 MB uploaded with its
+/// mips, so a 100-title library is ~136 MB; under that the Games tab re-uploaded covers on
+/// every visit and scroll, 50–250 ms a burst on a G5.
+pub(crate) const GPU_CACHE_BYTES: usize = 192 << 20;
 
 pub(crate) struct ConsoleGl {
     // Field order is drop order: GPU resources must die before their GL context.
@@ -152,6 +154,11 @@ impl ConsoleGl {
     /// SDL still owns the swap.
     pub(crate) fn flush(&mut self) {
         self.context.flush_and_submit();
+    }
+
+    /// Submit, then wait until the GPU has drawn it.
+    pub(crate) fn finish(&mut self) {
+        self.context.flush_submit_and_sync_cpu();
     }
 
     pub(crate) fn warm_glass(

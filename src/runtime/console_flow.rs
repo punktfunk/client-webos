@@ -76,6 +76,7 @@ pub(super) fn run(
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
         deck: false,
+        tv: true,
         // This client does have another UI to fall back to, and the shell's own
         // "Controller-optimized UI" row is gated on saying so — turning it off there is the
         // way back to the cursor menus.
@@ -108,6 +109,18 @@ pub(super) fn run(
             return Ok(leave_for_classic(&store));
         }
     };
+    // Every tab drawn once, unseen, so the GL driver compiles their programs now rather than
+    // stalling 50–170 ms on the first visit to each. Waited out behind the splash: the tour
+    // queues ~50 frames of GPU work, which otherwise stalls the first real frames.
+    {
+        let warm = Instant::now();
+        let (w, h) = canvas.window().size_in_pixels();
+        if let Ok(surface) = console_gl.surface(w, h) {
+            console.warm_up(surface.canvas(), &Viewport::plain(w, h));
+        }
+        console_gl.finish();
+        tracing::info!("console: warmed the tabs in {} ms", warm.elapsed().as_millis());
+    }
     if let Some(notice) = notice {
         handles.console.set_notice(notice);
     }
@@ -145,6 +158,8 @@ pub(super) fn run(
         store::Settings,
         bool,
     )> = None;
+    // A Request access launch waiting on the host's approval — see `Service::request_access`.
+    let mut access: Option<Launch> = None;
 
     let outcome = 'ui: loop {
         let frame_start = Instant::now();
@@ -231,6 +246,14 @@ pub(super) fn run(
                 } => {
                     last_input = Instant::now();
                     let shift = keymod.intersects(sdl3::keyboard::Mod::LSHIFTMOD | sdl3::keyboard::Mod::RSHIFTMOD);
+                    // OK acts on release; held, it opens the focused card's menu. In a field it
+                    // presses the on-screen key: as a keyboard Enter it would close the field.
+                    if is_ok(k) {
+                        if !repeat {
+                            console.ok(true, InputSource::Keys);
+                        }
+                        continue;
+                    }
                     // While a field is being edited the shell wants keys, not menu moves —
                     // an arrow has to walk the caret rather than the row under it.
                     if console.editing() {
@@ -252,6 +275,10 @@ pub(super) fn run(
                             // rumble is the stream's lane (`session::pad_audio`).
                         }
                     }
+                }
+                Event::KeyUp { keycode: Some(k), .. } if is_ok(k) => {
+                    last_input = Instant::now();
+                    console.ok(false, InputSource::Keys);
                 }
                 Event::TextInput { text, .. } => {
                     last_input = Instant::now();
@@ -328,15 +355,6 @@ pub(super) fn run(
                     preset: profile,
                     request_access,
                 } => {
-                    if request_access {
-                        // The shell's park-and-wait handshake. This client's own path for it
-                        // lives in the pairing modal (`session::probe::request_access`) and has
-                        // no console screen yet, so say so rather than dial and hang.
-                        handles
-                            .console
-                            .set_notice("Pair this TV from the classic menus first".into());
-                        continue;
-                    }
                     let want = Launch {
                         addr,
                         port,
@@ -344,6 +362,20 @@ pub(super) fn run(
                         launch,
                         profile,
                     };
+                    if request_access {
+                        // The host parks this TV until its operator approves; the launch
+                        // follows once the knock comes back and the pairing is saved.
+                        let Some(pin) = shared::parse_fp(&want.fp_hex) else {
+                            console.session_phase(SessionPhase::Failed(
+                                "This host didn't say who it is, so pair it with its PIN.",
+                            ));
+                            continue;
+                        };
+                        tracing::info!("console: requesting access to {}:{}", want.addr, want.port);
+                        service.request_access(want.addr.clone(), want.port, pin);
+                        access = Some(want);
+                        continue;
+                    }
                     let where_ = format!("{title} on {}:{}", want.addr, want.port);
                     match start_launch(&store, identity, game_controller, want) {
                         Ok(started) => {
@@ -365,8 +397,9 @@ pub(super) fn run(
                     // Dropping the handle IS the cancel: the worker runs to completion and
                     // drops the `Connected` it built, which tears the session down cleanly —
                     // just a handshake later than the button press.
-                    if connect.take().is_some() {
+                    if connect.take().is_some() || access.take().is_some() {
                         tracing::info!("console: connect cancelled");
+                        service.cancel_access();
                         console.session_phase(SessionPhase::Ended(None));
                     }
                 }
@@ -381,6 +414,24 @@ pub(super) fn run(
                         tracing::warn!("console: clipboard: {e}");
                     }
                 }
+            }
+        }
+
+        // Approved: the host is paired now, so the launch the knock held back goes ahead.
+        if access.is_some() {
+            match service.drain_access() {
+                Some(Ok(())) => {
+                    let want = access.take().expect("just checked");
+                    match start_launch(&store, identity, game_controller, want) {
+                        Ok(started) => connect = Some(started),
+                        Err(e) => console.session_phase(SessionPhase::Failed(&format!("Couldn't start — {e}"))),
+                    }
+                }
+                Some(Err(e)) => {
+                    access = None;
+                    console.session_phase(SessionPhase::Failed(&e));
+                }
+                None => {}
             }
         }
 
@@ -706,7 +757,6 @@ fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
         K::Down => MenuEvent::Move(MenuDir::Down),
         K::Left => MenuEvent::Move(MenuDir::Left),
         K::Right => MenuEvent::Move(MenuDir::Right),
-        K::Return | K::Return2 | K::KpEnter => MenuEvent::Confirm,
         K::Backspace | K::Escape | K::AcBack => MenuEvent::Back,
         K::Delete => MenuEvent::Secondary,
         K::PageUp => MenuEvent::JumpBack,
@@ -715,7 +765,13 @@ fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     })
 }
 
-/// The keys a text field wants while it is being edited.
+/// The remote's OK and a keyboard's Enter: [`Console::ok`] takes both edges, never `menu_event`.
+fn is_ok(k: sdl3::keyboard::Keycode) -> bool {
+    use sdl3::keyboard::Keycode as K;
+    matches!(k, K::Return | K::Return2 | K::KpEnter)
+}
+
+/// The keys a text field wants while it is being edited. OK is not one: see [`is_ok`].
 fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
     use sdl3::keyboard::Keycode as K;
     Some(match k {
@@ -723,7 +779,6 @@ fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
         K::Right => Key::Right,
         K::Up => Key::Up,
         K::Down => Key::Down,
-        K::Return | K::Return2 | K::KpEnter => Key::Return,
         K::Space => Key::Space,
         K::Escape => Key::Escape,
         K::Backspace => Key::Backspace,

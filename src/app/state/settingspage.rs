@@ -392,6 +392,7 @@ impl App {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: true,
             fallback_ui: true,
             // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
             pyrowave_ok: false,
@@ -885,9 +886,14 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::GamepadUiMode
         | RowId::ReduceUiResolution => return None,
         // This page draws its own scope switcher and profile rows.
-        RowId::Preset(_) | RowId::NoPresets => "the page builds its own profile rows",
+        RowId::Preset(_) | RowId::NewPreset => "the page builds its own profile rows",
         // The client's own screens, not the kit's action rows.
         RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
+        RowId::Version => "the page draws its own version row",
+        // An action row into the shell's Games tab, which these menus do not have.
+        RowId::LibrarySections => "the shell's Games tab only",
+        // The shell's own host row; these menus list hosts their own way.
+        RowId::HostSort | RowId::HostGrouping => "the shell's home row only",
         // The kit answers `false` for WebOS, so a page entry would draw nothing.
         RowId::Decoder
         | RowId::Chroma444
@@ -895,7 +901,10 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
-        | RowId::Shortcuts => "the kit gates it off WebOS",
+        | RowId::Shortcuts
+        | RowId::BackgroundKeepAlive
+        | RowId::BackgroundTimeout
+        | RowId::StatsPosition => "the kit gates it off WebOS",
         // Android hardware, and one MediaCodec flag.
         RowId::LowLatency | RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => "Android-only in the kit",
         // `ConnectParams` takes ten settings-derived fields, and none of these keys has a

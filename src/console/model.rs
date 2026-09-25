@@ -110,7 +110,12 @@ pub(crate) struct Service {
     /// Deliberately NOT through `services::art`, which decodes to a card-sized pixmap for the
     /// old UI's tiny-skia compositor.
     art: Option<ArtReceiver>,
+    /// Per host, the covers already handed over decoded. The shell shares a decoded cover
+    /// between its screens, so a re-fetch sends these as bytes and spends no decode on them.
+    delivered: HashMap<(String, u16), Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     pair: Option<Receiver<PairOutcome>>,
+    /// A Request access knock in flight — see [`Service::request_access`].
+    access: Option<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
 }
@@ -132,7 +137,9 @@ impl Service {
             rows_dirty: true,
             games: None,
             art: None,
+            delivered: HashMap::new(),
             pair: None,
+            access: None,
             wake_cancel: None,
         }
     }
@@ -229,7 +236,8 @@ impl Service {
                 name: d.name.clone(),
                 addr: d.addr.clone(),
                 port: d.port,
-                fp_hex: String::new(),
+                // The advert's: it is what Request access pins while the host decides.
+                fp_hex: d.fp_hex.clone(),
                 paired: false,
                 saved: false,
                 // It is answering mDNS right now, which is the whole of what "online" claims.
@@ -353,10 +361,18 @@ impl Service {
                 fp_hex,
                 host_name,
             } => self.speed_test(key, addr, port, &fp_hex, host_name),
-            // Nothing this client draws: it has no licences screen of its own, and the pad
-            // grants and rumble tests are Android's `InputDevice` API.
+            // No platform screen here, and the pad grants and rumble tests are Android's
+            // `InputDevice` API.
             ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
             ConsoleCmd::PadAction { action, .. } => tracing::info!("console: no pad action {action} on webOS"),
+            ConsoleCmd::UnpairHost { key } => self.unpair_host(&key),
+            ConsoleCmd::SavePreset { id, name, overrides } => self.save_preset(id, name, overrides),
+            ConsoleCmd::DeletePreset { id } => self.delete_preset(&id),
+            // The notices `build.rs` writes beside the crate, compiled in: the ipk ships no copy.
+            ConsoleCmd::LoadLicenses => self.handles.console.set_licenses(vec![pf_console_ui::LicenseSection {
+                heading: "Third-party software".into(),
+                text: include_str!("../../THIRD-PARTY-NOTICES.txt").into(),
+            }]),
             // Bind (or clear) one title's profile — the shell's "Profile" row on a
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
@@ -374,13 +390,18 @@ impl Service {
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
-            // Two commands with nothing to do here, each for its own reason:
+            // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
             //   to answer it. Wiring one needs the status shape, not just another request.
             // - `SetClipboard`: `KnownHost` carries no clipboard flag and the stream has no
             //   clipboard lane to gate, so the toggle would be a control that does nothing.
-            ConsoleCmd::RefreshRunning { .. } | ConsoleCmd::SetClipboard { .. } => {}
+            // - `PadTest`: the shell offers the input test on Android and Apple only.
+            // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
+            ConsoleCmd::RefreshRunning { .. }
+            | ConsoleCmd::SetClipboard { .. }
+            | ConsoleCmd::PadTest { .. }
+            | ConsoleCmd::PromptAnswer { .. } => {}
         }
     }
 
@@ -424,6 +445,52 @@ impl Service {
     /// A pinned card on or off, through the shared edit; the carousel re-reads on a change.
     fn set_pin(&self, key: &str, profile_id: String, pin: bool) {
         if self.store.edit(|state| shared::set_pin(state, key, profile_id, pin)) {
+            self.handles.console.set_hosts(self.rows());
+        }
+    }
+
+    /// Drop the pinned certificate and keep the record: the next connect asks for a PIN
+    /// again, and the row's key changes with its fingerprint.
+    fn unpair_host(&self, key: &str) {
+        let changed = self.store.edit(|state| {
+            let Some(i) = shared::find_known(&state.known_hosts, key) else {
+                tracing::warn!(%key, "console: unpair for an unknown host");
+                return false;
+            };
+            let host = &mut state.known_hosts[i];
+            host.fp_hex.clear();
+            host.paired = false;
+            true
+        });
+        if changed {
+            self.handles.console.set_hosts(self.rows());
+        }
+    }
+
+    /// Create or replace one profile in the document; the shell reads its catalog from there.
+    fn save_preset(&self, id: String, name: String, overrides: serde_json::Value) {
+        let overrides = serde_json::from_value(overrides).unwrap_or_default();
+        self.store.edit(|state| {
+            match state.profiles.iter_mut().find(|p| p.id == id) {
+                Some(p) => {
+                    p.name = name;
+                    p.overrides = overrides;
+                }
+                None => {
+                    let mut p = pf_client_core::presets::StreamPreset::new(name);
+                    p.id = id;
+                    p.overrides = overrides;
+                    state.profiles.push(p);
+                }
+            }
+            true
+        });
+        self.handles.console.set_hosts(self.rows());
+    }
+
+    /// Drop one profile through the shared edit; the carousel re-reads on a change.
+    fn delete_preset(&self, id: &str) {
+        if self.store.edit(|state| shared::delete_profile(state, id)) {
             self.handles.console.set_hosts(self.rows());
         }
     }
@@ -486,6 +553,11 @@ impl Service {
         self.note_reachable(&loaded.host, loaded.port, true);
         self.handles.library.set_games(to_model(&games));
         self.handles.library.set_stale(Stale::No);
+        let delivered = self
+            .delivered
+            .entry((loaded.host.clone(), loaded.port))
+            .or_default()
+            .clone();
         self.art = Some(spawn_art(
             loaded.host,
             loaded.mgmt_port,
@@ -493,39 +565,45 @@ impl Service {
             self.identity.clone(),
             games,
             self.handles.library.clone(),
+            delivered,
         ));
     }
 
     fn drain_art(&mut self) {
         let Some(rx) = &self.art else { return };
-        // Time budget prevents render-thread decode of encoded posters (~50ms each). Count-based
-        // limit cannot stop mid-decode.
+        // A budget keeps one tick short when a whole shelf of covers lands at once.
         let started = Instant::now();
         loop {
             if started.elapsed() >= ART_DRAIN_BUDGET {
                 return;
             }
             let Some((id, item)) = rx.try_recv() else { return };
-            match item {
-                ArtItem::Decoded(poster) => self.handles.library.push_decoded(id, poster),
-                ArtItem::Encoded(bytes) => self.handles.library.push_art(id, bytes),
+            self.handles.library.push_art(id.clone(), item.bytes);
+            if let Some(poster) = item.decoded {
+                self.handles.library.push_decoded(id, poster);
             }
         }
     }
 
     // ---- pairing -----------------------------------------------------------------------
 
-    fn start_pair(&mut self, addr: String, port: u16, pin: &str, device_name: &str) {
+    /// What a new record learns from the row and the advert: name, management port, MACs, OS.
+    fn advert_facts(&self, addr: &str, port: u16) -> (String, Option<u16>, Vec<String>, String) {
         let name = self
             .rows()
             .into_iter()
             .find(|r| r.addr == addr && r.port == port)
-            .map_or_else(|| addr.clone(), |r| r.name);
+            .map_or_else(|| addr.to_string(), |r| r.name);
         let advert = self.discovered.iter().find(|d| d.addr == addr && d.port == port);
         let (mgmt_port, mac, os) = advert.map_or_else(
             || (None, Vec::new(), String::new()),
             |d| (d.mgmt_port, d.mac.clone(), d.os.clone()),
         );
+        (name, mgmt_port, mac, os)
+    }
+
+    fn start_pair(&mut self, addr: String, port: u16, pin: &str, device_name: &str) {
+        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
         self.handles.console.set_pair(PairPhase::Busy);
         let (tx, rx) = std::sync::mpsc::channel();
         self.pair = Some(rx);
@@ -562,15 +640,76 @@ impl Service {
         let Some(rx) = &self.pair else { return };
         let Ok(outcome) = rx.try_recv() else { return };
         self.pair = None;
-        let fingerprint = match outcome.result {
-            Ok(fp) => fp,
+        let fingerprint = match &outcome.result {
+            Ok(fp) => *fp,
             Err(e) => {
                 tracing::warn!("console: pairing failed: {e}");
-                self.handles.console.set_pair(PairPhase::Failed(e));
+                self.handles.console.set_pair(PairPhase::Failed(e.clone()));
                 return;
             }
         };
         tracing::info!("console: paired with {}:{}", outcome.addr, outcome.port);
+        let key = self.remember_paired(outcome, fingerprint);
+        self.handles.console.set_pair(PairPhase::Paired { key });
+    }
+
+    /// Knock on a host that parks unknown devices until its operator approves this TV,
+    /// holding it to the advertised `pin`. [`Self::drain_access`] saves the pairing.
+    pub(crate) fn request_access(&mut self, addr: String, port: u16, pin: [u8; 32]) {
+        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.access = Some(rx);
+        let identity = self.identity.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-access".into())
+            .spawn(move || {
+                let result = crate::session::probe::request_access(&addr, port, Some(pin), identity, budget::HOST_WAIT)
+                    .map_err(|e| crate::core::errors::friendly(&e));
+                let _ = tx.send(PairOutcome {
+                    name,
+                    addr,
+                    port,
+                    mgmt_port,
+                    mac,
+                    os,
+                    result,
+                });
+            })
+            .ok();
+    }
+
+    /// The knock's answer once there is one; `Ok` means the host is saved as paired.
+    pub(crate) fn drain_access(&mut self) -> Option<Result<(), String>> {
+        let outcome = match self.access.as_ref()?.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.access = None;
+                return Some(Err("Couldn't ask the host for access.".into()));
+            }
+        };
+        self.access = None;
+        match &outcome.result {
+            Ok(fp) => {
+                let fingerprint = *fp;
+                tracing::info!("console: access granted by {}:{}", outcome.addr, outcome.port);
+                self.remember_paired(outcome, fingerprint);
+                Some(Ok(()))
+            }
+            Err(e) => {
+                tracing::warn!("console: request access failed: {e}");
+                Some(Err(e.clone()))
+            }
+        }
+    }
+
+    /// Stop listening for the knock. The connection it holds ends on its own timeout.
+    pub(crate) fn cancel_access(&mut self) {
+        self.access = None;
+    }
+
+    /// Save a host this TV just paired with, returning its row key.
+    fn remember_paired(&mut self, outcome: PairOutcome, fingerprint: [u8; 32]) -> String {
         let key = shared::host_key(&shared::hex(fingerprint), &outcome.addr, outcome.port);
         self.store.edit(|state| {
             // Only reaches a genuinely new host — `upsert_known_host` keeps an existing
@@ -593,9 +732,9 @@ impl Service {
             }
             true
         });
-        self.handles.console.set_pair(PairPhase::Paired { key });
         // It answered a handshake a moment ago, so the pip should not wait for the next sweep.
         self.last_sweep = None;
+        key
     }
 
     // ---- the host list -----------------------------------------------------------------
@@ -855,9 +994,18 @@ impl Service {
         std::thread::Builder::new()
             .name("punktfunk-webos-console-speedtest".into())
             .spawn(move || {
-                // Raise `Measuring` once; it carries nothing, so the shell's takeover narrates the wait.
+                // `Measuring` raises the takeover; every poll after it feeds the shell's graph.
                 console.advance_speed(&key, SpeedPhase::Measuring);
-                match crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |_| {}) {
+                let probe =
+                    crate::session::probe::run_speed_probe(&addr, port, identity, pin, budget::SPEED_TEST, |o| {
+                        console.advance_speed(
+                            &key,
+                            SpeedPhase::Progress {
+                                kbps: o.throughput_kbps,
+                            },
+                        )
+                    });
+                match probe {
                     Ok(r) => {
                         let kbps = r.outcome.throughput_kbps;
                         tracing::info!(
@@ -962,11 +1110,12 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
 
 /// Fetch every title's poster in the background, encoded. One agent for the whole run, so the
 /// covers cost one mTLS handshake rather than one each.
-/// A cover on its way to the shelf: decoded here where there is a thread to spare, or still
-/// encoded when this one could not do it.
-enum ArtItem {
-    Decoded(pf_console_ui::DecodedPoster),
-    Encoded(Vec<u8>),
+/// A cover on its way to the shelf: its bytes, and decoded here where there is a thread to
+/// spare. The bytes go to the model either way, so a screen that missed the decoded copy, or
+/// evicted it, can decode its own.
+struct ArtItem {
+    bytes: Vec<u8>,
+    decoded: Option<pf_console_ui::DecodedPoster>,
 }
 
 /// Fetch every game's cover, and decode it here rather than on the thread that draws.
@@ -977,7 +1126,8 @@ enum ArtItem {
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
-/// reason returning to the host list felt slow.
+/// reason returning to the host list felt slow. A cover in `delivered` goes as bytes only: the
+/// shell already shares its decoded copy between screens.
 fn spawn_art(
     addr: String,
     mgmt: u16,
@@ -985,6 +1135,7 @@ fn spawn_art(
     identity: (String, String),
     games: Vec<GameEntry>,
     library: pf_console_ui::LibraryShared,
+    delivered: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> ArtReceiver {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1011,11 +1162,8 @@ fn spawn_art(
                 std::thread::sleep(Duration::from_millis(16));
             };
             let mut cache = crate::services::art::CoverCache::new(&addr, port);
-            for game in games {
-                if worker_cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                let bytes = crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
+            let mut fetch = |game: &GameEntry| {
+                crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
                     // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
                         .into_iter()
@@ -1030,16 +1178,54 @@ fn spawn_art(
                                 None
                             }
                         })
-                });
-                // A closed channel means the shelf moved on; stop fetching for it.
-                if let Some(bytes) = bytes {
-                    if worker_cancel.load(Ordering::Relaxed) {
-                        return;
+                })
+            };
+            // False once the shelf moved on: its channel closed, or it was cancelled.
+            let send = |id: String, bytes: Vec<u8>| {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let known = delivered.lock().is_ok_and(|d| d.contains(&id));
+                let item = if known {
+                    ArtItem { bytes, decoded: None }
+                } else {
+                    decode_at(bytes, library.art_scale().or(scale))
+                };
+                if item.decoded.is_some() {
+                    if let Ok(mut d) = delivered.lock() {
+                        d.insert(id.clone());
                     }
-                    if tx
-                        .send((game.id, decode_at(&bytes, library.art_scale().or(scale))))
-                        .is_err()
-                    {
+                }
+                tx.send((id, item)).is_ok()
+            };
+            let mut missed = Vec::new();
+            for game in games {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match fetch(&game) {
+                    Some(bytes) => {
+                        if !send(game.id, bytes) {
+                            return;
+                        }
+                    }
+                    None => missed.push(game),
+                }
+            }
+            // A cover no candidate answered gets one more pass once the rest are in: a Wi-Fi
+            // hiccup must not leave a title blank for the session.
+            missed.retain(|g| {
+                [&g.art.portrait, &g.art.header, &g.art.hero]
+                    .iter()
+                    .any(|p| p.is_some())
+            });
+            if missed.is_empty() {
+                return;
+            }
+            std::thread::sleep(ART_RETRY_AFTER);
+            for game in missed {
+                if let Some(bytes) = fetch(&game) {
+                    if !send(game.id, bytes) {
                         return;
                     }
                 }
@@ -1051,6 +1237,9 @@ fn spawn_art(
 
 /// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
+
+/// How long the covers that failed wait before their one retry.
+const ART_RETRY_AFTER: Duration = Duration::from_secs(3);
 
 /// Timeout for covers waiting on decode scale. If shelf never publishes, deliver encoded.
 const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
@@ -1072,10 +1261,10 @@ impl Drop for ArtReceiver {
     }
 }
 
-/// Decode at scale, or hand over encoded for shell to size.
-fn decode_at(bytes: &[u8], k: Option<f64>) -> ArtItem {
-    k.and_then(|k| pf_console_ui::decode_poster_off_thread(bytes, k))
-        .map_or_else(|| ArtItem::Encoded(bytes.to_vec()), ArtItem::Decoded)
+/// Decode at scale when the shelf has published one; the shell sizes the rest itself.
+fn decode_at(bytes: Vec<u8>, k: Option<f64>) -> ArtItem {
+    let decoded = k.and_then(|k| pf_console_ui::decode_poster_off_thread(&bytes, k));
+    ArtItem { bytes, decoded }
 }
 
 /// The wire catalog in the shell's terms.
