@@ -76,6 +76,7 @@ pub(super) fn run(
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
         deck: false,
+        tv: true,
         // This client does have another UI to fall back to, and the shell's own
         // "Controller-optimized UI" row is gated on saying so — turning it off there is the
         // way back to the cursor menus.
