@@ -141,17 +141,57 @@ pub(crate) fn get_json<T: serde::de::DeserializeOwned>(
 ) -> Result<T, LibraryError> {
     let agent = agent_within(identity, pin, budget)?;
     let url = format!("{}{path}", base_url(addr, mgmt_port));
-    let body = match agent.get(url.as_str()).call() {
-        Ok(mut resp) => resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| LibraryError::BadReply(format!("read body: {e}")))?,
-        Err(e) => return Err(classify(e)),
-    };
+    read_json(agent.get(url.as_str()).call())
+}
+
+/// One answer, decoded, with its failure sorted for the UI.
+fn read_json<T: serde::de::DeserializeOwned>(
+    answer: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<T, LibraryError> {
+    let body = answer
+        .map_err(classify)?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| LibraryError::BadReply(format!("read body: {e}")))?;
     serde_json::from_str(&body).map_err(|e| LibraryError::BadReply(format!("bad JSON: {e}")))
 }
 
-/// Fetch the host's library.
+/// One answer of `GET /api/v1/library/page`.
+#[derive(serde::Deserialize)]
+struct LibraryPage {
+    items: Vec<GameEntry>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+/// Titles a request: the host's ceiling for one page.
+const PAGE_LIMIT: u32 = 200;
+
+/// 500 pages of 200 is 100 000 titles. A host whose cursor never runs out stops here.
+const MAX_PAGES: usize = 500;
+
+/// The whole catalog, a page at a time, so no answer grows with the library. `get` takes the
+/// cursor of the page before. Any page failing fails the walk: half a catalog is not one.
+fn walk_pages(
+    mut get: impl FnMut(Option<&str>) -> Result<LibraryPage, LibraryError>,
+) -> Result<Vec<GameEntry>, LibraryError> {
+    let mut games = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let page = get(cursor.as_deref())?;
+        games.extend(page.items);
+        match page.next_cursor {
+            // A cursor that does not move would ask for the same page forever.
+            Some(next) if !next.is_empty() && cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
+            _ => break,
+        }
+    }
+    Ok(games)
+}
+
+/// Fetch the host's library, walked by `GET /api/v1/library/page` on one connection; `budget`
+/// bounds each page. A host older than that route refuses it on this lane, so `GET
+/// /api/v1/library` answers whole instead.
 pub(crate) fn fetch_games(
     addr: &str,
     mgmt_port: u16,
@@ -159,7 +199,23 @@ pub(crate) fn fetch_games(
     pin: Option<[u8; 32]>,
     budget: std::time::Duration,
 ) -> Result<Vec<GameEntry>, LibraryError> {
-    get_json(addr, mgmt_port, identity, pin, "/api/v1/library", budget)
+    let agent = agent_within(identity, pin, budget)?;
+    let base = base_url(addr, mgmt_port);
+    let walked = walk_pages(|cursor| {
+        let page = agent
+            .get(format!("{base}/api/v1/library/page"))
+            .query("limit", PAGE_LIMIT.to_string());
+        read_json(match cursor {
+            Some(c) => page.query("cursor", c).call(),
+            None => page.call(),
+        })
+    });
+    match walked {
+        Err(LibraryError::NotPaired | LibraryError::Http(404)) => {
+            read_json(agent.get(format!("{base}/api/v1/library")).call())
+        }
+        walked => walked,
+    }
 }
 
 /// One `fetch_games` result with `host/port/mgmt_port` (so `drain_games` can start art loading).
@@ -347,5 +403,59 @@ impl rustls::client::danger::ServerCertVerifier for PinVerify {
         rustls::crypto::aws_lc_rs::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page(ids: &[&str], next: Option<&str>) -> Result<LibraryPage, LibraryError> {
+        let items: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "title": id, "store": "custom", "hidden": false}))
+            .collect();
+        let body = serde_json::json!({"items": items, "next_cursor": next, "total": 4, "platforms": []});
+        Ok(serde_json::from_value(body).expect("a page decodes"))
+    }
+
+    fn ids(games: &[GameEntry]) -> Vec<&str> {
+        games.iter().map(|g| g.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_walk_follows_the_cursor_to_the_last_page() {
+        let mut asked = Vec::new();
+        let games = walk_pages(|cursor| {
+            asked.push(cursor.map(str::to_string));
+            match cursor {
+                None => page(&["a", "b"], Some("c1")),
+                Some("c1") => page(&["c"], Some("c2")),
+                _ => page(&["d"], None),
+            }
+        })
+        .expect("the walk ends");
+        assert_eq!(ids(&games), ["a", "b", "c", "d"]);
+        assert_eq!(asked, [None, Some("c1".into()), Some("c2".into())]);
+    }
+
+    #[test]
+    fn a_walk_ends_on_a_cursor_that_does_not_move() {
+        let mut calls = 0;
+        let games = walk_pages(|_| {
+            calls += 1;
+            page(&["a"], Some("stuck"))
+        })
+        .expect("the walk ends");
+        assert_eq!((calls, games.len()), (2, 2));
+    }
+
+    #[test]
+    fn a_failed_page_fails_the_walk() {
+        let walked = walk_pages(|cursor| match cursor {
+            None => page(&["a"], Some("c1")),
+            Some(_) => Err(LibraryError::Http(500)),
+        });
+        assert!(matches!(walked, Err(LibraryError::Http(500))));
     }
 }
