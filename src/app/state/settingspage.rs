@@ -151,6 +151,7 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
             push(Row::Kit(K::Aspect), Some("Resolution"));
             push(Row::Kit(K::Resolution), None);
             push(Row::Kit(K::Refresh), None);
+            push(Row::Kit(K::Compositor), None);
             push(Row::Kit(K::Bitrate), Some("Quality"));
             push(Row::Kit(K::Codec), None);
             push(Row::Kit(K::Hdr), None);
@@ -209,6 +210,7 @@ fn overlay_field(id: RowId) -> Option<&'static str> {
     Some(match id {
         RowId::Resolution | RowId::Aspect => "resolution",
         RowId::Refresh => "refresh_hz",
+        RowId::Compositor => "compositor",
         RowId::Bitrate => "bitrate_kbps",
         RowId::Codec => "codec",
         RowId::Hdr => "hdr_enabled",
@@ -234,6 +236,7 @@ fn overridden(o: &SettingsOverlay, id: RowId) -> bool {
     match id {
         RowId::Resolution | RowId::Aspect => o.width.is_some() || o.height.is_some() || o.match_window.is_some(),
         RowId::Refresh => o.refresh_hz.is_some(),
+        RowId::Compositor => o.compositor.is_some(),
         RowId::Bitrate => o.bitrate_kbps.is_some(),
         RowId::Codec => o.codec.is_some(),
         RowId::Hdr => o.hdr_enabled.is_some(),
@@ -854,8 +857,7 @@ impl App {
 /// Why a shared row is on no page, or `None` when it is on one.
 ///
 /// Exhaustive on purpose. A `RowId` added upstream is a build error here, so a new setting
-/// gets a decision instead of silently never appearing — which is how Compositor and Render
-/// scale stayed off the TV.
+/// gets a decision instead of silently never appearing.
 #[cfg(test)]
 fn absence(id: RowId) -> Option<&'static str> {
     Some(match id {
@@ -863,6 +865,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         RowId::Aspect
         | RowId::Resolution
         | RowId::Refresh
+        | RowId::Compositor
         | RowId::Bitrate
         | RowId::Codec
         | RowId::Hdr
@@ -898,10 +901,9 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Shortcuts => "the kit gates it off WebOS",
         // Android hardware, and one MediaCodec flag.
         RowId::LowLatency | RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => "Android-only in the kit",
-        // `ConnectParams` takes ten settings-derived fields, and none of these keys has a
-        // reader anywhere in this crate. A row would write a value nothing ever sends.
-        RowId::Compositor
-        | RowId::RenderScale
+        // None of these keys has a reader anywhere in this crate. A row would write a value
+        // nothing ever sends.
+        RowId::RenderScale
         | RowId::AudioFormat
         | RowId::KeepHostAudio
         | RowId::Mic

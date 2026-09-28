@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use punktfunk_core::config::Mode;
+use punktfunk_core::config::{CompositorPref, Mode};
 
 use crate::app::hero::Connect;
 use crate::app::{App, HomeFocus, Screen};
@@ -145,6 +145,7 @@ fn spawn_connect(
                     // black launch scrim. Waiting on an operator is the pairing flow's job.
                     timeout: crate::services::budget::PROBE,
                     codec: settings.codec_pref(),
+                    compositor: CompositorPref::from_name(&settings.compositor).unwrap_or(CompositorPref::Auto),
                     gamepad_type: settings.gamepad_type(),
                     cursor_capture: settings.cursor_capture(),
                     // `true` deliberately, whatever is attached right now: this is the SESSION-level
