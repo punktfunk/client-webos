@@ -398,10 +398,13 @@ impl Service {
             //   clipboard lane to gate, so the toggle would be a control that does nothing.
             // - `PadTest`: the shell offers the input test on Android and Apple only.
             // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
+            // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
+            //   offers it.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PadTest { .. }
-            | ConsoleCmd::PromptAnswer { .. } => {}
+            | ConsoleCmd::PromptAnswer { .. }
+            | ConsoleCmd::EndGame { .. } => {}
         }
     }
 
@@ -1290,6 +1293,7 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             genres: Vec::new(),
             // Host state, and this client never asks for it — see `ConsoleCmd::RefreshRunning`.
             running: false,
+            endable: false,
         })
         .collect()
 }

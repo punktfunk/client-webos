@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use punktfunk_core::client::{NativeClient, ProbeOutcome};
-use punktfunk_core::config::{CompositorPref, Mode};
+use punktfunk_core::config::Mode;
 use punktfunk_core::quic;
 
 /// Opens a handshake-only session: no video backend loads, no pump thread spawns, nothing is
@@ -35,26 +35,14 @@ fn handshake_only(
         height: 720,
         refresh_hz: 60,
     };
-    NativeClient::connect(
-        host,
-        port,
-        mode,
-        CompositorPref::Auto,
-        punktfunk_core::config::GamepadPref::Auto,
+    NativeClient::connect(punktfunk_core::client::ConnectParams {
         bitrate_kbps,
-        quic::VIDEO_CAP_CHACHA20,
-        2, // stereo baseline
+        video_caps: quic::VIDEO_CAP_CHACHA20,
         video_codecs,
-        0,     // no preferred codec
-        None,  // no HDR display metadata: nothing presents
-        0,     // client_caps: nothing renders a cursor
-        false, // frame_parts: whole AUs (see `super::connect`)
-        None,  // no launch
-        None,  // name: keep the host's fingerprint-derived label (see `super::connect`)
         pin,
-        Some(identity),
-        timeout,
-    )
+        identity: Some(identity),
+        ..punktfunk_core::client::ConnectParams::new(host, port, mode, timeout)
+    })
 }
 
 /// The no-PIN "request access" trust step: connect presenting our identity, which a host

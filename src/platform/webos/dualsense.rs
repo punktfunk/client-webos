@@ -391,6 +391,7 @@ impl Feedback {
     /// advertise `CLIENT_CAP_PAD_AUDIO` now, so a host can send it, but every audio report already
     /// re-asserts routing and the pad honours volume only in `0x3D..=0x64` — [`SPEAKER_VOLUME`]
     /// sits at that ceiling. Dropped until a host asks for something that range can express.
+    /// `MicLed` is dropped because the report this client sends has no mic-LED field.
     pub fn apply(&mut self, event: &HidOutput) {
         match event {
             HidOutput::Led { r, g, b, .. } => self.state.lightbar = Some((*r, *g, *b)),
@@ -418,7 +419,10 @@ impl Feedback {
                     );
                 }
             }
-            HidOutput::TrackpadHaptic { .. } | HidOutput::HidRaw { .. } | HidOutput::AudioCtl { .. } => return,
+            HidOutput::TrackpadHaptic { .. }
+            | HidOutput::HidRaw { .. }
+            | HidOutput::AudioCtl { .. }
+            | HidOutput::MicLed { .. } => return,
         }
         self.mailbox.replace(self.state);
     }

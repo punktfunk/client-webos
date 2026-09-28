@@ -854,7 +854,7 @@ mod tests {
     /// The lens is lighter than the deep disc, and the box's corners stay clear.
     #[test]
     fn the_mark_is_two_discs_and_a_lens() {
-        theme::set_ink(pf_console_ui::theme::Ink::of(pf_console_ui::library::palette("violet")));
+        theme::set_ink(pf_console_ui::theme::Ink::of(pf_console_ui::palette::palette("violet")));
         let mut surface = skia_safe::surfaces::raster_n32_premul((60, 60)).unwrap();
         surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 1.0));
         brand::draw(surface.canvas(), 6.0, 6.0, 48.0, 1.0);

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use pf_client_core::presets::{SettingsOverlay, StreamPreset};
 use pf_client_core::trust;
-use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
+use pf_console_ui::settings_rows::{self as engine, Ctx, Device, RowId};
 use pf_console_ui::widgets::{Control, RowSpec};
 
 use crate::app::nav::ScreenKey;
@@ -386,21 +386,24 @@ impl App {
         };
         let library = pf_console_ui::LibraryShared::default();
         let pads = self.kit_pads();
-        let mut ctx = Ctx {
-            hosts: &[],
-            library: &library,
-            settings,
-            store: &store,
+        let device = Device {
             platform: pf_console_ui::Platform::WebOS,
             screen: None,
-            pads: &pads,
             deck: false,
             tv: true,
             fallback_ui: true,
             // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
             pyrowave_ok: false,
             av1_ok: false,
-            device_name: "webOS TV",
+            name: "webOS TV".into(),
+        };
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings,
+            store: &store,
+            pads: &pads,
+            device: &device,
             t: 0.0,
         };
         f(&mut ctx)
@@ -904,6 +907,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
+        | RowId::FullscreenMode
         | RowId::Shortcuts
         | RowId::BackgroundKeepAlive
         | RowId::BackgroundTimeout
@@ -927,7 +931,6 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::FollowOsTheme
         | RowId::ReduceMotion
         | RowId::LibraryView
-        | RowId::LibraryCollections
         | RowId::StartIn => "not read by this client — see `runtime`'s `ConnectParams`",
     })
 }

@@ -333,7 +333,7 @@ impl App {
     /// Publish the kit's palette for this frame from the shared document's `ui_palette` —
     /// the same row every gamepad surface reads, so the two UIs cannot differ in colour.
     pub(crate) fn apply_ink(&self) {
-        let palette = pf_console_ui::library::palette(&self.settings_ui.settings.ui_palette);
+        let palette = pf_console_ui::palette::palette(&self.settings_ui.settings.ui_palette);
         crate::app::draw::set_current_palette(palette.id);
         pf_console_ui::theme::set_ink(pf_console_ui::theme::Ink::of(palette));
     }

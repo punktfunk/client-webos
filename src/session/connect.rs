@@ -240,35 +240,23 @@ impl Negotiated {
 
 /// Runs the handshake. Everything wire-facing has already been clamped by [`Negotiated::clamp`].
 fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient> {
-    NativeClient::connect_with_audio_format(
-        &params.host,
-        params.port,
-        params.mode,
-        params.compositor,
-        // Session-default pad kind. A per-pad `InputKind::GamepadArrival` could override this
-        // for mixed setups, but this client drives one pad (index 0), for which the handshake
-        // default is exactly equivalent — and it also reaches hosts too old to advertise
-        // `HOST_CAP_GAMEPAD_STATE`.
-        params.gamepad_type.to_core(),
-        params.bitrate_kbps,
-        negotiated.video_caps,
-        // Requested only — the host clamps to what it can capture, and
-        // `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`,
-        // never from this.
-        negotiated.audio_channels,
-        // Opus at 48 kHz/16-bit: this client has no lossless ask.
-        0,
-        0,
-        // The standard coupling on every session: libopus here decodes either, and NDL's plane
-        // takes only this one. A host that answers legacy is re-encoded (`session::audio`).
-        punktfunk_core::audio::AudioLayout::Standard,
-        // The kit offers no Picture fit row on the TV; `Fit` keeps the Hello unchanged.
-        punktfunk_core::video_fit::VideoFit::Fit,
-        negotiated.video_codecs,
-        negotiated.preferred_codec,
-        negotiated.display_hdr,
-        // client_caps: see `store::Settings::cursor_capture` for the on/off split.
-        (if params.cursor_capture {
+    NativeClient::connect(punktfunk_core::client::ConnectParams {
+        compositor: params.compositor,
+        // Session-default pad kind; this client drives one pad (index 0), so it equals a
+        // per-pad arrival and also reaches hosts without `HOST_CAP_GAMEPAD_STATE`.
+        gamepad: params.gamepad_type.to_core(),
+        bitrate_kbps: params.bitrate_kbps,
+        video_caps: negotiated.video_caps,
+        // Requested only: `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`.
+        audio_channels: negotiated.audio_channels,
+        // libopus here decodes either coupling, and NDL's plane takes only this one. A host that
+        // answers legacy is re-encoded (`session::audio`).
+        audio_layout: punktfunk_core::audio::AudioLayout::Standard,
+        video_codecs: negotiated.video_codecs,
+        preferred_codec: negotiated.preferred_codec,
+        display_hdr: negotiated.display_hdr,
+        // See `store::Settings::cursor_capture` for the on/off split.
+        client_caps: (if params.cursor_capture {
             0
         } else {
             quic::CLIENT_CAP_CURSOR
@@ -277,21 +265,13 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         } else {
             0
         },
-        // NDL takes complete AUs: multi-slice still overlaps host encode and transport, but the
-        // reassembler waits for every slice before this submit-only decoder sees the picture.
-        false,
-        params.launch.clone(),
-        // Device name for the host's pending-approval list. `None` keeps the host's
-        // fingerprint-derived label ("device abcd1234"), i.e. exactly the behaviour before
-        // core gained this parameter — sending a real TV name is a separate, user-visible
-        // change and does not belong in a dependency bump.
-        None,
-        params.pin,
-        Some(params.identity.clone()),
-        params.timeout,
+        // NDL takes complete AUs, so `frame_parts` stays off.
+        launch: params.launch.clone(),
+        pin: params.pin,
+        identity: Some(params.identity.clone()),
         // Uncancelable: the connect has its own thread and the caller joins it.
-        None,
-    )
+        ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, params.mode, params.timeout)
+    })
     .context("connect")
 }
 

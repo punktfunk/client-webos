@@ -336,7 +336,7 @@ mod tests {
         use crate::app::view::hostpower;
         use crate::services::store::ExitAction;
         use skia_safe::{AlphaType, Color4f, ColorType, ImageInfo};
-        theme::set_ink(theme::Ink::of(pf_console_ui::library::palette("violet")));
+        theme::set_ink(theme::Ink::of(pf_console_ui::palette::palette("violet")));
         let fonts = theme::build_fonts().unwrap();
         let (w, h) = (1920u32, 1080u32);
         let k = super::super::scale(h);

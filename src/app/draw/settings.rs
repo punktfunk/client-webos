@@ -166,7 +166,7 @@ mod tests {
     /// default document; `PF_WEBOS_DUMP` writes the PNG.
     #[test]
     fn display_page_renders_its_column_and_rows() {
-        theme::set_ink(Ink::of(pf_console_ui::library::palette("violet")));
+        theme::set_ink(Ink::of(pf_console_ui::palette::palette("violet")));
         let fonts = theme::build_fonts().unwrap();
         let (w, h) = (1920u32, 1080u32);
         let k = super::super::scale(h);
