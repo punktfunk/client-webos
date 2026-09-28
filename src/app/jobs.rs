@@ -33,6 +33,8 @@ pub(crate) struct Jobs {
     pub(crate) speed_test: Option<Receiver<SpeedTestMsg>>,
     /// Delivers the background log upload's status line; `None` when no upload is in flight.
     pub(crate) send_logs: Option<Receiver<Result<String, String>>>,
+    /// The card menu's End game: the title and the host's answer.
+    pub(crate) end_game: Option<Receiver<(String, crate::services::game::GameEnd)>>,
     /// Answers [`App::start_root_probe`].
     pub(crate) rooted: Option<Receiver<bool>>,
     /// Answers [`App::start_power_probe`] — whether this pairing may drive the host's power.
@@ -98,6 +100,7 @@ impl crate::app::App {
         dirty |= self.drain_power_action();
         dirty |= self.drain_speed_test();
         dirty |= self.drain_send_logs();
+        dirty |= self.drain_end_game();
         self.tick_reachability();
         dirty |= self.drain_reachability();
         dirty

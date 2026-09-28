@@ -66,11 +66,13 @@ impl App {
             return false;
         }
         let running: std::collections::HashSet<String> = loaded.running.into_iter().collect();
-        if running == self.library.running {
+        let endable: std::collections::HashSet<String> = loaded.endable.into_iter().collect();
+        if running == self.library.running && endable == self.library.endable {
             return false;
         }
         tracing::debug!("running: {} title(s) up on the selected host", running.len());
         self.library.running = running;
+        self.library.endable = endable;
         true
     }
 }

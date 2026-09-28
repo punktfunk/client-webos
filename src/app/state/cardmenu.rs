@@ -26,6 +26,9 @@ pub(crate) enum CardMenuRow {
     Profile,
     /// Creates-or-opens the bound profile in profile scope.
     Settings,
+    /// Ends the title on the host. Only on a card this device launched and the host runs; it
+    /// arms on the first press, since unsaved progress is lost.
+    EndGame,
 }
 
 /// The line shown once, on the release that added this menu, when the first library lands: the
@@ -60,6 +63,8 @@ pub struct CardMenu {
     /// (see [`App::swap_card_in_collection`]). Drives the rest of the collection's dim, the
     /// collapse of the panel to a bare title strip, and the commit on the way out.
     pub moved: bool,
+    /// End game was pressed once; the next press on it ends the game, a move disarms.
+    pub armed: bool,
 }
 
 impl CardMenu {
@@ -69,6 +74,7 @@ impl CardMenu {
         if row != self.focused {
             self.focus_anim = Some(Instant::now());
             self.focused = row;
+            self.armed = false;
         }
     }
 
@@ -130,6 +136,7 @@ impl App {
             since: Instant::now(),
             risen: false,
             moved: false,
+            armed: false,
         });
     }
 
@@ -254,6 +261,15 @@ impl App {
                 self.close_card_menu();
                 self.move_focused_card(None, screen_w, screen_h);
             }
+            (MenuEvent::Confirm, Some(CardMenuRow::EndGame)) if !menu.armed => {
+                if let Some(menu) = self.card_menu.as_mut() {
+                    menu.armed = true;
+                }
+            }
+            (MenuEvent::Confirm, Some(CardMenuRow::EndGame)) => {
+                self.close_card_menu();
+                self.start_end_game(pin_id, title);
+            }
             // Left/Right move the card itself inside its collection while the menu is up.
             // Where it cannot (Library, or either end of the block) the press dip stands in
             // for a nudge, so "it stopped" and "it ignored me" stay tellable apart — and the
@@ -266,6 +282,39 @@ impl App {
             // Secondary would otherwise forget a host from under an open menu.
             _ => self.close_card_menu(),
         }
+        true
+    }
+}
+
+impl App {
+    /// Asks the selected host to end `pin_id` on a worker; [`App::drain_end_game`] reports it.
+    fn start_end_game(&mut self, pin_id: String, title: String) {
+        let Some(known) = self.selected_known_host() else {
+            return;
+        };
+        let (addr, pin) = (known.addr.clone(), known.fingerprint());
+        let mgmt = known.mgmt_port.unwrap_or(crate::services::library::DEFAULT_MGMT_PORT);
+        let identity = self.identity.clone();
+        self.set_home_status(Some(format!("Ending {title}\u{2026}")), false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.jobs.end_game = Some(rx);
+        std::thread::spawn(move || {
+            let outcome =
+                crate::services::game::end(&addr, mgmt, &identity, pin, &pin_id, crate::services::budget::REQUEST);
+            let _ = tx.send((title, outcome));
+        });
+    }
+
+    /// The host's answer to End game: the status line says it, and the running dots are
+    /// asked again at once rather than after the poll interval.
+    pub(crate) fn drain_end_game(&mut self) -> bool {
+        let Some(rx) = &self.jobs.end_game else { return false };
+        let Ok((title, outcome)) = rx.try_recv() else {
+            return false;
+        };
+        self.jobs.end_game = None;
+        self.set_home_status(Some(outcome.notice(&title)), false);
+        self.library.running_last = None;
         true
     }
 }

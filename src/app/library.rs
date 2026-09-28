@@ -31,6 +31,8 @@ pub(crate) struct Library {
     pub(crate) art: HashMap<String, CardArt>,
     /// Running game ids from last status poll. Queried per visible card per frame.
     pub(crate) running: HashSet<String>,
+    /// Of `running`, what this device launched: the card menu offers End game on these.
+    pub(crate) endable: HashSet<String>,
     /// Poll timestamp. `None` re-arms immediately on host switch.
     pub(crate) running_last: Option<std::time::Instant>,
 }
@@ -207,6 +209,7 @@ impl Library {
         self.clear_groups();
         self.art.clear();
         self.running.clear();
+        self.endable.clear();
         self.running_last = None;
     }
 }
