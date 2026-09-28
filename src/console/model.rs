@@ -106,13 +106,10 @@ pub(crate) struct Service {
     rows_revision: Option<u64>,
     rows_dirty: bool,
     games: Option<Receiver<GamesLoaded>>,
-    /// Covers as they arrive, decoded on the fetch thread where possible — see [`spawn_art`].
-    /// Deliberately NOT through `services::art`, which decodes to a card-sized pixmap for the
-    /// old UI's tiny-skia compositor.
+    /// Covers as they arrive, encoded — see [`spawn_art`]. Deliberately NOT through
+    /// `services::art`, which decodes to a card-sized pixmap for the old UI's tiny-skia
+    /// compositor.
     art: Option<ArtReceiver>,
-    /// Per host, the covers already handed over decoded. The shell shares a decoded cover
-    /// between its screens, so a re-fetch sends these as bytes and spends no decode on them.
-    delivered: HashMap<(String, u16), Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     pair: Option<Receiver<PairOutcome>>,
     /// A Request access knock in flight — see [`Service::request_access`].
     access: Option<Receiver<PairOutcome>>,
@@ -137,7 +134,6 @@ impl Service {
             rows_dirty: true,
             games: None,
             art: None,
-            delivered: HashMap::new(),
             pair: None,
             access: None,
             wake_cancel: None,
@@ -556,19 +552,12 @@ impl Service {
         self.note_reachable(&loaded.host, loaded.port, true);
         self.handles.library.set_games(to_model(&games));
         self.handles.library.set_stale(Stale::No);
-        let delivered = self
-            .delivered
-            .entry((loaded.host.clone(), loaded.port))
-            .or_default()
-            .clone();
         self.art = Some(spawn_art(
             loaded.host,
             loaded.mgmt_port,
             loaded.port,
             self.identity.clone(),
             games,
-            self.handles.library.clone(),
-            delivered,
         ));
     }
 
@@ -580,11 +569,8 @@ impl Service {
             if started.elapsed() >= ART_DRAIN_BUDGET {
                 return;
             }
-            let Some((id, item)) = rx.try_recv() else { return };
-            self.handles.library.push_art(id.clone(), item.bytes);
-            if let Some(poster) = item.decoded {
-                self.handles.library.push_decoded(id, poster);
-            }
+            let Some((id, bytes)) = rx.try_recv() else { return };
+            self.handles.library.push_art(id, bytes);
         }
     }
 
@@ -1111,35 +1097,16 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
         .ok();
 }
 
-/// Fetch every title's poster in the background, encoded. One agent for the whole run, so the
-/// covers cost one mTLS handshake rather than one each.
-/// A cover on its way to the shelf: its bytes, and decoded here where there is a thread to
-/// spare. The bytes go to the model either way, so a screen that missed the decoded copy, or
-/// evicted it, can decode its own.
-struct ArtItem {
-    bytes: Vec<u8>,
-    decoded: Option<pf_console_ui::DecodedPoster>,
-}
-
-/// Fetch every game's cover, and decode it here rather than on the thread that draws.
+/// Fetch every title's poster in the background and hand the shell its bytes. One agent for
+/// the whole run, so the covers cost one mTLS handshake rather than one each.
 ///
-/// A full-size PNG cover costs ~90 ms on a CX — five frames — and the shelf used to stop for
-/// each one. This thread is already waiting on the network, so the work lands where nothing is
-/// watching. Wait for the shelf's decode scale; bound pending results with `sync_channel`.
+/// The shell decodes on its own worker, only the covers near the cursor, and caps how many it
+/// holds. A cover decoded here bypasses that cap, so a large library would sit in memory whole.
 ///
 /// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
 /// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
-/// reason returning to the host list felt slow. A cover in `delivered` goes as bytes only: the
-/// shell already shares its decoded copy between screens.
-fn spawn_art(
-    addr: String,
-    mgmt: u16,
-    port: u16,
-    identity: (String, String),
-    games: Vec<GameEntry>,
-    library: pf_console_ui::LibraryShared,
-    delivered: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-) -> ArtReceiver {
+/// reason returning to the host list felt slow.
+fn spawn_art(addr: String, mgmt: u16, port: u16, identity: (String, String), games: Vec<GameEntry>) -> ArtReceiver {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancelled.clone();
@@ -1149,20 +1116,6 @@ fn spawn_art(
             let pin = None;
             let Ok(agent) = library::agent(&identity, pin) else {
                 return;
-            };
-            let waited = Instant::now();
-            let scale = loop {
-                if worker_cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                if let Some(scale) = library.art_scale() {
-                    break Some(scale);
-                }
-                if waited.elapsed() >= ART_SCALE_WAIT {
-                    tracing::debug!("console: art scale unavailable; delivering encoded covers");
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(16));
             };
             let mut cache = crate::services::art::CoverCache::new(&addr, port);
             let mut fetch = |game: &GameEntry| {
@@ -1184,23 +1137,8 @@ fn spawn_art(
                 })
             };
             // False once the shelf moved on: its channel closed, or it was cancelled.
-            let send = |id: String, bytes: Vec<u8>| {
-                if worker_cancel.load(Ordering::Relaxed) {
-                    return false;
-                }
-                let known = delivered.lock().is_ok_and(|d| d.contains(&id));
-                let item = if known {
-                    ArtItem { bytes, decoded: None }
-                } else {
-                    decode_at(bytes, library.art_scale().or(scale))
-                };
-                if item.decoded.is_some() {
-                    if let Ok(mut d) = delivered.lock() {
-                        d.insert(id.clone());
-                    }
-                }
-                tx.send((id, item)).is_ok()
-            };
+            let send =
+                |id: String, bytes: Vec<u8>| !worker_cancel.load(Ordering::Relaxed) && tx.send((id, bytes)).is_ok();
             let mut missed = Vec::new();
             for game in games {
                 if worker_cancel.load(Ordering::Relaxed) {
@@ -1244,16 +1182,13 @@ const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
 /// How long the covers that failed wait before their one retry.
 const ART_RETRY_AFTER: Duration = Duration::from_secs(3);
 
-/// Timeout for covers waiting on decode scale. If shelf never publishes, deliver encoded.
-const ART_SCALE_WAIT: Duration = Duration::from_secs(5);
-
 struct ArtReceiver {
-    rx: Receiver<(String, ArtItem)>,
+    rx: Receiver<(String, Vec<u8>)>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl ArtReceiver {
-    fn try_recv(&self) -> Option<(String, ArtItem)> {
+    fn try_recv(&self) -> Option<(String, Vec<u8>)> {
         self.rx.try_recv().ok()
     }
 }
@@ -1262,12 +1197,6 @@ impl Drop for ArtReceiver {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
     }
-}
-
-/// Decode at scale when the shelf has published one; the shell sizes the rest itself.
-fn decode_at(bytes: Vec<u8>, k: Option<f64>) -> ArtItem {
-    let decoded = k.and_then(|k| pf_console_ui::decode_poster_off_thread(&bytes, k));
-    ArtItem { bytes, decoded }
 }
 
 /// The wire catalog in the shell's terms.
