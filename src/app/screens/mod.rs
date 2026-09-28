@@ -36,7 +36,8 @@ pub(crate) const fn is_confirm(screen: Screen) -> bool {
         | Screen::RenameCollection
         | Screen::SettingsPage
         | Screen::PickProfile
-        | Screen::RenameProfile => false,
+        | Screen::RenameProfile
+        | Screen::CustomSize => false,
     }
 }
 
@@ -78,6 +79,7 @@ pub(crate) const fn is_list_modal(screen: Screen) -> bool {
         | Screen::ResetHdrCalibration
         | Screen::SettingsPage
         | Screen::RenameProfile
+        | Screen::CustomSize
         | Screen::DeleteProfile => false,
     }
 }

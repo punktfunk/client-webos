@@ -413,9 +413,12 @@ impl App {
             | Screen::ResetHdrCalibration
             | Screen::DeleteProfile => {}
             // Nothing clickable but the close button (handled above).
-            Screen::AddHost | Screen::EditHost | Screen::RenameCollection | Screen::RenameProfile | Screen::About => {
-                return None
-            }
+            Screen::AddHost
+            | Screen::EditHost
+            | Screen::RenameCollection
+            | Screen::RenameProfile
+            | Screen::CustomSize
+            | Screen::About => return None,
         }
         self.press(screen_w, screen_h)
     }

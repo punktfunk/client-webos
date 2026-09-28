@@ -17,7 +17,9 @@ impl App {
         // WHY: without a MAC, don't auto-send — show interactive explanation instead. A host
         // the user just powered down never auto-sends either, whatever `wol_auto` says: it is
         // unreachable *because they asked for that*, and waking it would undo the press.
-        let auto = known.is_some_and(|h| h.wol_auto)
+        // Auto-wake on connect, off, turns the per-host switch off for every host.
+        let auto = self.settings_ui.settings.auto_wake
+            && known.is_some_and(|h| h.wol_auto)
             && !mac.is_empty()
             && self.hosts.powered_down.as_ref() != Some(&(host.clone(), port));
         let prompts = wake_prompts(auto, &mac);

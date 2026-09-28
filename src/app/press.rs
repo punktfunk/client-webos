@@ -40,6 +40,7 @@ impl App {
             Screen::ResetHdrCalibration => self.handle_reset_hdr_event(ev),
             Screen::SettingsPage => self.handle_settings_page_event(ev),
             Screen::RenameProfile => self.handle_rename_profile_event(ev),
+            Screen::CustomSize => self.handle_custom_size_event(ev),
             Screen::DeleteProfile => self.handle_delete_profile_event(ev),
         }
         None
@@ -93,6 +94,7 @@ impl App {
             // Rows, not buttons.
             Screen::SettingsPage
             | Screen::RenameProfile
+            | Screen::CustomSize
             | Screen::AddHost
             | Screen::EditHost
             | Screen::About

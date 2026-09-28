@@ -1,5 +1,5 @@
-//! The one editable text field, in the two shapes this app types into: a host address and a
-//! collection name.
+//! The one editable text field, in the three shapes this app types into: a host address, a
+//! name, and a stream size.
 //!
 //! Both are edited by the same three inputs — the Magic Remote's number pad, the webOS
 //! on-screen keyboard, and Left/Right standing in for keys the remote lacks — so what differs
@@ -18,7 +18,15 @@ pub(crate) enum FieldKind {
     /// A free-form name, bounded at `max` characters. Uniqueness is not a property of the
     /// field — the document it will be written into decides that (`KnownHost::can_name`).
     Name { max: usize },
+    /// A stream size, `width × height`: digits, and one `×` that Right types (or `x` / `*` on
+    /// a keyboard). The shared rule clamps it on commit.
+    Size,
 }
+
+/// The separator a [`FieldKind::Size`] field holds.
+const TIMES: char = '×';
+/// Digits per side: enough for 8192.
+const SIZE_DIGITS: usize = 5;
 
 pub(crate) struct TextField {
     text: String,
@@ -47,6 +55,21 @@ impl TextField {
             text: text.to_string(),
             kind: FieldKind::Name { max },
         }
+    }
+
+    /// An empty size field.
+    pub fn size() -> Self {
+        Self {
+            text: String::new(),
+            kind: FieldKind::Size,
+        }
+    }
+
+    /// The typed width and height, once both sides hold a number above zero.
+    pub fn size_value(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.text.split_once(TIMES)?;
+        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+        (w > 0 && h > 0).then_some((w, h))
     }
 
     /// Pre-fills from an existing address for `Screen::EditHost`, keeping a
@@ -95,6 +118,13 @@ impl TextField {
                     self.text.push(c);
                 }
             }
+            FieldKind::Size => {
+                if let Some(d) = c.to_digit(10) {
+                    self.enter_digit(d as u8);
+                } else if matches!(c, 'x' | 'X' | '*' | TIMES) {
+                    self.advance_field();
+                }
+            }
         }
     }
 
@@ -110,6 +140,7 @@ impl TextField {
                 ok && octets.next().is_none()
             }
             FieldKind::Name { .. } => !self.text.trim().is_empty(),
+            FieldKind::Size => self.size_value().is_some(),
         }
     }
 
@@ -131,9 +162,16 @@ impl TextField {
     /// a port, so a `:` goes in by itself.
     pub fn enter_digit(&mut self, digit: u8) {
         let c = (b'0' + digit) as char;
-        if let FieldKind::Name { .. } = self.kind {
-            self.enter_char(c);
-            return;
+        match self.kind {
+            FieldKind::Name { .. } => return self.enter_char(c),
+            FieldKind::Size => {
+                let side = self.text.rsplit(TIMES).next().unwrap_or_default();
+                if side.len() < SIZE_DIGITS {
+                    self.text.push(c);
+                }
+                return;
+            }
+            FieldKind::Ipv4Port => {}
         }
         if let Some((_, port)) = self.text.split_once(':') {
             let mut candidate = port.to_string();
@@ -159,8 +197,14 @@ impl TextField {
     /// Manually finishes the address field in progress — so e.g. "8" can become "8.8.8.8"
     /// without waiting for three digits or an overflow, and a complete address can grow a
     /// port. Right on the d-pad, standing in for the "." and ":" keys a real keyboard would
-    /// have. A name has no fields, so nothing to advance.
+    /// have; on a size it types the `×`. A name has no fields, so nothing to advance.
     pub fn advance_field(&mut self) {
+        if matches!(self.kind, FieldKind::Size) {
+            if !self.text.is_empty() && !self.text.contains(TIMES) {
+                self.text.push(TIMES);
+            }
+            return;
+        }
         if !matches!(self.kind, FieldKind::Ipv4Port)
             || self.text.is_empty()
             || self.text.ends_with(['.', ':'])
@@ -169,5 +213,28 @@ impl TextField {
             return;
         }
         self.text.push(if self.is_complete() { ':' } else { '.' });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextField;
+
+    /// Digits, one `×` from Right or a keyboard's `x`, and nothing past five digits a side.
+    #[test]
+    fn a_size_takes_two_numbers_and_one_separator() {
+        let mut f = TextField::size();
+        f.advance_field();
+        assert_eq!(f.text(), "", "no separator before a width");
+        for c in "2560x14400000".chars() {
+            f.enter_char(c);
+        }
+        f.advance_field();
+        assert_eq!(f.text(), "2560×14400");
+        assert_eq!(f.size_value(), Some((2560, 14400)));
+        f.backspace();
+        f.backspace();
+        assert_eq!(f.size_value(), Some((2560, 144)));
+        assert!(TextField::size().size_value().is_none());
     }
 }

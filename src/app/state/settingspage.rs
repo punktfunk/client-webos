@@ -9,6 +9,8 @@
 //!
 //! The scope switcher edits either the global document or one profile's overlay; a profile
 //! row that differs from the global wears the dot, and Secondary on it clears the override.
+//! Advanced rows sit last on each page and show under Show advanced; with the switch off, a
+//! page whose hidden rows hold changed values ends in a row that says how many.
 
 use std::collections::HashMap;
 
@@ -19,9 +21,11 @@ use pf_console_ui::widgets::{Control, RowSpec};
 
 use crate::app::nav::ScreenKey;
 use crate::app::screens::rowbuttons::RowButton;
+use crate::app::state::textfield::TextField;
 use crate::app::view::icons;
 use crate::app::{menu, App};
 use crate::core::event::MenuEvent;
+use crate::core::model::LogLevelOverride;
 use crate::core::screen::Screen;
 use crate::core::settings::TvSettings;
 
@@ -98,6 +102,10 @@ pub(crate) enum Row {
     MultiSlice,
     /// The three-step calibration screen.
     CalibrateHdr,
+    /// Opens the typed-size form for the scope's Resolution.
+    CustomSize,
+    /// Last on a page while its advanced rows are hidden and this many hold a changed value.
+    AdvancedChanged(usize),
     /// Detected controller `n`, or the "none" placeholder past the end.
     Pad(usize),
     Version,
@@ -123,11 +131,13 @@ type Rows = Vec<(Row, Option<&'static str>)>;
 
 /// The rows a page lists in `scope`. The positive list of plan §4; the console's own platform
 /// gate and applicability filter run over the shared rows afterwards. `pads` is how many
-/// controllers are attached.
+/// controllers are attached. Advanced rows come last, under an Advanced header, so hiding them
+/// leaves every basic group whole.
 fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
     use RowId as K;
     let profile = matches!(scope, Scope::Profile(_));
     let mut rows: Rows = Vec::new();
+    let mut advanced: Vec<Row> = Vec::new();
     let mut push = |row: Row, header: Option<&'static str>| rows.push((row, header));
     match page {
         Page::General => {
@@ -139,31 +149,43 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
                 push(Row::Delete, None);
             } else {
                 push(Row::Kit(K::AutoWake), Some("Session"));
+            }
+            push(Row::Kit(K::Stats), Some("Statistics"));
+            if !profile {
                 push(Row::Kit(K::Palette), Some("Interface"));
-                // The console-shell row is global-only: it is a device flag, and a TV's
-                // weak GPU is why the shell defaults it on (`webos.reduce_ui_resolution`).
-                push(Row::Kit(K::ReduceUiResolution), None);
                 push(Row::Kit(K::GamepadUi), None);
                 push(Row::Kit(K::GamepadUiMode), None);
+                // Device rows: the console-shell one is a TV flag, which a weak GPU defaults on
+                // (`webos.reduce_ui_resolution`).
+                advanced.extend(
+                    [
+                        K::AdvancedStats,
+                        K::StatsPosition,
+                        K::StatsSize,
+                        K::ExitHint,
+                        K::ReduceUiResolution,
+                    ]
+                    .map(Row::Kit),
+                );
             }
+            // Device-wide, in both scopes: it changes what these pages list, not a stream. It
+            // heads the Advanced group, so the rows it shows follow it without a second header.
+            push(Row::Kit(K::ShowAdvanced), Some("Advanced"));
         }
         Page::Display => {
             push(Row::Kit(K::Aspect), Some("Resolution"));
             push(Row::Kit(K::Resolution), None);
+            push(Row::CustomSize, None);
             push(Row::Kit(K::Refresh), None);
-            push(Row::Kit(K::Compositor), None);
             push(Row::Kit(K::Bitrate), Some("Quality"));
-            push(Row::Kit(K::Codec), None);
             push(Row::Kit(K::Hdr), None);
             if !profile {
                 push(Row::CalibrateHdr, None);
             }
-            push(Row::Kit(K::TenBitSdr), None);
             push(Row::Kit(K::PresentPriority), Some("Presentation"));
-            push(Row::Kit(K::SmoothBuffer), None);
+            advanced.extend([K::SmoothBuffer, K::Compositor, K::Codec, K::TenBitSdr].map(Row::Kit));
             if !profile {
-                push(Row::GameMode, Some("TV"));
-                push(Row::MultiSlice, None);
+                advanced.extend([Row::GameMode, Row::MultiSlice]);
             }
         }
         Page::Input => {
@@ -176,7 +198,7 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
         Page::Audio => {
             push(Row::Kit(K::Audio), None);
             if !profile {
-                push(Row::Kit(K::AudioRoute), None);
+                advanced.push(Row::Kit(K::AudioRoute));
             }
         }
         Page::Controllers => {
@@ -187,22 +209,53 @@ fn page_rows(page: Page, scope: &Scope, pads: usize) -> Rows {
             }
             push(Row::Kit(K::PadType), Some("Gamepad"));
             if !profile {
-                push(Row::Kit(K::PadHaptics), None);
-                push(Row::Kit(K::PadSpeaker), None);
+                advanced.extend([K::PadHaptics, K::PadSpeaker].map(Row::Kit));
             }
         }
         Page::About => {
             push(Row::Version, None);
-            push(Row::LogLevel, Some("Diagnostics"));
-            push(Row::ShowLogs, None);
-            if !profile {
-                push(Row::Kit(K::Stats), Some("Statistics"));
-                push(Row::Kit(K::AdvancedStats), None);
-            }
             push(Row::Licences, Some("Legal"));
+            advanced.extend([Row::LogLevel, Row::ShowLogs]);
         }
     }
+    let header = (page != Page::General).then_some("Advanced");
+    for (i, row) in advanced.into_iter().enumerate() {
+        rows.push((row, header.filter(|_| i == 0)));
+    }
     rows
+}
+
+/// A row Show advanced hides: the kit's advanced rows, and the TV's own tuning and diagnostics.
+fn is_advanced(row: Row) -> bool {
+    match row {
+        Row::Kit(id) => engine::advanced(id),
+        Row::GameMode | Row::MultiSlice | Row::LogLevel | Row::ShowLogs => true,
+        _ => false,
+    }
+}
+
+/// The rows of `rows` that hold something other than a fresh install would: the kit's by the
+/// value it draws, the TV's own by their switches.
+fn changed_rows(rows: &[Row], ctx: &Ctx<'_>, core: &trust::Settings) -> Vec<Row> {
+    let kit: Vec<RowId> = rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Kit(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let kit_changed = engine::changed(&kit, ctx);
+    rows.iter()
+        .copied()
+        .filter(|row| match row {
+            Row::Kit(id) => kit_changed.contains(id),
+            Row::GameMode => core.game_mode(),
+            Row::MultiSlice => core.multi_slice(),
+            Row::ShowLogs => core.show_logs(),
+            Row::LogLevel => core.log_level_override() != LogLevelOverride::default(),
+            _ => false,
+        })
+        .collect()
 }
 
 /// The overlay field a shared row pins in profile scope — `None` for a global-only row.
@@ -427,16 +480,25 @@ impl App {
     }
 
     /// The rows of the open page, gated: the plan's positive list, the console's platform
-    /// gate, then its applicability filter.
+    /// gate, then its applicability filter. Advanced rows show under Show advanced, or where
+    /// the profile in scope pins one; otherwise the global scope ends in the changed row.
     pub(crate) fn settings_page_rows(&self) -> Rows {
         let sp = &self.screens.settings_page;
         let mut settings = self.scope_settings();
+        let core = &self.settings_ui.settings;
         let rows = page_rows(sp.page, &sp.scope, self.detected_pads.len());
+        let pinned = self.scope_profile().is_some_and(|p| {
+            rows.iter()
+                .any(|&(row, _)| matches!(row, Row::Kit(id) if is_advanced(row) && overridden(&p.overrides, id)))
+        });
+        let open = core.show_advanced || pinned;
+        let global = sp.scope == Scope::Global;
         // Calibration has nothing to measure without an HDR stream, and the kit hides the HDR
         // row itself on a panel that cannot take one.
         let hdr_on = settings.hdr_enabled && crate::core::caps::video_caps().hdr;
         self.with_engine(&mut settings, |ctx| {
             let mut out: Rows = Vec::new();
+            let mut hidden: Vec<Row> = Vec::new();
             let mut pending_header: Option<&'static str> = None;
             for (row, header) in rows {
                 if header.is_some() {
@@ -454,12 +516,75 @@ impl App {
                     Row::Kit(id) => engine::row_on(id, pf_console_ui::Platform::WebOS) && engine::row_applies(id, ctx),
                     _ => true,
                 };
-                if shown {
-                    out.push((row, pending_header.take()));
+                if !shown {
+                    continue;
                 }
+                if !open && is_advanced(row) {
+                    hidden.push(row);
+                    continue;
+                }
+                out.push((row, pending_header.take()));
+            }
+            let changed = changed_rows(&hidden, ctx, core).len();
+            if global && changed > 0 {
+                out.push((Row::AdvancedChanged(changed), None));
             }
             out
         })
+    }
+
+    /// The changed row: Show advanced on, and the cursor on the first advanced row that differs.
+    fn show_advanced_rows(&mut self) {
+        self.settings_ui.settings.show_advanced = true;
+        self.persist();
+        let rows = self.settings_page_rows();
+        let core = self.settings_ui.settings.clone();
+        let mut settings = self.scope_settings();
+        let first = self.with_engine(&mut settings, |ctx| {
+            rows.iter()
+                .position(|&(row, _)| is_advanced(row) && !changed_rows(&[row], ctx, &core).is_empty())
+        });
+        if let Some(i) = first {
+            self.nav.set_cursor(ScreenKey::SettingsPage, i);
+        }
+    }
+
+    /// Custom size: an empty `width × height` form over the page.
+    fn open_custom_size(&mut self) {
+        self.screens.custom_size = TextField::size();
+        self.nav.screen = Screen::CustomSize;
+    }
+
+    pub(crate) fn handle_custom_size_event(&mut self, ev: MenuEvent) {
+        match ev {
+            MenuEvent::Left => self.screens.custom_size.backspace(),
+            MenuEvent::Right => self.screens.custom_size.advance_field(),
+            MenuEvent::Confirm => self.confirm_custom_size(),
+            MenuEvent::Back | MenuEvent::Secondary => self.nav.resume(Screen::SettingsPage),
+            MenuEvent::Up | MenuEvent::Down => {}
+        }
+    }
+
+    /// What the form still needs, `None` once both sides are typed.
+    pub(crate) fn custom_size_hint(&self) -> Option<&'static str> {
+        self.screens
+            .custom_size
+            .size_value()
+            .is_none()
+            .then_some("Type the width, Right, then the height")
+    }
+
+    /// The typed size through the shared rule, into the scope's Resolution.
+    fn confirm_custom_size(&mut self) {
+        let Some((w, h)) = self.screens.custom_size.size_value() else {
+            return;
+        };
+        let before = self.scope_settings();
+        let mut after = before.clone();
+        (after.width, after.height) = punktfunk_core::resolutions::custom(w, h, &after.codec);
+        after.match_window = false;
+        self.write_scope(&before, &after, overlay_field(RowId::Resolution));
+        self.nav.resume(Screen::SettingsPage);
     }
 
     /// The open page's rows as the kit draws them.
@@ -517,6 +642,9 @@ impl App {
                             .with_note("Lower delay. Some TVs cannot decode them"),
                         // Only reachable with HDR on: `settings_page_rows` drops it otherwise.
                         Row::CalibrateHdr => RowSpec::action("Calibrate HDR", true),
+                        Row::CustomSize => RowSpec::action("Custom size…", true),
+                        Row::AdvancedChanged(1) => RowSpec::action("1 advanced setting changed", true),
+                        Row::AdvancedChanged(n) => RowSpec::action(format!("{n} advanced settings changed"), true),
                         Row::Pad(i) => match self.detected_pads.get(i) {
                             Some(pad) => RowSpec::field(pad.name.clone(), format!("Player {}", pad.index + 1), ""),
                             None => RowSpec::field("No controller detected", String::new(), "Connect one to your TV"),
@@ -681,6 +809,8 @@ impl App {
                 self.persist();
             }
             Row::Licences => self.open_about(),
+            Row::CustomSize => self.open_custom_size(),
+            Row::AdvancedChanged(_) => self.show_advanced_rows(),
             Row::NewProfile => self.new_profile(),
             Row::Rename => self.open_rename_profile(),
             Row::Duplicate => self.duplicate_profile(),
@@ -702,6 +832,16 @@ impl App {
                     .set_log_level_override(menu::LOG_LEVEL_OPTIONS[next]);
                 crate::logger::set_level_override(self.settings_ui.settings.log_level_override());
                 self.persist();
+            }
+            // Device-wide: the global document whatever the scope, as no profile carries it.
+            Row::Kit(RowId::ShowAdvanced) => {
+                let mut document = self.settings_ui.settings.clone();
+                if self.with_engine(&mut document, |ctx| {
+                    engine::adjust(RowId::ShowAdvanced, delta, wrap, ctx)
+                }) {
+                    self.settings_ui.settings = document;
+                    self.persist();
+                }
             }
             Row::Kit(id) => {
                 let before = self.scope_settings();
@@ -890,9 +1030,15 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Palette
         | RowId::GamepadUi
         | RowId::GamepadUiMode
-        | RowId::ReduceUiResolution => return None,
+        | RowId::ReduceUiResolution
+        | RowId::ShowAdvanced
+        | RowId::StatsPosition
+        | RowId::StatsSize
+        | RowId::ExitHint => return None,
         // This page draws its own scope switcher and profile rows.
         RowId::Preset(_) | RowId::NewPreset => "the page builds its own profile rows",
+        // Each page counts its own advanced rows (`changed_rows`).
+        RowId::AdvancedChanged => "the page builds its own changed row",
         // The client's own screens, not the kit's action rows.
         RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
         RowId::Version => "the page draws its own version row",
@@ -910,8 +1056,7 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::FullscreenMode
         | RowId::Shortcuts
         | RowId::BackgroundKeepAlive
-        | RowId::BackgroundTimeout
-        | RowId::StatsPosition => "the kit gates it off WebOS",
+        | RowId::BackgroundTimeout => "the kit gates it off WebOS",
         // Android hardware, and one MediaCodec flag.
         RowId::LowLatency | RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => "Android-only in the kit",
         // None of these keys has a reader anywhere in this crate. A row would write a value
@@ -968,6 +1113,18 @@ mod nav_tests {
             }
             let rows = page_rows(page, &Scope::Global, 0);
             assert!(!rows.iter().any(|(r, _)| *r == Row::NewProfile));
+        }
+    }
+
+    /// Advanced rows follow every basic one, so hiding them never splits a group.
+    #[test]
+    fn advanced_rows_come_last() {
+        for page in Page::ALL {
+            for scope in [Scope::Global, Scope::Profile("p1".into())] {
+                let rows = page_rows(page, &scope, 1);
+                let first = rows.iter().position(|&(r, _)| is_advanced(r)).unwrap_or(rows.len());
+                assert!(rows[first..].iter().all(|&(r, _)| is_advanced(r)), "{page:?}");
+            }
         }
     }
 

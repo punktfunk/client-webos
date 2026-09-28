@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
-use punktfunk_core::hud::{HudLine, Role};
+use punktfunk_core::hud::{HudCorner, HudLine, Role};
 use skia_safe::{Color4f, RRect, Rect};
 
 use crate::app::draw::dialog::{self, Motion};
@@ -84,8 +84,9 @@ fn role_tone(role: Role) -> Color4f {
     }
 }
 
-pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32) {
-    let k = f.k;
+/// The stats card in `corner`, at `scale` times the display's size (`Settings::stats_scale_pct`).
+pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32, corner: HudCorner, scale: f32) {
+    let k = f.k * scale;
     let size = STATS_LINE * f64::from(k);
     let stride = line_h(size) as f32;
     let hint_size = STATS_HINT * f64::from(k);
@@ -95,7 +96,10 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32) {
         .fold(f.fonts.measure(hint, W::Regular, hint_size), f32::max);
     let w = widest + 2.0 * STATS_PAD * k;
     let h = stride * lines.len() as f32 + line_h(hint_size) as f32 + 2.0 * STATS_PAD * k;
-    let card = Rect::from_xywh(f.w - STATS_INSET * k - w, STATS_INSET * k, w, h);
+    let inset = STATS_INSET * f.k;
+    let x = if corner.right() { f.w - inset - w } else { inset };
+    let y = if corner.bottom() { f.h - inset - h } else { inset };
+    let card = Rect::from_xywh(x, y, w, h);
     let c = f.canvas;
     alpha_layer(c, card, alpha);
     c.draw_rrect(
@@ -171,11 +175,22 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String]) {
 }
 
 pub(super) fn toast(f: &Frame<'_>, text: &str, alpha: f32) {
+    pill(f, text, alpha, false);
+}
+
+/// The one-line exit hint at stream start: the toast's pill, bottom centre.
+pub(super) fn exit_hint(f: &Frame<'_>, text: &str, alpha: f32) {
+    pill(f, text, alpha, true);
+}
+
+/// A centred pill of one line, `TOAST_TOP` in from the top or the bottom edge.
+fn pill(f: &Frame<'_>, text: &str, alpha: f32, bottom: bool) {
     let k = f.k;
     let size = TOAST_SIZE * f64::from(k);
     let w = f.fonts.measure(text, W::Medium, size) + 2.0 * TOAST_PAD_X * k;
     let h = line_h(size) as f32 + 2.0 * TOAST_PAD_Y * k;
-    let pill = Rect::from_xywh((f.w - w) / 2.0, TOAST_TOP * k, w, h);
+    let y = if bottom { f.h - TOAST_TOP * k - h } else { TOAST_TOP * k };
+    let pill = Rect::from_xywh((f.w - w) / 2.0, y, w, h);
     let c = f.canvas;
     alpha_layer(c, pill, alpha);
     c.draw_rrect(
