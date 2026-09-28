@@ -17,10 +17,13 @@ struct RunningGame {
     /// command, which has no catalog row to mark.
     #[serde(default)]
     app_id: Option<String>,
-    /// `launching` | `running` | `exited` | `untracked` | `grace`. A `String` so a host value
-    /// this build does not know cannot fail the whole list decode.
+    /// `launching` | `running` | `exited` | `untracked` | `grace` | `detached`. A `String` so a
+    /// host value this build does not know cannot fail the whole list decode.
     #[serde(default)]
     state: String,
+    /// This device launched it, so the host lets it end the title. Absent from an older host.
+    #[serde(default)]
+    endable: bool,
 }
 
 /// The `/api/v1/status` slice this client reads. Everything else the operator payload carries
@@ -31,7 +34,7 @@ struct HostStatus {
     games: Vec<RunningGame>,
 }
 
-/// The ids of what `addr` has launched right now.
+/// What `addr` has launched right now: every running id, and the ones this device may end.
 ///
 /// Best-effort by contract: a host too old to serve `/api/v1/status`, one that is unreachable,
 /// or a payload shaped differently all read as "nothing running". A dot that fails to light is
@@ -42,26 +45,30 @@ pub(crate) fn fetch_running(
     identity: &(String, String),
     pin: Option<[u8; 32]>,
     budget: std::time::Duration,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     match get_json::<HostStatus>(addr, mgmt_port, identity, pin, "/api/v1/status", budget) {
         Ok(status) => running_ids(status),
         Err(e) => {
             tracing::debug!("running: {addr}:{mgmt_port} — {e}");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
 }
 
 /// The ids worth marking, out of what the host reported: what is up, and what names a catalog
 /// row. An operator-typed `GameStream` command carries no `app_id` and so has no card to light.
-fn running_ids(status: HostStatus) -> Vec<String> {
-    status
-        .games
-        .into_iter()
-        // Keep non-`exited`; `untracked` and `grace` still indicate running.
-        .filter(|g| g.state != "exited")
-        .filter_map(|g| g.app_id)
-        .collect()
+/// The second list is the subset this device launched, which End game may end.
+fn running_ids(status: HostStatus) -> (Vec<String>, Vec<String>) {
+    let (mut up, mut endable) = (Vec::new(), Vec::new());
+    // Keep non-`exited`; `untracked`, `grace` and `detached` still indicate running.
+    for g in status.games.into_iter().filter(|g| g.state != "exited") {
+        let Some(id) = g.app_id else { continue };
+        if g.endable {
+            endable.push(id.clone());
+        }
+        up.push(id);
+    }
+    (up, endable)
 }
 
 /// One `fetch_running` answer, tagged with the host it describes: the poll outlives a host
@@ -70,6 +77,8 @@ pub(crate) struct RunningLoaded {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) running: Vec<String>,
+    /// Of `running`, what this device launched.
+    pub(crate) endable: Vec<String>,
 }
 
 /// Spawns [`fetch_running`] on a worker — the same shape as
@@ -87,8 +96,13 @@ pub(crate) fn load_running_async(
     std::thread::Builder::new()
         .name("punktfunk-webos-running".into())
         .spawn(move || {
-            let running = fetch_running(&host, mgmt_port, &identity, fingerprint, budget);
-            let _ = tx.send(RunningLoaded { host, port, running });
+            let (running, endable) = fetch_running(&host, mgmt_port, &identity, fingerprint, budget);
+            let _ = tx.send(RunningLoaded {
+                host,
+                port,
+                running,
+                endable,
+            });
         })
         .expect("spawn running-fetch thread");
     rx
@@ -104,18 +118,22 @@ mod tests {
     fn running_ids_keep_what_is_up_and_named() {
         let status: HostStatus = serde_json::from_str(
             r#"{"games":[
-                {"app_id":"steam:570","state":"running","session":"ignored"},
+                {"app_id":"steam:570","state":"running","session":"ignored","endable":true},
                 {"app_id":"steam:271590","state":"launching"},
                 {"app_id":"flatpak:org.x","state":"grace"},
                 {"app_id":"heroic:1","state":"untracked"},
-                {"app_id":"steam:4000","state":"exited"},
+                {"app_id":"gog:2","state":"detached","endable":true},
+                {"app_id":"steam:4000","state":"exited","endable":true},
                 {"state":"running"}
             ]}"#,
         )
         .unwrap();
+        let (up, endable) = running_ids(status);
+        assert_eq!(up, ["steam:570", "steam:271590", "flatpak:org.x", "heroic:1", "gog:2"]);
         assert_eq!(
-            running_ids(status),
-            ["steam:570", "steam:271590", "flatpak:org.x", "heroic:1"]
+            endable,
+            ["steam:570", "gog:2"],
+            "only this device's launches, never an exited one"
         );
     }
 
@@ -124,8 +142,8 @@ mod tests {
     #[test]
     fn an_unknown_status_payload_lights_nothing() {
         let empty: HostStatus = serde_json::from_str("{}").unwrap();
-        assert!(running_ids(empty).is_empty());
+        assert!(running_ids(empty).0.is_empty());
         let odd: HostStatus = serde_json::from_str(r#"{"games":[],"displays":[{"id":1}]}"#).unwrap();
-        assert!(running_ids(odd).is_empty());
+        assert!(running_ids(odd).0.is_empty());
     }
 }

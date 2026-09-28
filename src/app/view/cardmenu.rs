@@ -8,10 +8,10 @@ use crate::ui::render::Rect;
 impl App {
     /// Which rows `pin_id`'s card shows. The one table over the submenu's shape: its labels,
     /// its height, its hit test and its handler all count rows through here.
-    pub(crate) fn card_menu_row_kinds(&self, pin_id: &str) -> &'static [CardMenuRow] {
+    pub(crate) fn card_menu_row_kinds(&self, pin_id: &str) -> Vec<CardMenuRow> {
         // Nothing to remove a Library card from — Library *is* "in no collection".
         // The bind list only when there is a catalog to bind from.
-        match (self.card_is_held(pin_id), self.profiles.is_empty()) {
+        let rows: &[CardMenuRow] = match (self.card_is_held(pin_id), self.profiles.is_empty()) {
             (true, false) => &[
                 CardMenuRow::MoveTo,
                 CardMenuRow::Remove,
@@ -21,7 +21,13 @@ impl App {
             (true, true) => &[CardMenuRow::MoveTo, CardMenuRow::Remove, CardMenuRow::Settings],
             (false, false) => &[CardMenuRow::MoveTo, CardMenuRow::Profile, CardMenuRow::Settings],
             (false, true) => &[CardMenuRow::MoveTo, CardMenuRow::Settings],
+        };
+        let mut rows = rows.to_vec();
+        // Only on a title this device launched and the host still runs.
+        if self.library.endable.contains(pin_id) {
+            rows.push(CardMenuRow::EndGame);
         }
+        rows
     }
 
     /// How many rows the submenu on `pin_id`'s card has — what its geometry divides by.

@@ -151,6 +151,8 @@ struct StripMenu<'a> {
     kinds: &'a [CardMenuRow],
     cover: Option<&'a Image>,
     held: bool,
+    /// End game was pressed once and waits for the second press.
+    armed: bool,
     focus: Option<(usize, f32)>,
 }
 
@@ -210,6 +212,8 @@ fn paint_card_strip(f: &Frame<'_>, title: &str, r: Rect, pop: f32, shown: f32, m
                 CardMenuRow::Remove => ("trash-2", "Remove"),
                 CardMenuRow::Profile => ("wrench", "Profile"),
                 CardMenuRow::Settings => ("settings", "Settings"),
+                CardMenuRow::EndGame if m.armed => ("x", "Press again to end the game"),
+                CardMenuRow::EndGame => ("x", "End game"),
             };
             let icon_x = row.left + MENU_ICON_INSET;
             if let Some(mk) = by_name(mark) {
@@ -257,6 +261,7 @@ pub(super) fn warm_card_strip(f: &Frame<'_>, cover: &Image, progress: f32) {
             kinds: &kinds,
             cover: Some(cover),
             held: false,
+            armed: false,
             focus: (progress >= 1.0).then_some((0, 1.0)),
         }),
     );
@@ -751,9 +756,10 @@ impl App {
             return;
         }
         let menu = menu.map(|m| StripMenu {
-            kinds,
+            kinds: &kinds,
             cover: self.render.covers.get(pin_id),
             held: self.card_is_held(pin_id),
+            armed: m.armed,
             focus: (wipe >= 1.0).then(|| (m.focused, anim_frac(m.focus_anim, ui::animation::FOCUS_POP))),
         });
         paint_card_strip(f, &game.title, r, pop, shown, menu);

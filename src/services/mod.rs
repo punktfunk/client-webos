@@ -3,6 +3,7 @@ pub mod atomic;
 pub mod budget;
 pub mod discovery;
 pub mod feedback;
+pub mod game;
 pub mod hevc;
 pub mod join;
 pub mod library;
