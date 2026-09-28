@@ -124,6 +124,8 @@ pub struct ConnectParams {
     /// Handshake budget.
     pub timeout: Duration,
     pub codec: CodecPref,
+    /// Advisory: the host falls back to its own default when this one is unavailable.
+    pub compositor: CompositorPref,
     pub gamepad_type: GamepadType,
     pub cursor_capture: bool,
     /// Pad-audio render bits (`session::pad_audio::CAP_*`); non-zero advertises
@@ -242,7 +244,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         &params.host,
         params.port,
         params.mode,
-        CompositorPref::Auto,
+        params.compositor,
         // Session-default pad kind. A per-pad `InputKind::GamepadArrival` could override this
         // for mixed setups, but this client drives one pad (index 0), for which the handshake
         // default is exactly equivalent — and it also reaches hosts too old to advertise
