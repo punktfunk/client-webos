@@ -190,6 +190,38 @@ fn install_signal_handlers() {
     }
 }
 
+/// Turns core dumps off and deletes the ones earlier crashes left in `dir`.
+///
+/// A panic aborts, and the kernel writes `core.<pid>` into the app's directory: 20–130 MB
+/// each, on the partition every developer app shares. The panic hook already logs the crash.
+fn disable_core_dumps(dir: &std::path::Path) {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `none` is a valid `rlimit` that outlives the call.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(%error, "core dump limit not lowered");
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_str().is_some_and(is_core_dump) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => tracing::info!(file = ?entry.file_name(), "removed an old core dump"),
+            Err(error) => tracing::warn!(file = ?entry.file_name(), %error, "core dump not removed"),
+        }
+    }
+}
+
+/// `core.<pid>`, the name the kernel gives a dump.
+fn is_core_dump(name: &str) -> bool {
+    name.strip_prefix("core.")
+        .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Yellow-button log overlay state (process-lifetime, all screens).
 /// Explicit discriminants: `cycle_log_overlay` stores `next as u8` and
 /// `log_overlay_state` decodes it — the two must agree.
@@ -278,6 +310,7 @@ pub fn run() -> Result<()> {
     let app_dir = store::app_dir();
     let _guard = crate::logger::init_subscriber(&app_dir).context("init logger")?;
     tracing::info!("punktfunk-webos starting");
+    disable_core_dumps(&app_dir);
     // Logged before anything else can fail: a report from a model neither developer
     // owns is only actionable if the log says what it was running on.
     crate::platform::webos::device::DeviceInfo::detect().log();
@@ -356,6 +389,14 @@ mod console_flow;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_kernel_dumps_are_swept() {
+        assert!(is_core_dump("core.4007"));
+        for keep in ["core", "core.", "core.json", "core.12a", "score.1", "settings.json"] {
+            assert!(!is_core_dump(keep), "{keep}");
+        }
+    }
 
     /// "Native" (0) and "Match window" dial the panel; an explicit pick dials itself.
     #[test]
