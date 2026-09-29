@@ -12,10 +12,10 @@ use skia_safe::{ColorType, Surface};
 
 const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 
-/// Skia's resource budget, a ceiling and not an allocation. A cover is ~1.3 MB uploaded with its
-/// mips, so a 100-title library is ~136 MB; under that the Games tab re-uploaded covers on
-/// every visit and scroll, 50–250 ms a burst on a G5.
-pub(crate) const GPU_CACHE_BYTES: usize = 192 << 20;
+/// Skia's resource budget, a ceiling and not an allocation: the kit's TV floor, a screenful of
+/// covers with room to spare. The G5's GPU memory is the app's own RAM, and the stream's decoder
+/// needs what is left.
+pub(crate) const GPU_CACHE_BYTES: usize = pf_console_ui::MIN_GPU_CACHE_BYTES;
 
 pub(crate) struct ConsoleGl {
     // Field order is drop order: GPU resources must die before their GL context.
