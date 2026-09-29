@@ -233,7 +233,7 @@ pub(crate) fn scale_rect(r: Rect, s: f32) -> Rect {
 /// The frame's ground: the shared palette's own, flat. The console draws an aurora field
 /// over the same colour; a pointer UI with a grid of covers wants it quiet.
 pub(crate) fn ground() -> skia_safe::Color4f {
-    let (r, g, b) = pf_console_ui::library::palette(&current_palette()).ground;
+    let (r, g, b) = pf_console_ui::palette::palette(&current_palette()).ground;
     skia_safe::Color4f::new(r as f32, g as f32, b as f32, 1.0)
 }
 

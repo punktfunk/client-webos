@@ -935,8 +935,12 @@ pub(super) fn run_inner() -> Result<()> {
                         }
                         RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, !pads.is_empty()),
                         // No microphone and no touch surface on a TV. Stream mute needs a zeroed
-                        // decoded frame, and NDL's audio plane decodes Opus itself.
-                        RingCommand::ToggleMic | RingCommand::CycleTouchMode | RingCommand::ToggleStreamMute => {}
+                        // decoded frame, and NDL's audio plane decodes Opus itself. `ring_facts`
+                        // leaves `streamed_game` empty, so the dial never offers End game.
+                        RingCommand::ToggleMic
+                        | RingCommand::CycleTouchMode
+                        | RingCommand::ToggleStreamMute
+                        | RingCommand::EndGame { .. } => {}
                         RingCommand::ToggleScrollInvert => {
                             connected.client.set_invert_scroll(!connected.client.invert_scroll());
                         }

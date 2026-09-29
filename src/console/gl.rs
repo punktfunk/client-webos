@@ -12,7 +12,9 @@ use skia_safe::{ColorType, Surface};
 
 const GL_RGBA8: u32 = 0x8058; // RGBA8888 framebuffer format
 
-/// Skia's resource budget: the shell's measured 1080p working-set floor.
+/// Skia's resource budget, a ceiling and not an allocation: the kit's TV floor, a screenful of
+/// covers with room to spare. The G5's GPU memory is the app's own RAM, and the stream's decoder
+/// needs what is left.
 pub(crate) const GPU_CACHE_BYTES: usize = pf_console_ui::MIN_GPU_CACHE_BYTES;
 
 pub(crate) struct ConsoleGl {
@@ -152,6 +154,11 @@ impl ConsoleGl {
     /// SDL still owns the swap.
     pub(crate) fn flush(&mut self) {
         self.context.flush_and_submit();
+    }
+
+    /// Submit, then wait until the GPU has drawn it.
+    pub(crate) fn finish(&mut self) {
+        self.context.flush_submit_and_sync_cpu();
     }
 
     pub(crate) fn warm_glass(

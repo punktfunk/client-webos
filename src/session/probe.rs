@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use punktfunk_core::client::{NativeClient, ProbeOutcome};
-use punktfunk_core::config::{CompositorPref, Mode};
+use punktfunk_core::config::Mode;
 use punktfunk_core::quic;
 
 /// Opens a handshake-only session: no video backend loads, no pump thread spawns, nothing is
@@ -35,42 +35,36 @@ fn handshake_only(
         height: 720,
         refresh_hz: 60,
     };
-    NativeClient::connect(
-        host,
-        port,
-        mode,
-        CompositorPref::Auto,
-        punktfunk_core::config::GamepadPref::Auto,
+    NativeClient::connect(punktfunk_core::client::ConnectParams {
         bitrate_kbps,
-        quic::VIDEO_CAP_CHACHA20,
-        2, // stereo baseline
+        video_caps: quic::VIDEO_CAP_CHACHA20,
         video_codecs,
-        0,     // no preferred codec
-        None,  // no HDR display metadata: nothing presents
-        0,     // client_caps: nothing renders a cursor
-        false, // frame_parts: whole AUs (see `super::connect`)
-        None,  // no launch
-        None,  // name: keep the host's fingerprint-derived label (see `super::connect`)
         pin,
-        Some(identity),
-        timeout,
-    )
+        identity: Some(identity),
+        ..punktfunk_core::client::ConnectParams::new(host, port, mode, timeout)
+    })
 }
 
-/// The no-PIN "request access" trust step: open a trust-on-first-use connection
-/// (`pin = None`) presenting our identity, which a host requiring pairing PARKS until
-/// its operator approves this device, then return the host's now-verified fingerprint
-/// to pin and tear the connection straight back down.
+/// The no-PIN "request access" trust step: connect presenting our identity, which a host
+/// requiring pairing PARKS until its operator approves this device, then return the host's
+/// fingerprint to pin and tear the connection straight back down. `pin` is an advertised
+/// fingerprint to hold the host to; `None` trusts whoever answers.
 ///
 /// Uses `handshake_only`, so the video plane is never touched — this needs the handshake to reach
 /// `Welcome`, not a running stream. Blocks up to `timeout` (the operator-approval window).
-pub fn request_access(host: &str, port: u16, identity: (String, String), timeout: Duration) -> Result<[u8; 32]> {
+pub fn request_access(
+    host: &str,
+    port: u16,
+    pin: Option<[u8; 32]>,
+    identity: (String, String),
+    timeout: Duration,
+) -> Result<[u8; 32]> {
     let client = handshake_only(
         host,
         port,
         1_000, // minimal bitrate — connection is closed as soon as trust is established
         quic::CODEC_H264,
-        None, // pin = None → trust-on-first-use, host parks until operator approval
+        pin,
         identity,
         timeout,
     )

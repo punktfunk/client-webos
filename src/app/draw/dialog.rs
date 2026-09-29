@@ -375,7 +375,7 @@ mod tests {
     /// One frame of the Forget dialog over a flat ground, and its pixels. `PF_WEBOS_DUMP=<dir>`
     /// also writes the PNG, the eyeball counterpart of the console's `PF_CONSOLE_DUMP`.
     fn render(focus: usize) -> (Layout, Vec<u8>) {
-        theme::set_ink(Ink::of(pf_console_ui::library::palette("violet")));
+        theme::set_ink(Ink::of(pf_console_ui::palette::palette("violet")));
         let fonts = theme::build_fonts().unwrap();
         let mut surface = skia_safe::surfaces::raster_n32_premul((W_PX as i32, H_PX as i32)).unwrap();
         surface.canvas().clear(Color4f::new(0.075, 0.063, 0.16, 1.0));

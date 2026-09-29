@@ -276,6 +276,24 @@ pub fn set_pin(state: &mut Persisted, key: &str, profile_id: String, pin: bool) 
     true
 }
 
+/// Drop one profile and every binding or pin that named it, as the classic settings page
+/// does: the record never names a profile nothing resolves. Reports whether it changed.
+pub fn delete_profile(state: &mut Persisted, id: &str) -> bool {
+    let before = state.profiles.len();
+    state.profiles.retain(|p| p.id != id);
+    if state.profiles.len() == before {
+        return false;
+    }
+    for h in &mut state.known_hosts {
+        if h.preset_id.as_deref() == Some(id) {
+            h.preset_id = None;
+        }
+        h.game_presets.retain(|_, p| p != id);
+        h.pinned_presets.retain(|p| p != id);
+    }
+    true
+}
+
 #[cfg(test)]
 mod launch_tests {
     use super::*;
@@ -321,6 +339,26 @@ mod launch_tests {
         assert_eq!(state.known_hosts[0].preset_id.as_deref(), Some(pid.as_str()));
         assert!(bind_host_profile(&mut state, &key, None));
         assert!(!set_pin(&mut state, "10.9.9.9:1", pid, true), "unknown host");
+    }
+
+    /// Deleting a profile takes its default bind, title bind and pin with it; an unknown id
+    /// changes nothing.
+    #[test]
+    fn deleting_a_profile_clears_every_name_of_it() {
+        let profile = StreamPreset::new("Work");
+        let pid = profile.id.clone();
+        let mut state = state_with(profile, |h| {
+            h.preset_id = Some(pid.clone());
+            h.bind_game_preset("doom", Some(&pid));
+            h.pinned_presets.push(pid.clone());
+        });
+        assert!(!delete_profile(&mut state, "nothing"));
+        assert!(delete_profile(&mut state, &pid));
+        assert!(state.profiles.is_empty());
+        let h = &state.known_hosts[0];
+        assert!(h.preset_id.is_none());
+        assert!(h.game_presets.is_empty());
+        assert!(h.pinned_presets.is_empty());
     }
 
     /// A title binding beats the host's default; a dangling id falls through to it; the

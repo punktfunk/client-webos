@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use pf_client_core::presets::{SettingsOverlay, StreamPreset};
 use pf_client_core::trust;
-use pf_console_ui::settings_rows::{self as engine, Ctx, RowId};
+use pf_console_ui::settings_rows::{self as engine, Ctx, Device, RowId};
 use pf_console_ui::widgets::{Control, RowSpec};
 
 use crate::app::nav::ScreenKey;
@@ -386,20 +386,24 @@ impl App {
         };
         let library = pf_console_ui::LibraryShared::default();
         let pads = self.kit_pads();
+        let device = Device {
+            platform: pf_console_ui::Platform::WebOS,
+            screen: None,
+            deck: false,
+            tv: true,
+            fallback_ui: true,
+            // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
+            pyrowave_ok: false,
+            av1_ok: false,
+            name: "webOS TV".into(),
+        };
         let mut ctx = Ctx {
             hosts: &[],
             library: &library,
             settings,
             store: &store,
-            platform: pf_console_ui::Platform::WebOS,
-            screen: None,
             pads: &pads,
-            deck: false,
-            fallback_ui: true,
-            // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
-            pyrowave_ok: false,
-            av1_ok: false,
-            device_name: "webOS TV",
+            device: &device,
             t: 0.0,
         };
         f(&mut ctx)
@@ -888,9 +892,14 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::GamepadUiMode
         | RowId::ReduceUiResolution => return None,
         // This page draws its own scope switcher and profile rows.
-        RowId::Preset(_) | RowId::NoPresets => "the page builds its own profile rows",
+        RowId::Preset(_) | RowId::NewPreset => "the page builds its own profile rows",
         // The client's own screens, not the kit's action rows.
         RowId::Controllers | RowId::Licenses => "this client has its own screen for it",
+        RowId::Version => "the page draws its own version row",
+        // An action row into the shell's Games tab, which these menus do not have.
+        RowId::LibrarySections => "the shell's Games tab only",
+        // The shell's own host row; these menus list hosts their own way.
+        RowId::HostSort | RowId::HostGrouping => "the shell's home row only",
         // The kit answers `false` for WebOS, so a page entry would draw nothing.
         RowId::Decoder
         | RowId::Chroma444
@@ -898,7 +907,11 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
-        | RowId::Shortcuts => "the kit gates it off WebOS",
+        | RowId::FullscreenMode
+        | RowId::Shortcuts
+        | RowId::BackgroundKeepAlive
+        | RowId::BackgroundTimeout
+        | RowId::StatsPosition => "the kit gates it off WebOS",
         // Android hardware, and one MediaCodec flag.
         RowId::LowLatency | RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => "Android-only in the kit",
         // None of these keys has a reader anywhere in this crate. A row would write a value
@@ -918,7 +931,6 @@ fn absence(id: RowId) -> Option<&'static str> {
         | RowId::FollowOsTheme
         | RowId::ReduceMotion
         | RowId::LibraryView
-        | RowId::LibraryCollections
         | RowId::StartIn => "not read by this client — see `runtime`'s `ConnectParams`",
     })
 }

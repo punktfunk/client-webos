@@ -17,7 +17,7 @@ mod real {
 
     use anyhow::{Context, Result};
     use punktfunk_core::client::NativeClient;
-    use punktfunk_core::config::{CompositorPref, GamepadPref, Mode};
+    use punktfunk_core::config::Mode;
     use punktfunk_core::quic;
 
     /// Non-zero to avoid triggering core's startup probe (`bitrate_kbps` == 0 would).
@@ -58,26 +58,14 @@ mod real {
             height: 720,
             refresh_hz: 60,
         };
-        let client = NativeClient::connect(
-            host,
-            port,
-            mode,
-            CompositorPref::Auto,
-            GamepadPref::Auto,
-            PROBE_SESSION_BITRATE_KBPS,
-            quic::VIDEO_CAP_CHACHA20,
-            2,
-            quic::CODEC_HEVC | quic::CODEC_H264,
-            0,
-            None,  // no HDR display metadata
-            0,     // client_caps
-            false, // frame_parts
-            None,  // no launch
-            None,  // name: keep the host's fingerprint-derived label
-            Some(pin),
-            Some((cert, key)),
-            Duration::from_secs(10),
-        )
+        let client = NativeClient::connect(punktfunk_core::client::ConnectParams {
+            bitrate_kbps: PROBE_SESSION_BITRATE_KBPS,
+            video_caps: quic::VIDEO_CAP_CHACHA20,
+            video_codecs: quic::CODEC_HEVC | quic::CODEC_H264,
+            pin: Some(pin),
+            identity: Some((cert, key)),
+            ..punktfunk_core::client::ConnectParams::new(host, port, mode, Duration::from_secs(10))
+        })
         .context("connect")?;
         println!(
             "connected: codec={} audio_ch={} resolved_bitrate_kbps={}",
