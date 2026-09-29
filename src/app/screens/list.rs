@@ -40,6 +40,7 @@ impl App {
             | Screen::ResetHdrCalibration
             | Screen::SettingsPage
             | Screen::RenameProfile
+            | Screen::CustomSize
             | Screen::DeleteProfile => 0,
         }
     }

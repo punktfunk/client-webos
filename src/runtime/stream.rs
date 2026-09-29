@@ -7,7 +7,7 @@ use crate::platform::webos::input::{
     webos_scancode_down as key_down, RemoteKey, RemoteKeys, WEBOS_EXIT_SCANCODE, WEBOS_HOME_SCANCODE,
 };
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
-use punktfunk_core::hud::{self, Extra, HudLine, Role, StatsSnapshot, StatsVerbosity};
+use punktfunk_core::hud::{self, Extra, HudCorner, HudLine, Role, StatsSnapshot, StatsVerbosity};
 use std::sync::Arc;
 
 /// One frame of the dial's animation. The loop runs every 2 ms; the ring needs no more than 60 Hz.
@@ -470,6 +470,13 @@ pub(super) fn run_inner() -> Result<()> {
             let mut stats_tier = settings.stats_verbosity();
             let mut stats_enabled = stats_tier != StatsVerbosity::Off;
             let advanced_stats = settings.advanced_stats;
+            // Top right until the player picks a corner; the size multiplies the display's.
+            let stats_corner = settings.hud_corner(HudCorner::TopRight);
+            let stats_scale = hud::stats_scale(settings.stats_scale_pct);
+            // The session starts where the setting says; the dial flips it from there.
+            connected.client.set_invert_scroll(settings.invert_scroll);
+            // The one-line exit hint, from the first frame of the stream.
+            let exit_hint_at = settings.exit_hint.then(Instant::now);
             connected.stats().set_diagnostics(stats_enabled);
             connected.set_hud_enabled(stats_enabled);
             // Fades in/out on the same curve as the toast below — see `ModalFade::visibility_alpha`.
@@ -1090,6 +1097,9 @@ pub(super) fn run_inner() -> Result<()> {
                     None
                 };
                 let notif_active = notif_frame.is_some();
+                let hint_frame = exit_hint_at
+                    .filter(|_| dialog_frame.is_none())
+                    .and_then(|at| crate::ui::fade::hold_alpha(at, EXIT_HINT_HOLD, EXIT_HINT_FADE));
                 // Fade in/out on the toast's curve instead of cutting instantly; `visibility_alpha`
                 // keeps returning `Some` through the close fade after the toggle itself flips off.
                 let stats_alpha = stats_fade.visibility_alpha(stats_enabled);
@@ -1100,7 +1110,8 @@ pub(super) fn run_inner() -> Result<()> {
                 let log_overlay_on = log_overlay_state() != LogOverlayState::Off;
                 let ring_damage = ring.damage();
                 let ring_visible = ring_damage != 0;
-                let overlay_active = stats_alpha.is_some() || log_overlay_on || notif_active || ring_visible;
+                let overlay_active =
+                    stats_alpha.is_some() || log_overlay_on || notif_active || ring_visible || hint_frame.is_some();
                 if overlay_was_active && !overlay_active {
                     // Nothing else clears this window when the last overlay disappears.
                     // A wipe that could not draw stays owed, so the next tick tries it again.
@@ -1110,7 +1121,7 @@ pub(super) fn run_inner() -> Result<()> {
                     overlay_was_active = overlay_active;
                 }
                 // A fade in flight needs frequent frames; steady-state stats/log are fine at ~2Hz.
-                let fading = notif_active || stats_fade.is_animating();
+                let fading = notif_active || hint_frame.is_some() || stats_fade.is_animating();
                 let redraw_interval = if fading {
                     Duration::from_millis(33)
                 } else {
@@ -1142,13 +1153,23 @@ pub(super) fn run_inner() -> Result<()> {
                         overlay::TRANSPARENT,
                         |f| {
                             if let Some(alpha) = stats_alpha {
-                                overlay::stats(f, &stats_lines, stats_hint(stats_tier), alpha);
+                                overlay::stats(
+                                    f,
+                                    &stats_lines,
+                                    stats_hint(stats_tier),
+                                    alpha,
+                                    stats_corner,
+                                    stats_scale,
+                                );
                             }
                             if let Some(lines) = &log_lines {
                                 overlay::log(f, lines);
                             }
                             if let Some((text, alpha)) = &notif_frame {
                                 overlay::toast(f, text, *alpha);
+                            }
+                            if let Some(alpha) = hint_frame {
+                                overlay::exit_hint(f, exit_hint_text(!pads.is_empty()), alpha);
                             }
                             if ring_visible {
                                 ring.render(f.canvas, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
@@ -1371,6 +1392,19 @@ fn ring_event_for_key(k: sdl3::keyboard::Keycode) -> Option<pf_client_core::menu
         E::Back => K::Back,
         E::Secondary => K::Secondary,
     })
+}
+
+/// The exit hint's time on screen before it fades, and the fade: six seconds in all.
+const EXIT_HINT_HOLD: Duration = Duration::from_millis(5_400);
+const EXIT_HINT_FADE: Duration = Duration::from_millis(600);
+
+/// How to leave with the input in hand: the pad chord when a controller is attached.
+fn exit_hint_text(pad: bool) -> &'static str {
+    if pad {
+        "Hold L1 + R1 + Start + Select to leave"
+    } else {
+        "Hold Back to leave"
+    }
 }
 
 /// What the green button does next: more detail, or hide from the top tier.

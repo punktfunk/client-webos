@@ -382,7 +382,8 @@ pub(super) fn home_key_fired(prev: &mut bool) -> bool {
 pub(super) fn text_input_options(screen: Screen) -> Option<sdl3::keyboard::TextInputOptions> {
     use sdl3::keyboard::{Capitalization, TextInputOptions, TextInputType};
     let input_type = match screen {
-        Screen::AddHost | Screen::EditHost => TextInputType::Text,
+        // Text, not Number: a number pad has no `x` to separate the sides.
+        Screen::AddHost | Screen::EditHost | Screen::CustomSize => TextInputType::Text,
         Screen::RenameCollection | Screen::RenameProfile => TextInputType::Name,
         _ => return None,
     };
@@ -932,7 +933,12 @@ pub(super) fn handle_ui_event(
         Event::KeyDown { keycode: Some(k), .. }
             if matches!(
                 app.nav.screen,
-                Screen::Pairing | Screen::AddHost | Screen::EditHost | Screen::RenameCollection | Screen::RenameProfile
+                Screen::Pairing
+                    | Screen::AddHost
+                    | Screen::EditHost
+                    | Screen::RenameCollection
+                    | Screen::RenameProfile
+                    | Screen::CustomSize
             ) =>
         {
             if let Some(digit) = crate::platform::webos::input::digit_key_value(k) {
@@ -944,6 +950,7 @@ pub(super) fn handle_ui_event(
                         app.enter_collection_name_char((b'0' + digit) as char);
                     }
                     Screen::RenameProfile => app.enter_profile_name_char((b'0' + digit) as char),
+                    Screen::CustomSize => app.screens.custom_size.enter_digit(digit),
                     _ => unreachable!(),
                 }
                 return EventAction::Next;
@@ -985,6 +992,11 @@ pub(super) fn handle_ui_event(
                 Screen::RenameProfile => {
                     for c in text.chars() {
                         app.enter_profile_name_char(c);
+                    }
+                }
+                Screen::CustomSize => {
+                    for c in text.chars() {
+                        app.screens.custom_size.enter_char(c);
                     }
                 }
                 _ => {}

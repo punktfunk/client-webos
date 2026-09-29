@@ -28,6 +28,12 @@ impl App {
                 self.screens.profile_name.text(),
                 self.profile_name_hint(),
             ),
+            Screen::CustomSize => (
+                view::profile::SIZE_TITLE,
+                view::profile::SIZE_SUBTITLE.to_string(),
+                self.screens.custom_size.text(),
+                self.custom_size_hint(),
+            ),
             Screen::AddHost => (
                 view::addhost::ADD_TITLE,
                 view::addhost::ADD_SUBTITLE.to_string(),

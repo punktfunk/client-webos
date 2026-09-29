@@ -29,6 +29,7 @@ pub(crate) enum ScreenKey {
     ResetHdrCalibration,
     SettingsPage,
     RenameProfile,
+    CustomSize,
     DeleteProfile,
     PickProfile,
 }
@@ -55,6 +56,7 @@ impl ScreenKey {
             Screen::ResetHdrCalibration => Self::ResetHdrCalibration,
             Screen::SettingsPage => Self::SettingsPage,
             Screen::RenameProfile => Self::RenameProfile,
+            Screen::CustomSize => Self::CustomSize,
             Screen::DeleteProfile => Self::DeleteProfile,
             Screen::PickProfile => Self::PickProfile,
         }

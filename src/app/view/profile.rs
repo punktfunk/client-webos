@@ -1,5 +1,7 @@
-//! The profile editor's copy: the rename form and the delete confirmation.
+//! The settings page's form copy: the profile rename, the typed size and the profile delete.
 
+pub const SIZE_TITLE: &str = "Custom size";
+pub const SIZE_SUBTITLE: &str = "Width × height in pixels. Right types the ×.";
 pub const RENAME_TITLE: &str = "Name this profile";
 pub const RENAME_SUBTITLE: &str =
     "What the profile is called wherever it is listed — in the host menu, on a card, and on every other client.";

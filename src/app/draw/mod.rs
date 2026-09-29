@@ -48,6 +48,7 @@ pub(crate) const fn ported(screen: Screen) -> bool {
             | Screen::EditHost
             | Screen::RenameCollection
             | Screen::RenameProfile
+            | Screen::CustomSize
             | Screen::Pairing
             | Screen::Wake
             | Screen::SpeedTest
@@ -420,7 +421,7 @@ impl App {
         let focus = self.nav.cursor(crate::app::nav::ScreenKey::of(screen));
         if matches!(
             screen,
-            Screen::AddHost | Screen::EditHost | Screen::RenameCollection | Screen::RenameProfile
+            Screen::AddHost | Screen::EditHost | Screen::RenameCollection | Screen::RenameProfile | Screen::CustomSize
         ) {
             let Some(copy) = self.text_form() else {
                 return;

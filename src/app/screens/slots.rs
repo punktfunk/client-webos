@@ -49,6 +49,8 @@ pub(crate) struct ScreenSlots {
     /// That profile exists only in memory until the name is confirmed — backing out of the
     /// form drops it again, so a mis-press leaves nothing on disk.
     pub(crate) profile_name_new: bool,
+    /// The size being typed on `Screen::CustomSize`.
+    pub(crate) custom_size: TextField,
     /// What `Screen::PickProfile` is picking for.
     pub(crate) profile_pick: Option<crate::app::state::profilepick::ProfilePick>,
     /// The About document's first visible line.

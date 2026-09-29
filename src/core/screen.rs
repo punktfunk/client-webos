@@ -31,6 +31,8 @@ pub enum Screen {
     SettingsPage,
     /// Naming the profile in scope — a text form like the collection's.
     RenameProfile,
+    /// Typing a stream size, `width × height`, for the scope's Resolution.
+    CustomSize,
     /// "Delete profile?" — warns what falls back to the default settings.
     DeleteProfile,
     /// One list of the catalog's profiles, for a host default, a one-off connect, a title's

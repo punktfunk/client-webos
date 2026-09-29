@@ -582,6 +582,12 @@ impl App {
                     true
                 }
             }
+            Screen::CustomSize => {
+                !self.screens.custom_size.text().is_empty() && {
+                    self.screens.custom_size.backspace();
+                    true
+                }
+            }
             Screen::Pairing => self.erase_pin_digit(),
             _ => false,
         }
