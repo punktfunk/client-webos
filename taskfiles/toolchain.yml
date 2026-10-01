@@ -3,7 +3,7 @@ version: '3'
 silent: true
 
 vars:
-  SDL3_RELEASE: release-3.4.16-webos.2
+  SDL3_RELEASE: release-3.4.16-webos.5
   SDL3_SONAME: libSDL3.so.0.4.16
   # Apt cache persists via removed docker-clean hook (otherwise ephemeral).
   DOCKER_MOUNTS: >-
