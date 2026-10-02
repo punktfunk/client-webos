@@ -548,10 +548,9 @@ fn start_launch(
         profile,
     } = want;
     let state = store.snapshot();
-    let fingerprint = state
-        .known_hosts
-        .iter()
-        .find(|h| h.addr == addr && h.port == port)
+    let known = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
+    let delivery = known.and_then(|h| h.delivery);
+    let fingerprint = known
         .and_then(crate::core::model::KnownHost::fingerprint)
         .or_else(|| shared::parse_fp(&fp_hex))
         .context("that host isn't paired with this TV yet")?;
@@ -563,6 +562,7 @@ fn start_launch(
         port,
         fingerprint,
         launch,
+        delivery,
     };
     let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
     Ok((handle, target, settings, gamepad_auto))

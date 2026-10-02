@@ -871,7 +871,11 @@ pub(super) fn run_inner() -> Result<()> {
                             connected.send_input(&gamepad::bit_event(bit, true, pad));
                             tap_up = Some((bit, pad, Instant::now() + TAP_PRESS));
                         }
-                        RingCommand::TogglePadMouse => toggle_pad_mouse(&connected, !pads.is_empty()),
+                        RingCommand::CyclePadMouse => {
+                            if let Err(e) = connected.client.cycle_pad_mouse(u16::from(!pads.is_empty())) {
+                                tracing::warn!("dial: controller mouse: {e}");
+                            }
+                        }
                         // No microphone and no touch surface on a TV. Stream mute needs a zeroed
                         // decoded frame, and NDL's audio plane decodes Opus itself. `ring_facts`
                         // leaves `streamed_game` empty, so the dial never offers End game.
@@ -1225,7 +1229,7 @@ fn ring_facts(
         overlay_actions: settings.overlay_actions.clone(),
         stats_tier: stats.label().into(),
         pad_mouse_target: u16::from(pad),
-        pad_mouse_on: pad && c.pad_mouse() & 1 != 0,
+        pad_mouse: c.pad_mouse_mode(u16::from(pad)),
         invert_scroll: c.invert_scroll(),
         pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
         mode: (m.width, m.height, m.refresh_hz),
@@ -1249,18 +1253,6 @@ fn release_all(
     connected.release_input();
     buttons.release_held(|ev| connected.send_input(ev));
     remote_keys.reset();
-}
-
-/// Flips pad 0 between controller mouse and the game.
-fn toggle_pad_mouse(connected: &crate::session::Connected, pad: bool) {
-    if !pad {
-        return;
-    }
-    let on = connected.client.pad_mouse();
-    let next = if on & 1 != 0 { on & !1 } else { on | 1 };
-    if let Err(e) = connected.client.set_pad_mouse(next) {
-        tracing::warn!("dial: controller mouse: {e}");
-    }
 }
 
 /// A dial shortcut: every key down in order, then up in reverse. A key this build cannot name

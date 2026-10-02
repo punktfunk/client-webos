@@ -105,7 +105,13 @@ fn spawn_connect(
     target: ConnectTarget,
     settings: store::Settings,
 ) -> Result<PendingConnect> {
-    let (host, port, fp, launch) = (target.host, target.port, target.fingerprint, target.launch);
+    let (host, port, fp, launch, delivery) = (
+        target.host,
+        target.port,
+        target.fingerprint,
+        target.launch,
+        target.delivery,
+    );
     let attempt = std::sync::Arc::new(session::ConnectAttempt::default());
     let worker_attempt = attempt.clone();
     std::thread::Builder::new()
@@ -125,6 +131,7 @@ fn spawn_connect(
                     identity,
                     pin: Some(fp),
                     launch,
+                    delivery,
                     // A pinned host is reachable now or off, so a long budget would only hold the
                     // black launch scrim. Waiting on an operator is the pairing flow's job.
                     timeout: crate::services::budget::PROBE,

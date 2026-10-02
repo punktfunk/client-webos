@@ -15,6 +15,8 @@ pub struct ConnectTarget {
     pub fingerprint: [u8; 32],
     /// Library entry id to launch, or `None` for desktop.
     pub launch: Option<String>,
+    /// The delivery profile a network check left on the host's record (`1` capped, `2` smooth).
+    pub delivery: Option<u8>,
 }
 
 /// One saved host: the record every punktfunk client stores (`trust::KnownHost`, flattened

@@ -124,6 +124,8 @@ pub struct ConnectParams {
     pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
     pub display_hdr: quic::HdrMeta,
+    /// Delivery profile to ask the host for (`1` capped, `2` smooth); `None` asks nothing.
+    pub delivery: Option<u8>,
 }
 
 /// One `quic::CODEC_*` bit, or 0 where the preference names no single codec.
@@ -244,6 +246,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         launch: params.launch.clone(),
         pin: params.pin,
         identity: Some(params.identity.clone()),
+        delivery: params.delivery.map(|profile| quic::DeliveryAsk { profile, flags: 0 }),
         // Uncancelable: the connect has its own thread and the caller joins it.
         ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, params.mode, params.timeout)
     })

@@ -382,6 +382,7 @@ impl Service {
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
+            ConsoleCmd::SetHostDelivery { key, profile } => self.set_host_delivery(&key, profile),
             // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -442,6 +443,19 @@ impl Service {
         if self.store.edit(|state| shared::set_pin(state, key, profile_id, pin)) {
             self.handles.console.set_hosts(self.rows());
         }
+    }
+
+    /// Remember the delivery profile a network check offered (`0` clears it); the next connect
+    /// asks the host for it.
+    fn set_host_delivery(&self, key: &str, profile: u8) {
+        self.store.edit(|state| {
+            let Some(i) = shared::find_known(&state.known_hosts, key) else {
+                tracing::warn!(%key, "console: delivery profile for an unknown host");
+                return false;
+            };
+            state.known_hosts[i].delivery = (profile != 0).then_some(profile);
+            true
+        });
     }
 
     /// Drop the pinned certificate and keep the record: the next connect asks for a PIN
@@ -1000,8 +1014,10 @@ impl Service {
                             &key,
                             SpeedPhase::Done {
                                 throughput_kbps: kbps,
-                                loss_pct: r.outcome.loss_pct,
+                                wall: false,
+                                clean: None,
                                 recommended_kbps: crate::core::model::recommended_bitrate_kbps(kbps),
+                                findings: Vec::new(),
                             },
                         );
                     }
