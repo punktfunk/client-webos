@@ -10,8 +10,8 @@ use punktfunk_core::hud::{HudCorner, HudLine, Role};
 use skia_safe::{Canvas, Color4f, RRect, Rect};
 
 use crate::console::ConsoleGl;
-use crate::core::event::MenuEvent;
 use crate::platform::webos::input::RemoteKey;
+use pf_client_core::menu_nav::{MenuDir, MenuEvent};
 
 mod dialog;
 pub(super) mod fade;
@@ -476,7 +476,7 @@ impl ConfirmDialog {
             }
         };
         match nav {
-            Some(MenuEvent::Left | MenuEvent::Right) => {
+            Some(MenuEvent::Move(MenuDir::Left | MenuDir::Right)) => {
                 self.set_focus(1 - focus);
                 Some(ConfirmAction::Navigated)
             }

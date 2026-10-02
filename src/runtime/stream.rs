@@ -1,12 +1,12 @@
 use super::overlay::{self, ConfirmAction, ConfirmDialog};
 use super::*;
 use crate::core::dial::PadRoute;
-use crate::core::event::MenuEvent;
 use crate::core::settings::TvSettings;
 use crate::platform::webos::device;
 use crate::platform::webos::input::{
     webos_scancode_down as key_down, RemoteKey, RemoteKeys, WEBOS_EXIT_SCANCODE, WEBOS_HOME_SCANCODE,
 };
+use pf_client_core::menu_nav::MenuEvent;
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
 use punktfunk_core::hud::{self, Extra, HudCorner, HudLine, Role, StatsSnapshot, StatsVerbosity};
 use std::sync::Arc;
@@ -247,9 +247,10 @@ pub(super) fn run_inner() -> Result<()> {
                 menu_notice = Some("Connection lost".to_string());
                 break 'session StreamOutcome::ReturnToMenu;
             }
-            // Joined BEFORE the window is cleared transparent, so the finished launch zoom stays
-            // on screen across the handshake and NDL load instead of a black punch-through hole,
-            // and a failed connect never uncovers the plane at all.
+            // Joined BEFORE the window is cleared transparent, so whatever covers the connect —
+            // the console's Connecting card, or the reconnect toast — stays on screen across the
+            // handshake and NDL load instead of a black punch-through hole, and a failed connect
+            // never uncovers the plane at all.
             let connected = match connect_thread.join().expect("connect thread panicked") {
                 Ok(c) => c,
                 Err(e) if reconnects > 0 && reconnects < RECONNECT_ATTEMPTS => {
@@ -447,7 +448,8 @@ pub(super) fn run_inner() -> Result<()> {
             // Blue controls text input because streams have no focused text field.
             let mut text_input = TextInputController::new(canvas.window().subsystem().text_input());
             // Transient toasts. `overlay_was_active` catches the fade-out edge so the canvas gets
-            // wiped once; `stats_dst`/`log_dst` recomposite each frame at their own slower cadence.
+            // wiped once; the stats and log cards redraw at their own slower cadence
+            // (`redraw_interval` below).
             let mut notif = overlay::Notification::new();
             // One line per streak of undrawable frames — see `overlay::drawn`.
             let mut overlay_warned = false;
@@ -640,14 +642,14 @@ pub(super) fn run_inner() -> Result<()> {
                         // the host. The pad drives it through `dial`, so its echo must not.
                         // Back first: it closes the dial and SDL3 gives it no keycode.
                         _ if ring.open() && remote_press == Some(RemoteKey::Back) && key_admitted => {
-                            ring.menu(pf_client_core::menu_nav::MenuEvent::Back);
+                            ring.menu(MenuEvent::Back);
                         }
                         Event::KeyDown {
                             keycode: Some(k),
                             repeat: false,
                             ..
                         } if ring.open() && key_admitted => {
-                            if let Some(ev) = ring_event_for_key(k) {
+                            if let Some(ev) = crate::platform::webos::input::menu_event_for_key(k) {
                                 ring.menu(ev);
                             }
                         }
@@ -1305,21 +1307,6 @@ fn raise_keyboard(text_input: &mut TextInputController, w: i32, h: i32, window: 
         sdl3::rect::Rect::new((w - width) / 2, h - 120, width as u32, 60),
         window,
     );
-}
-
-/// The remote's keys as dial events.
-fn ring_event_for_key(k: sdl3::keyboard::Keycode) -> Option<pf_client_core::menu_nav::MenuEvent> {
-    use crate::core::event::MenuEvent as E;
-    use pf_client_core::menu_nav::{MenuDir, MenuEvent as K};
-    Some(match crate::platform::webos::input::menu_event_for_key(k)? {
-        E::Up => K::Move(MenuDir::Up),
-        E::Down => K::Move(MenuDir::Down),
-        E::Left => K::Move(MenuDir::Left),
-        E::Right => K::Move(MenuDir::Right),
-        E::Confirm => K::Confirm,
-        E::Back => K::Back,
-        E::Secondary => K::Secondary,
-    })
 }
 
 /// The exit hint's time on screen before it fades, and the fade: six seconds in all.

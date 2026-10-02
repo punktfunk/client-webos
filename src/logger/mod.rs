@@ -23,7 +23,7 @@ use tracing_subscriber::Layer;
 pub use launch::webos_sdk_override;
 pub use level::resolved_level;
 pub use ring::{recent_lines, set_ring_capture};
-pub use sink::{latest_log_file, previous_log_file};
+pub use sink::{latest_log_file, previous_log_file, MAX_LOG_BYTES};
 
 /// Host-console bundle format: `<RFC3339-Z> <LEVEL> <target> <message>`.
 struct HostLogFormat;

@@ -11,12 +11,12 @@ use skia_safe::{Color4f, RRect, Rect};
 
 use super::overlay::{self, alpha_layer, line_h, opaque_card, wrap, Frame};
 use super::*;
-use crate::core::event::MenuEvent;
 use crate::core::model::{self, HdrDisplay};
 use crate::core::pq;
 use crate::platform::webos::hdr_pattern::{Pattern, Playback};
 use crate::platform::webos::input::{menu_event_for_button, menu_event_for_key, RemoteKey, RemoteKeys};
 use crate::services::hevc::Patch;
+use pf_client_core::menu_nav::{MenuDir, MenuEvent};
 
 /// Where the mosaic centres vertically, as a fraction of picture height — above centre, clear of
 /// the card pinned to the bottom of the screen.
@@ -324,8 +324,8 @@ pub(super) fn run(
                     tracing::info!("HDR calibration cancelled");
                     break 'screen Exit::Menu;
                 }
-                Some(MenuEvent::Left | MenuEvent::Down) => cal.nudge(-1),
-                Some(MenuEvent::Right | MenuEvent::Up) => cal.nudge(1),
+                Some(MenuEvent::Move(MenuDir::Left | MenuDir::Down)) => cal.nudge(-1),
+                Some(MenuEvent::Move(MenuDir::Right | MenuDir::Up)) => cal.nudge(1),
                 Some(MenuEvent::Confirm) => match cal.step.next() {
                     Some(next) => {
                         cal.step = next;

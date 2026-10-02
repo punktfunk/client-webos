@@ -119,7 +119,8 @@ fn stream_mode(settings: &store::Settings, native: Mode) -> Mode {
     }
 }
 
-/// Start the connect on its own thread. Caller joins after animation (or immediately).
+/// Start the connect on its own thread. The caller joins it once `PendingConnect::is_finished`
+/// says so (the console keeps its Connecting card up meanwhile), or right away on a reconnect.
 fn spawn_connect(
     identity: (String, String),
     target: ConnectTarget,
@@ -227,7 +228,7 @@ fn is_core_dump(name: &str) -> bool {
         .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Yellow-button log overlay state (process-lifetime, all screens).
+/// Yellow-button log overlay state (process-lifetime; the stream loop is its only reader).
 /// Explicit discriminants: `cycle_log_overlay` stores `next as u8` and
 /// `log_overlay_state` decodes it — the two must agree.
 #[derive(Clone, Copy, PartialEq, Eq)]

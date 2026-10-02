@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 
 use super::launch;
 
-/// Leaves batch-overrun headroom below the host's 1 MiB log-bundle limit.
-const MAX_LOG_BYTES: u64 = 960 * 1024;
+/// Where the active log rotates, and the most of it "Send logs to host" carries
+/// (`services::logs`). Leaves batch-overrun headroom below the host's 1 MiB log-bundle limit.
+pub const MAX_LOG_BYTES: u64 = 960 * 1024;
 /// Rotations kept (`base.log.1`..`.3`), bounding disk use at
 /// ~`(MAX_LOG_ROTATIONS + 1) * MAX_LOG_BYTES`.
 const MAX_LOG_ROTATIONS: usize = 3;

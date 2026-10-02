@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_client_core::console::{OverlayAction, PointerButton, PointerInput, SessionPhase};
-use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuNav, MenuSample, PadInfo};
+use pf_client_core::menu_nav::{MenuEvent, MenuNav, MenuSample, PadInfo};
 use pf_console_ui::{Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, InputSource, Key, Platform, Viewport};
 
 use super::*;
@@ -504,8 +504,8 @@ fn art_snapshot() -> ArtSnapshot {
     }
 }
 
-/// Bring up (or reuse) the shell's GL context and make it current. Split out so the caller can
-/// answer a failure by handing the screen back rather than by failing the app.
+/// Bring up (or reuse) the shell's GL context and make it current — for the console and for
+/// every overlay frame (`overlay::frame`), which share the one context.
 /// `vsync` blocks the swap on the panel: true for a menu, whose loop has nothing else to do,
 /// false over live video — see [`ConsoleGl::set_swap_interval`].
 pub(super) fn bring_up<'a>(
@@ -680,21 +680,17 @@ fn pointer_button(button: sdl3::mouse::MouseButton) -> Option<PointerButton> {
     }
 }
 
-/// A remote or keyboard key as a menu move. The Magic Remote's own Back is NOT here: it has no `Keycode` rust-sdl3 can name, so the arm
-/// above matches it — with the colour keys — on the key event's `raw` evdev code instead.
+/// A remote or keyboard key as a menu move: the stream overlays' keys (`input::menu_event_for_key`)
+/// plus the shell's page jumps. OK never gets here — [`is_ok`] takes it first. The Magic Remote's
+/// own Back is NOT here either: it has no `Keycode` rust-sdl3 can name, so the arm above matches
+/// it — with the colour keys — on the key event's `raw` evdev code instead.
 fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     use sdl3::keyboard::Keycode as K;
-    Some(match k {
-        K::Up => MenuEvent::Move(MenuDir::Up),
-        K::Down => MenuEvent::Move(MenuDir::Down),
-        K::Left => MenuEvent::Move(MenuDir::Left),
-        K::Right => MenuEvent::Move(MenuDir::Right),
-        K::Backspace | K::Escape | K::AcBack => MenuEvent::Back,
-        K::Delete => MenuEvent::Secondary,
-        K::PageUp => MenuEvent::JumpBack,
-        K::PageDown => MenuEvent::JumpForward,
-        _ => return None,
-    })
+    match k {
+        K::PageUp => Some(MenuEvent::JumpBack),
+        K::PageDown => Some(MenuEvent::JumpForward),
+        _ => crate::platform::webos::input::menu_event_for_key(k),
+    }
 }
 
 /// The remote's OK and a keyboard's Enter: [`Console::ok`] takes both edges, never `menu_event`.
