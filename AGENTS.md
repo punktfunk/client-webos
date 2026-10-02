@@ -19,16 +19,16 @@ desktop/game streaming. Targets webOS 5.x+ (NDL v1 fallback for 3.5-4.x), built 
 | `task deploy TELEMETRY=auto` | install to the TV, stream logs here (`TELEMETRY_LEVEL=debug\|info\|warn\|error`) |
 
 CI lints with `-D warnings` and clippy is load-bearing — run `docker:lint`, not just `check`.
-A host `cargo check` proves nothing: `app`/`platform` are cfg-gated out on macOS.
+A macOS `cargo check` proves little: it cfg-gates out `console`, `platform`, `session`, `runtime`.
 
 ## Architecture
 
 Layered, deps point inward, acyclic:
 
-`core` (pure domain: `Settings`, events, `caps`) ← `services` (portable I/O: store, discovery,
-mTLS, cover cache, wol) ← `session` (streaming on `punktfunk-core`, **no sdl3**) and
-`platform/webos` (the SDL3 and hardware boundary — input, NDL video, audio, evdev) ← `console`
-(the shared shell's GL host and service) ← `runtime` (the menu and stream loops).
+`core` (pure domain: `Settings`, `caps`, the media traits, the dial) ← `services` (portable I/O:
+store, discovery, mTLS, cover cache, wol) ← `session` (streaming on `punktfunk-core`, **no sdl3**)
+and `platform/webos` (the SDL3 and hardware boundary — input, NDL video, audio, evdev) ←
+`console` (the shared shell's GL host and service) ← `runtime` (the menu and stream loops).
 
 - **The only UI is punktfunk's shared controller shell** (`pf_console_ui`). Screens, rows and
   navigation live in the kit; this client adds none. `console::model::Service` answers what the
@@ -46,10 +46,11 @@ mTLS, cover cache, wol) ← `session` (streaming on `punktfunk-core`, **no sdl3*
   Settings` (webos.* rows via `core::settings::TvSettings`); hosts = `trust::KnownHost` flattened
   to `core::model::KnownHost`. Never rebuild from parts — unmapped fields belong to other clients.
   Dropping a field resets that client's row. No migration: unreadable docs → defaults.
-- **Gated tests never run** (`task test` builds host only; armv7 can't run on CI).
-  Real logic in `services::store::shared` (ungated, tested); glue behind the gate.
+- **Gated tests run on a Linux host only** (CI's `task test`, aarch64); a macOS `task test` skips
+  them, and nothing runs on armv7. Keep real logic ungated where it can be (`services::store::
+  shared`, `core::perf`), glue behind the gate.
 - Video: NDL DirectMedia (opaque decode+present, two generations via `device::ndl_generation()`).
-  Audio: client-side Opus, or offload. `core::caps` publishes limits; three readers must align.
+  Audio: client-side Opus, or offload. `core::caps` publishes limits; its readers must align.
 
 **Before platform, perf, or A/V work, read `docs/NOTES.md`** — soft-float, glibc shims, SDL fork,
 NDL audio pacing, measured blind alleys. Debug on the TV early; code theories about this hardware

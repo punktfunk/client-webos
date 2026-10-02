@@ -161,9 +161,6 @@ impl Negotiated {
         // Sound Out does not — webOS folds what its output can't pass (`ndl::log_audio_output`).
         let route_max = params.audio_route.max_channels(caps);
         let audio_channels = params.audio_channels.min(caps.max_channels).min(route_max);
-        if audio_channels > 2 {
-            crate::platform::webos::ndl::log_audio_output();
-        }
         if audio_channels < params.audio_channels {
             // Names the limit that bound: "why is this stereo" is the question the log answers.
             let reason = if audio_channels == route_max {
@@ -292,9 +289,15 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StreamStats::default());
     // Spawns the decode threads; fails atomically if any setup step fails.
-    let media = attempt
-        .enter_media()
-        .and_then(|()| MediaPipeline::build(params, &client, &stop, &stats));
+    let media = attempt.enter_media().and_then(|()| {
+        // Here, right before the load, not at the clamp: the query needs NDL initialised, and an
+        // init with no load behind it — a dial that fails, a launch cancelled mid-handshake —
+        // would leave NDL warm for the next session's load (docs/NOTES.md: init stays lazy).
+        if negotiated.audio_channels > 2 {
+            crate::platform::webos::ndl::log_audio_output();
+        }
+        MediaPipeline::build(params, &client, &stop, &stats)
+    });
     let (pipeline, route) = match media {
         Ok(built) => built,
         Err(e) => {
