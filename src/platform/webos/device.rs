@@ -227,8 +227,8 @@ fn sdl_webos_panel() -> Panel {
 /// by [`probe_panel`] either way.
 pub fn native_mode() -> punktfunk_core::config::Mode {
     let probed = PANEL_SIZE.get().copied().unwrap_or_else(|| {
-        // Not expected; `run_inner` probes before this runs. Worth a warn because the fallback
-        // silently answers 1080p-or-4K either way — no other signal for a wrong mode.
+        // Not expected; `runtime::stream`'s bring-up probes before this runs. Worth a warn because
+        // the fallback silently answers 1080p-or-4K either way — no other signal for a wrong mode.
         tracing::warn!("native mode asked for before the panel was probed — using Luna's UHD flag");
         None
     });
