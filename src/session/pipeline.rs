@@ -74,12 +74,7 @@ impl MediaPipeline {
             Ok(handles) => handles,
             Err(e) => {
                 stop.store(true, Ordering::Relaxed);
-                join_with_timeout(
-                    video_thread,
-                    SHUTDOWN_JOIN_TIMEOUT,
-                    "video",
-                    crate::platform::webos::ndl::poison,
-                );
+                join_ndl_thread(video_thread, "video");
                 return Err(e);
             }
         };
@@ -97,16 +92,22 @@ impl MediaPipeline {
     /// an NDL call, so the caller must skip `ndl::quit()`, and these three are the threads that
     /// touch NDL, so a wedge also refuses new loads until it finishes.
     pub fn join(self) -> bool {
-        use crate::platform::webos::ndl::poison;
-        let mut clean = join_with_timeout(self.video_thread, SHUTDOWN_JOIN_TIMEOUT, "video", poison);
+        let mut clean = join_ndl_thread(self.video_thread, "video");
         if let Some(audio) = self.audio_thread {
-            clean &= join_with_timeout(audio, SHUTDOWN_JOIN_TIMEOUT, "audio", poison);
+            clean &= join_ndl_thread(audio, "audio");
         }
         if let Some(clock) = self.clock_thread {
-            clean &= join_with_timeout(clock, SHUTDOWN_JOIN_TIMEOUT, "clock", poison);
+            clean &= join_ndl_thread(clock, "clock");
         }
         clean
     }
+}
+
+/// The bounded join every NDL-touching thread gets: one still running past the deadline may be
+/// inside an NDL call, so it poisons NDL (`ndl::poison`) for as long as it runs rather than being
+/// raced by the unload.
+fn join_ndl_thread(handle: std::thread::JoinHandle<()>, name: &str) -> bool {
+    join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT, name, crate::platform::webos::ndl::poison)
 }
 
 /// Downgrades the requested route to what the load proved. Software is the default and only
@@ -276,12 +277,7 @@ fn spawn_plane_threads(
         // Avoid detaching threads still feeding NDL.
         Err(e) => {
             stop.store(true, Ordering::Relaxed);
-            join_with_timeout(
-                clock_thread,
-                SHUTDOWN_JOIN_TIMEOUT,
-                "clock",
-                crate::platform::webos::ndl::poison,
-            );
+            join_ndl_thread(clock_thread, "clock");
             Err(e).context("spawn audio pump thread")
         }
     }
