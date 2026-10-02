@@ -116,6 +116,10 @@ pub(crate) struct Service {
 
 impl Service {
     pub(crate) fn new(handles: ConsoleHandles, store: Arc<ConsoleStore>, identity: (String, String)) -> Self {
+        // A host can leave without passing through this service — a reset or torn
+        // `settings.json`, an address changed elsewhere — so its covers are reconciled on every
+        // bring-up, not only when a host is forgotten here.
+        store.with(|s| crate::services::art::reconcile_host_caches(&s.known_hosts));
         Self {
             handles,
             store,
@@ -778,8 +782,10 @@ impl Service {
             true
         });
         if edited {
-            // The address may have moved.
+            // The address may have moved, and its covers are keyed by it.
             self.last_sweep = None;
+            self.store
+                .with(|s| crate::services::art::reconcile_host_caches(&s.known_hosts));
         } else {
             tracing::warn!("console: edit for an unknown host ({key}) — ignoring");
         }
@@ -807,13 +813,10 @@ impl Service {
             return;
         };
         tracing::info!("console: forgot {} ({}:{})", gone.name, gone.addr, gone.port);
-        // Its covers are keyed by host and would otherwise outlive the record. This is the
-        // last moment the address is known. Off the render thread: cache walk costs during frame.
-        let known = self.store.with(|s| s.known_hosts.clone());
-        std::thread::Builder::new()
-            .name("punktfunk-webos-art-reconcile".into())
-            .spawn(move || crate::services::art::reconcile_host_caches(&known))
-            .ok();
+        // Its covers are keyed by host and would otherwise outlive the record. The cache walk
+        // runs on the reconcile's own thread, off the render loop.
+        self.store
+            .with(|s| crate::services::art::reconcile_host_caches(&s.known_hosts));
         // It may still be advertising, in which case it comes straight back as a discovered
         // row — unsaved and unpaired, which is the honest state.
         self.last_sweep = None;
@@ -1156,10 +1159,9 @@ fn spawn_art(
                         .into_iter()
                         .flatten()
                         .find_map(|path| match library::fetch_art(&agent, &addr, mgmt, path) {
-                            Ok(bytes) => {
-                                cache.store(&game.id, &bytes);
-                                Some(bytes)
-                            }
+                            // What the cache kept, not what came over the wire; bytes nothing here
+                            // can decode fall through to the next kind of art.
+                            Ok(bytes) => cache.store(&game.id, bytes),
                             Err(e) => {
                                 tracing::debug!("console: art {path} for {}: {e}", game.id);
                                 None

@@ -124,6 +124,7 @@ fn open_file(app_dir: &Path) -> Result<Sink> {
     if path.metadata().is_ok_and(|m| m.len() > 0) {
         rotate(&path);
     }
+    prune_other_builds(app_dir, &path);
     let file = open_fresh(&path).with_context(|| format!("open log file {}", path.display()))?;
     Ok(Sink::File { file, written: 0, path })
 }
@@ -176,6 +177,46 @@ fn is_log_file(path: &Path) -> bool {
                 .is_some_and(|rotation| rotation.parse::<usize>().is_ok()))
 }
 
+/// Whether `path` is `active` or one of its rotations.
+fn is_this_build(path: &Path, active: &Path) -> bool {
+    let (Some(name), Some(active)) = (
+        path.file_name().and_then(|n| n.to_str()),
+        active.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return false;
+    };
+    name.strip_prefix(active).is_some_and(|rest| {
+        rest.is_empty()
+            || rest
+                .strip_prefix('.')
+                .is_some_and(|rotation| rotation.parse::<usize>().is_ok())
+    })
+}
+
+/// Drops the logs other builds wrote, all but the newest. Every beta build is its own version
+/// (`X.Y.Z+git.<sha>`) and [`rotate`] only ever shifts this build's files, so without this each
+/// update left up to `(MAX_LOG_ROTATIONS + 1) * MAX_LOG_BYTES` behind on the partition every
+/// developer app shares. The newest survives so a crash just before an update can still be sent
+/// ([`latest_log_file`] looks across versions).
+fn prune_other_builds(app_dir: &Path, active: &Path) {
+    let Ok(entries) = std::fs::read_dir(app_dir) else {
+        return;
+    };
+    let mut others: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_log_file(path) && !is_this_build(path, active))
+        .map(|path| {
+            let modified = path.metadata().and_then(|m| m.modified());
+            (path, modified.unwrap_or(std::time::UNIX_EPOCH))
+        })
+        .collect();
+    others.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+    for (path, _) in others.into_iter().skip(1) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The run before this one (`base.log.1`), if it has any lines. A crash is only ever in here:
 /// relaunching to report it rotates the run that crashed out of the active log.
 pub fn previous_log_file(app_dir: &Path) -> Option<PathBuf> {
@@ -205,7 +246,7 @@ pub fn latest_log_file(app_dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod previous_run_tests {
-    use super::{log_file_path, numbered, previous_log_file};
+    use super::{log_file_path, numbered, previous_log_file, prune_other_builds};
 
     /// A relaunch rotates the crashed run to `.1`, and that is the file a report needs.
     #[test]
@@ -218,6 +259,34 @@ mod previous_run_tests {
         assert_eq!(previous_log_file(&dir), None, "an empty rotation is no log");
         std::fs::write(&first, "panicked at stream.rs\n").unwrap();
         assert_eq!(previous_log_file(&dir), Some(first));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Other builds' logs go, all but the newest; this build's rotations and unrelated files stay.
+    #[test]
+    fn other_builds_leave_only_their_last_log() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join(format!("pf-log-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let aged = |name: &str, secs: u64| {
+            let path = dir.join(name);
+            std::fs::write(&path, "line\n").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(secs))
+                .unwrap();
+            path
+        };
+        let oldest = aged("punktfunk-webos-test-older.log.1", 300);
+        let older = aged("punktfunk-webos-test-older.log", 200);
+        let newest = aged("punktfunk-webos-test-newer.log", 100);
+        let active = log_file_path(&dir);
+        let ours = aged(numbered(&active, 1).file_name().unwrap().to_str().unwrap(), 400);
+        let unrelated = aged("settings.json", 500);
+        prune_other_builds(&dir, &active);
+        assert!(newest.exists(), "the newest other build's log is kept");
+        assert!(!older.exists() && !oldest.exists(), "the rest of other builds' logs go");
+        assert!(ours.exists(), "this build's rotations are rotate's business");
+        assert!(unrelated.exists(), "only log files are touched");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
