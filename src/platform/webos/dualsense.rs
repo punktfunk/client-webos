@@ -271,13 +271,15 @@ fn dualsense_blocks<'a>(devices: &'a str) -> impl Iterator<Item = &'a str> + 'a 
 /// Sony's vendor plus a `DualSense`/`Edge` product on a `/proc/bus/input/devices` `I:` line.
 /// The same pair [`super::hidraw`] opens a node by.
 fn is_dualsense_ids(id_line: &str) -> bool {
+    use super::gamepad::{DUALSENSE_EDGE_PID, DUALSENSE_PID, SONY_VID};
     let field = |key: &str| {
         id_line
             .split_whitespace()
             .find_map(|f| f.strip_prefix(key))
             .and_then(|v| u16::from_str_radix(v, 16).ok())
     };
-    field("Vendor=") == Some(0x054c) && field("Product=").is_some_and(|p| p == 0x0ce6 || p == 0x0df2)
+    field("Vendor=") == Some(SONY_VID)
+        && field("Product=").is_some_and(|p| p == DUALSENSE_PID || p == DUALSENSE_EDGE_PID)
 }
 
 /// Owns the pad's feedback state and the thread that ships it.

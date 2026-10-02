@@ -53,6 +53,7 @@ mod pad;
 
 use pad::Pad;
 
+use super::ioctl;
 use super::keyboard;
 use super::mouse;
 
@@ -106,29 +107,39 @@ struct InputEventRaw {
     value: i32,
 }
 
-/// `_IOC(dir, 'E', nr, len)` — the evdev ioctls aren't in the `libc` crate.
-const fn eioc(dir: u32, nr: u32, len: u32) -> libc::c_ulong {
-    ((dir << 30) | (len << 16) | (b'E' as u32) << 8 | nr) as libc::c_ulong
+/// Events one `read` takes. A whole number of them, so a full buffer always means more may be
+/// queued: a byte count that isn't a multiple (1024 against a 64-bit preview's 24-byte events)
+/// made every full read look short and ended the drain early.
+const READ_EVENTS: usize = 64;
+
+/// One `read`'s worth of raw events, in bytes.
+const READ_BYTES: usize = READ_EVENTS * std::mem::size_of::<InputEventRaw>();
+
+/// The events in one `read`'s bytes — evdev only ever hands out whole ones.
+fn events(bytes: &[u8]) -> impl Iterator<Item = InputEventRaw> + '_ {
+    bytes.chunks_exact(std::mem::size_of::<InputEventRaw>()).map(|chunk| {
+        // SAFETY: `InputEventRaw` is plain `repr(C)` integers with no padding invariants, and the
+        // chunk is exactly its size; read unaligned because a byte buffer carries no alignment
+        // guarantee.
+        unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() }
+    })
 }
 
-/// `_IOC(_IOC_READ, 'E', nr, len)`.
+/// `_IOC(_IOC_READ, 'E', nr, len)` — the evdev ioctls aren't in the `libc` crate.
 const fn eviocg(nr: u32, len: u32) -> libc::c_ulong {
-    const IOC_READ: u32 = 2;
-    eioc(IOC_READ, nr, len)
+    ioctl::ioc(ioctl::READ, b'E', nr, len)
 }
 
 /// `EVIOCGRAB` = `_IOW('E', 0x90, int)`. The kernel reads the argument by value (`1` grabs, `0`
 /// releases), not as a pointer, despite the `_IOW` direction.
 const fn eviocgrab() -> libc::c_ulong {
-    const IOC_WRITE: u32 = 1;
-    eioc(IOC_WRITE, 0x90, 4)
+    ioctl::ioc(ioctl::WRITE, b'E', 0x90, 4)
 }
 
 /// `EVIOCSREP` = `_IOW('E', 0x03, unsigned int[2])` — `[REP_DELAY, REP_PERIOD]` in ms, what the
 /// kernel generates `value == 2` autorepeat from.
 const fn eviocsrep() -> libc::c_ulong {
-    const IOC_WRITE: u32 = 1;
-    eioc(IOC_WRITE, 0x03, 8)
+    ioctl::ioc(ioctl::WRITE, b'E', 0x03, 8)
 }
 
 /// Autorepeat delay/period for every keyboard node we own, in ms. The kernel's 250/33 default is
@@ -569,8 +580,7 @@ impl RemoteNode {
     /// Reads every pending event, handing each key press to `pressed`. `false` once the node is
     /// gone.
     pub fn drain(&mut self, mut pressed: impl FnMut(u16)) -> bool {
-        let size = std::mem::size_of::<InputEventRaw>();
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; READ_BYTES];
         loop {
             // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -582,9 +592,7 @@ impl RemoteNode {
                 return false;
             }
             let n = n as usize;
-            for chunk in buf[..n].chunks_exact(size) {
-                // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
-                let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+            for ev in events(&buf[..n]) {
                 if ev.kind == EV_KEY && ev.value == 1 {
                     pressed(ev.code);
                 }
@@ -860,8 +868,7 @@ fn pollfds(devices: &[Device]) -> Vec<libc::pollfd> {
 /// reports the kernel already queued, so summing costs no latency and beats a datagram per event
 /// at 1kHz (the host's own injector coalesces the same way).
 fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) {
-    let size = std::mem::size_of::<InputEventRaw>();
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; READ_BYTES];
     loop {
         // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
         let n = unsafe { libc::read(dev.fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -871,9 +878,9 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
         let n = n as usize;
         if let Some(pad) = dev.pad.as_mut() {
             let uniq = dev.uniq.as_deref();
-            pad.read(&buf[..n], size, &|rich| sink(HidReport::Rich(rich, uniq)));
+            pad.read(&buf[..n], &|rich| sink(HidReport::Rich(rich, uniq)));
         } else {
-            decode_hid(dev, &buf[..n], size, sink, keys);
+            decode_hid(dev, &buf[..n], sink, keys);
         }
         if n < buf.len() {
             break;
@@ -887,12 +894,8 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
 }
 
 /// Decodes one read burst off a mouse/keyboard node — see [`read_device`] for the drain.
-fn decode_hid(dev: &mut Device, buf: &[u8], size: usize, sink: &impl Fn(HidReport), keys: &KeyActivity) {
-    for chunk in buf.chunks_exact(size) {
-        // SAFETY: `InputEventRaw` is plain `repr(C)` integers with no padding
-        // invariants, and the chunk is exactly its size; read unaligned because the
-        // buffer offset carries no alignment guarantee.
-        let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+fn decode_hid(dev: &mut Device, buf: &[u8], sink: &impl Fn(HidReport), keys: &KeyActivity) {
+    for ev in events(buf) {
         match ev.kind {
             EV_REL if dev.mouse => match ev.code {
                 REL_X | REL_Y => {

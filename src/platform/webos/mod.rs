@@ -8,6 +8,7 @@ pub mod gamepad;
 pub mod hdr_pattern;
 pub mod hidraw;
 pub mod input;
+pub(crate) mod ioctl;
 pub mod keyboard;
 pub mod ls2;
 pub mod luna;
