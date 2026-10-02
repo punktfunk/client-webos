@@ -45,33 +45,6 @@ fn local_codec(name: &str) -> CodecPref {
     }
 }
 
-/// This client's pad choice as punktfunk's. Also what the console shell's button-glyph legend
-/// is picked by, which is why it is a value rather than only ever a string.
-pub fn gamepad_pref(t: GamepadType) -> GamepadPref {
-    match t {
-        GamepadType::Auto => GamepadPref::Auto,
-        GamepadType::XboxOne => GamepadPref::XboxOne,
-        GamepadType::DualShock4 => GamepadPref::DualShock4,
-        GamepadType::DualSense => GamepadPref::DualSense,
-        GamepadType::DualSenseEdge => GamepadPref::DualSenseEdge,
-        GamepadType::SwitchPro => GamepadPref::SwitchPro,
-    }
-}
-
-/// The inverse. `None` for a kind this client has no row for (a Steam Deck's pad, say), so the
-/// caller keeps its default rather than showing a control it cannot honour.
-fn local_gamepad(name: &str) -> Option<GamepadType> {
-    Some(match GamepadPref::from_name(name)? {
-        GamepadPref::Auto => GamepadType::Auto,
-        GamepadPref::XboxOne => GamepadType::XboxOne,
-        GamepadPref::DualShock4 => GamepadType::DualShock4,
-        GamepadPref::DualSense => GamepadType::DualSense,
-        GamepadPref::DualSenseEdge => GamepadType::DualSenseEdge,
-        GamepadPref::SwitchPro => GamepadType::SwitchPro,
-        _ => return None,
-    })
-}
-
 /// The typed reads and writes this client makes on the shared document.
 pub trait TvSettings {
     /// Capture is a switch here and a two-name mode in the shared schema.
@@ -96,21 +69,10 @@ pub trait TvSettings {
     /// says where they came from.
     fn set_hdr_display(&mut self, display: HdrDisplay, calibrated: bool);
     /// Normalise to what the active backend can present (`core::caps`), plus the one
-    /// cross-field rule: HDR needs HEVC. Called on load and on every write.
+    /// cross-field rule: HDR needs HEVC. Called on load (`store::load`) and on every launch's
+    /// resolved settings (`store::shared::launch_settings`), so a profile override cannot carry
+    /// a pick this TV cannot present onto the wire.
     fn clamp_to_caps(&mut self);
-}
-
-fn tv_default() -> Settings {
-    let mut s = Settings::default();
-    s.set_hdr_display(
-        HdrDisplay {
-            peak_nits: 800,
-            frame_avg_nits: 150,
-            black_code: 68,
-        },
-        false,
-    );
-    s
 }
 
 impl TvSettings for Settings {
@@ -131,11 +93,15 @@ impl TvSettings for Settings {
     }
 
     fn gamepad_type(&self) -> GamepadType {
-        local_gamepad(&self.gamepad).unwrap_or_default()
+        // A kind this client has no row for (a Steam Deck's pad, say) reads as the default
+        // rather than as a control it cannot honour.
+        GamepadPref::from_name(&self.gamepad)
+            .and_then(GamepadType::from_core)
+            .unwrap_or_default()
     }
 
     fn set_gamepad_type(&mut self, kind: GamepadType) {
-        self.gamepad = gamepad_pref(kind).as_str().to_string();
+        self.gamepad = kind.to_core().as_str().to_string();
     }
 
     fn pad_speaker_on(&self) -> bool {
@@ -143,15 +109,15 @@ impl TvSettings for Settings {
     }
 
     fn hdr_peak_nits(&self) -> u16 {
-        get(self, &key("hdr_peak_nits")).unwrap_or(800)
+        get(self, &key("hdr_peak_nits")).unwrap_or(HdrDisplay::DEFAULT.peak_nits)
     }
 
     fn hdr_frame_avg_nits(&self) -> u16 {
-        get(self, &key("hdr_frame_avg_nits")).unwrap_or(150)
+        get(self, &key("hdr_frame_avg_nits")).unwrap_or(HdrDisplay::DEFAULT.frame_avg_nits)
     }
 
     fn hdr_black_code(&self) -> u16 {
-        get(self, &key("hdr_black_code")).unwrap_or(68)
+        get(self, &key("hdr_black_code")).unwrap_or(HdrDisplay::DEFAULT.black_code)
     }
 
     fn hdr_calibrated(&self) -> bool {
@@ -237,7 +203,9 @@ impl TvSettings for Settings {
 
 /// The document a fresh install starts from: the shared defaults with this TV's own rows.
 pub fn default_document() -> Settings {
-    tv_default()
+    let mut s = Settings::default();
+    s.set_hdr_display(HdrDisplay::DEFAULT, false);
+    s
 }
 
 #[cfg(test)]
@@ -257,7 +225,7 @@ mod tests {
         assert_eq!(s.codec_pref(), CodecPref::Hevc);
         assert_eq!(s.gamepad_type(), GamepadType::DualSense);
         assert!(s.extra.contains_key("webos.audio_route"));
-        assert_eq!(s.hdr_display().peak_nits, 800);
+        assert_eq!(s.hdr_display(), HdrDisplay::DEFAULT);
         let json = serde_json::to_value(&s).unwrap();
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.audio_route(), AudioRoutePref::NdlOpus);

@@ -433,7 +433,7 @@ pub(super) fn run(
             } else {
                 stored_kind
             };
-            crate::core::settings::gamepad_pref(kind)
+            kind.to_core()
         });
         // Rebuilt only when the legend it prints changes: every field but `pref` is fixed for
         // the life of the handle, and building it allocated four strings a frame.

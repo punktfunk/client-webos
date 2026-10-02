@@ -49,7 +49,7 @@ This repo is only the webOS-specific client: an SDL3 UI, NDL DirectMedia hardwar
   full-screen and black levels against test patterns on the video plane. The host then renders to
   that volume.
 - **Audio** — stereo, 5.1 or 7.1 Opus, decoded in software on the TV. An experimental
-  stereo-only route hands the Opus to the TV's media pipeline instead.
+  stereo or 5.1 route hands the Opus to the TV's media pipeline instead.
 - **Library** — the host's game library, custom collections and ordering.
 - **Settings profiles** — punktfunk's shared profiles: a named set of overrides (resolution,
   frame rate, bitrate, codec, HDR, audio, controller) bound to a game, picked per launch, or
@@ -103,7 +103,7 @@ the rest.
 
 `deploy` settings such as `TV_HOST` and `SSH_KEY` can be set in a local `.env` — see
 [`.env.example`](.env.example). Architecture and on-device gotchas live in
-[`docs/NOTES.md`](docs/NOTES.md) and `CLAUDE.md`.
+[`docs/NOTES.md`](docs/NOTES.md) and [`AGENTS.md`](AGENTS.md).
 
 ## License
 
