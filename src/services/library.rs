@@ -223,6 +223,8 @@ pub struct GamesLoaded {
     pub host: String,
     pub port: u16,
     pub mgmt_port: u16,
+    /// The pin the list was fetched under, so the covers that follow it are held to the same one.
+    pub fingerprint: Option<[u8; 32]>,
     pub result: Result<Vec<GameEntry>, LibraryError>,
 }
 
@@ -245,6 +247,7 @@ pub fn load_games_async(
                 host,
                 port,
                 mgmt_port,
+                fingerprint,
                 result,
             });
         })

@@ -34,13 +34,33 @@ impl Drop for PendingConnect {
         let Some(handle) = self.handle.take() else { return };
         let guard = self.attempt.cancel();
         // Hold the load gate before returning to a menu that can launch another session.
-        std::thread::spawn(move || {
+        let joiner = std::thread::spawn(move || {
             if let Ok(Ok(connected)) = handle.join() {
                 connected.disconnect_quit();
                 connected.shutdown_and_quit();
             }
             drop(guard);
         });
+        let mut abandoned = ABANDONED_CONNECTS.lock().unwrap_or_else(PoisonError::into_inner);
+        abandoned.retain(|j| !j.is_finished());
+        abandoned.push(joiner);
+    }
+}
+
+/// The joiners [`PendingConnect`]'s drop leaves behind, until they finish.
+///
+/// Not `ndl::defer_teardown`: a connect already inside its NDL load calls `await_teardown`
+/// itself, which would then join the very thread joining it. Only the exit action waits on these
+/// ([`await_abandoned_connects`]): the host refuses a power action while a session is live, and a
+/// connect abandoned mid-handshake holds one until its joiner says goodbye.
+static ABANDONED_CONNECTS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Blocks until every abandoned connect has been wound down. Bounded: the handshake has its own
+/// timeout and the session teardown joins with one.
+fn await_abandoned_connects() {
+    let abandoned = std::mem::take(&mut *ABANDONED_CONNECTS.lock().unwrap_or_else(PoisonError::into_inner));
+    for joiner in abandoned {
+        let _ = joiner.join();
     }
 }
 
@@ -326,8 +346,9 @@ enum UiOutcome {
     /// The user (or the OS) asked to close the app, carrying the selected host's exit action
     /// UNFIRED — see [`ConnectOutcome::exit_plan`] for why nothing runs it here.
     Quit(Option<crate::services::power::ExitPlan>),
-    /// The remote's Blue key: run HDR calibration, then re-enter the menu.
-    Calibrate,
+    /// The remote's Blue key: run HDR calibration, then re-enter the menu. Carries the exit
+    /// action the way [`Self::Quit`] does, for an app closed from the calibration screen.
+    Calibrate(Option<crate::services::power::ExitPlan>),
 }
 
 enum StreamOutcome {

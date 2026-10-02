@@ -30,22 +30,6 @@ const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 /// link that keeps failing, not for every drop in an evening.
 const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
 
-/// Whether a cosmetic frame drew, warning once per streak. webOS composites this app's
-/// punch-through plane only while it holds the SAM foreground, so a TV panel over the stream —
-/// the settings one the remote opens — fails every GL call on this surface until it closes. That
-/// has to freeze the overlay and nothing else: these calls sit in the stream loop, whose `Err`
-/// leaves `run_inner` and ends the process.
-fn overlay_drawn(result: Result<()>, warned: &mut bool) -> bool {
-    let Err(e) = result else {
-        *warned = false;
-        return true;
-    };
-    if !std::mem::replace(warned, true) {
-        tracing::warn!("overlay frame skipped — this surface is not ours to draw on: {e:#}");
-    }
-    false
-}
-
 /// Puts the reconnect toast up over the emptied video plane and starts dial `attempt`.
 fn redial(
     attempt: u8,
@@ -61,7 +45,7 @@ fn redial(
     let frame = overlay::frame(gl, canvas, fonts, display, overlay::TRANSPARENT, |f| {
         overlay::toast(f, &text, 1.0);
     });
-    overlay_drawn(frame, &mut false);
+    overlay::drawn(frame, &mut false);
     std::thread::sleep(RECONNECT_PAUSE);
     spawn_connect(identity.clone(), dial.0.clone(), dial.1.clone())
 }
@@ -234,10 +218,10 @@ pub(super) fn run_inner() -> Result<()> {
         } = match ui {
             UiOutcome::Launch(outcome) => *outcome,
             UiOutcome::Quit(plan) => break 'menu plan,
-            UiOutcome::Calibrate => {
+            UiOutcome::Calibrate(plan) => {
                 match calibration::run(&canvas, &mut console_gl, &mut events, &overlay_fonts, display)? {
                     calibration::Exit::Menu => continue 'menu,
-                    calibration::Exit::Quit => break 'menu None,
+                    calibration::Exit::Quit => break 'menu plan,
                 }
             }
         };
@@ -312,7 +296,9 @@ pub(super) fn run_inner() -> Result<()> {
             // `hide()` unmaps the surface entirely, silently breaking the Magic Remote's pointer
             // forwarding since Wayland has nowhere left to route motion. aurora-tv never hides its
             // window either — stays mapped, cleared fully transparent so the video shows through.
-            overlay::wipe(&mut console_gl, &canvas, &overlay_fonts)?;
+            // Cosmetic like every overlay frame: a TV panel up at this moment must not end the app.
+            // A wipe that could not draw stays owed (`overlay_was_active` below).
+            let initial_wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
             // Local pointer hidden unless "Cursor capture" is off — otherwise it and the host's own
             // forwarded-position cursor read as "the pointer doesn't match the mouse".
             let mut cursor = cursor::Cursor::new(sdl.mouse());
@@ -463,13 +449,13 @@ pub(super) fn run_inner() -> Result<()> {
             // Transient toasts. `overlay_was_active` catches the fade-out edge so the canvas gets
             // wiped once; `stats_dst`/`log_dst` recomposite each frame at their own slower cadence.
             let mut notif = overlay::Notification::new();
-            // One line per streak of undrawable frames — see `overlay_drawn`.
+            // One line per streak of undrawable frames — see `overlay::drawn`.
             let mut overlay_warned = false;
             // When the current freeze-until-reanchor hold began (`stats.holding`, see `session::pump`),
             // and whether it has been announced — see `HOLD_TOAST_AFTER`.
             let mut hold_since: Option<Instant> = None;
             let mut hold_toasted = false;
-            let mut overlay_was_active = false;
+            let mut overlay_was_active = !overlay::drawn(initial_wipe, &mut overlay_warned);
             // The stats card's lines, rebuilt from the core's window once a second (and on a
             // tier change), and the log tail on its 500 ms cadence; drawn as they stand between.
             let mut stats_lines: Vec<HudLine> = Vec::new();
@@ -486,10 +472,12 @@ pub(super) fn run_inner() -> Result<()> {
             // The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
             let mut ring = pf_console_ui::Ring::new();
             let mut ring_was_open = false;
+            // The disconnect dialog takes the pads too — see the edge below the dialog's openers.
+            let mut dialog_was_open = false;
             let mut ring_drawn = 0u64;
             let mut ring_drawn_at = Instant::now();
             let native_mode = connected.client.mode();
-            // A dial tap of Guide or QAM still owes its release: `(bit, due)`.
+            // A dial tap of Guide or QAM still owes its release: `(bit, pad, due)`.
             let mut tap_up: Option<(u32, u8, Instant)> = None;
             let mut ring_stats = false;
             // Short Back tap forwards Esc; a held Back becomes webOS's EXIT gesture, polled below.
@@ -821,7 +809,11 @@ pub(super) fn run_inner() -> Result<()> {
                     } else {
                         for slot in pads.iter_mut() {
                             slot.dial.closed();
-                            slot.resend_sticks(&connected);
+                            // A dial the dialog cancelled hands the pad to the dialog, not the
+                            // host: the dialog's own close re-sends them.
+                            if !disconnect.is_open() {
+                                slot.resend_sticks(&connected);
+                            }
                         }
                     }
                 }
@@ -897,8 +889,8 @@ pub(super) fn run_inner() -> Result<()> {
                     }
                 }
                 // An open dialog swallows pointer input from here on, so no release ever arrives for
-                // whatever is down — the same trap `DisconnectChord::clear` covers for the pad. Done
-                // here rather than at each `open` site so every path into the dialog is covered.
+                // whatever is down. Done here rather than at each `open` site so every path into the
+                // dialog is covered; the pads are handed over on the dialog's edge below.
                 if disconnect.is_open() {
                     if !input_suspended {
                         connected.release_input();
@@ -919,6 +911,25 @@ pub(super) fn run_inner() -> Result<()> {
                 // The dialog owns input and the canvas, so the dial gives way to it.
                 if disconnect.is_open() && ring.open() {
                     ring.input(RingInput::Cancel);
+                }
+                // The dialog swallows every pad event while it is up, so it takes the pads the way
+                // the dial does: whatever the host holds — the chord's own four buttons included —
+                // is released on the way in. On the way out each pad's bookkeeping starts over, since
+                // presses and releases made inside the dialog never reached it (a release the host
+                // already had is harmless; a stale "held" bit would swallow the next real release),
+                // and the sticks are re-sent because SDL reports only changes.
+                let dialog_open = disconnect.is_open();
+                if dialog_open != dialog_was_open {
+                    dialog_was_open = dialog_open;
+                    for slot in pads.iter_mut() {
+                        if dialog_open {
+                            slot.chord.clear();
+                            slot.release_held(&connected);
+                        } else {
+                            slot.dial.clear();
+                            slot.resend_sticks(&connected);
+                        }
+                    }
                 }
                 // Re-opens the webOS launcher; a long Back fires EXIT above, never this.
                 if home_key_fired(&mut home_held) {
@@ -1000,7 +1011,7 @@ pub(super) fn run_inner() -> Result<()> {
                             disconnect.draw(f);
                         },
                     );
-                    overlay_drawn(frame, &mut overlay_warned);
+                    overlay::drawn(frame, &mut overlay_warned);
                 } else if dialog_frame.is_none() && dialog_animating {
                     // Close-fade just finished. Confirmed Disconnect: break now, nothing to wipe
                     // since the pre-stream UI takes the canvas next.
@@ -1009,7 +1020,7 @@ pub(super) fn run_inner() -> Result<()> {
                     }
                     // Cancel/Back: wipe the last frame so it doesn't stick over the video.
                     let wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
-                    overlay_drawn(wipe, &mut overlay_warned);
+                    overlay::drawn(wipe, &mut overlay_warned);
                 }
                 // Audio drains on its own threads either way now — the software path on
                 // `session::pump`'s feed thread into SDL's audio callback, the offloaded path on
@@ -1047,7 +1058,7 @@ pub(super) fn run_inner() -> Result<()> {
                     // Nothing else clears this window when the last overlay disappears.
                     // A wipe that could not draw stays owed, so the next tick tries it again.
                     let wipe = overlay::wipe(&mut console_gl, &canvas, &overlay_fonts);
-                    overlay_was_active = !overlay_drawn(wipe, &mut overlay_warned);
+                    overlay_was_active = !overlay::drawn(wipe, &mut overlay_warned);
                 } else {
                     overlay_was_active = overlay_active;
                 }
@@ -1107,7 +1118,7 @@ pub(super) fn run_inner() -> Result<()> {
                             }
                         },
                     );
-                    overlay_drawn(frame, &mut overlay_warned);
+                    overlay::drawn(frame, &mut overlay_warned);
                 }
                 // The decoder is gone for this load (`core::media::VideoSink::is_dead`, set by the
                 // pump). The transport is still healthy, so nothing below would ever end the session
@@ -1209,6 +1220,8 @@ pub(super) fn run_inner() -> Result<()> {
     // process is ending — a request abandoned mid-flight does nothing.
     crate::platform::webos::ndl::await_teardown();
     if let Some(plan) = exit_plan {
+        // A connect abandoned on the Connecting card may still hold a host session.
+        super::await_abandoned_connects();
         plan.run();
     }
     tracing::info!("punktfunk-webos exiting cleanly");

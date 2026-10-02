@@ -110,8 +110,14 @@ pub(super) fn run(
     let mut last_pref: Option<Option<punktfunk_core::config::GamepadPref>> = None;
     let mut menu_out: Vec<MenuEvent> = Vec::new();
     let mut last_input = Instant::now();
-    let mut home_held = false;
-    let mut exit_held = false;
+    // Seeded from live key state, as the stream loop does: these are rising-edge polls, and the
+    // console is often entered BY a held Back — the EXIT gesture that left HDR calibration or
+    // cancelled a reconnect. Seeded `false`, its still-down key read as a fresh press on the
+    // first tick and quit the app.
+    let mut home_held =
+        crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_HOME_SCANCODE);
+    let mut exit_held =
+        crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_EXIT_SCANCODE);
     // The one resolver for the remote's own keys in this loop — see `RemoteKeys`.
     let mut remote_keys = crate::platform::webos::input::RemoteKeys::default();
     // A launch the shell committed: the connect runs while the shell keeps drawing its
@@ -168,7 +174,7 @@ pub(super) fn run(
                     RemoteKey::Blue if !console.editing() => {
                         if crate::core::caps::video_caps().hdr {
                             tracing::info!("console: opening HDR calibration");
-                            break 'ui UiOutcome::Calibrate;
+                            break 'ui UiOutcome::Calibrate(exit_plan(&service, identity));
                         }
                         handles
                             .console

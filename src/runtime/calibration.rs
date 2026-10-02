@@ -289,6 +289,8 @@ pub(super) fn run(
     };
     let mut remote_keys = RemoteKeys::default();
     let mut exit_held = true;
+    // One line per streak of undrawable frames — see `overlay::drawn`.
+    let mut overlay_warned = false;
     let exit = 'screen: loop {
         let started = Instant::now();
         if QUIT_REQUESTED.load(Ordering::Relaxed) {
@@ -343,7 +345,10 @@ pub(super) fn run(
         } else {
             Color4f::new(0.0, 0.0, 0.0, 1.0)
         };
-        overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal))?;
+        // A TV panel over the pattern (picture settings, the natural thing to open here) fails
+        // every GL call on this surface until it closes: the card freezes, the screen stays.
+        let frame = overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal));
+        overlay::drawn(frame, &mut overlay_warned);
         let elapsed = started.elapsed();
         if elapsed < TICK {
             std::thread::sleep(TICK - elapsed);
@@ -351,7 +356,9 @@ pub(super) fn run(
     };
     // Dropping the feed unloads NDL, which has to happen before a stream loads its own player.
     drop(cal);
-    overlay::wipe(gl, canvas, fonts)?;
+    // The console redraws the whole surface on its first frame, so a wipe that could not draw
+    // here costs nothing.
+    overlay::drawn(overlay::wipe(gl, canvas, fonts), &mut overlay_warned);
     Ok(exit)
 }
 

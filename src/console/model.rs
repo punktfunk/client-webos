@@ -567,6 +567,7 @@ impl Service {
             loaded.mgmt_port,
             loaded.port,
             self.identity.clone(),
+            loaded.fingerprint,
             games,
         ));
     }
@@ -1068,7 +1069,12 @@ fn power_rows(rights: PowerRights) -> Vec<HostAction> {
 }
 
 /// The wake-and-wait loop: re-send the magic packet every 6 s, probe once a second, give up at
-/// 90 s. The thread owns the wake card; the shell reads `online`/`timed_out` and acts.
+/// 90 s. The thread owns the wake card until cancelled; the shell reads `online`/`timed_out` and
+/// acts.
+///
+/// A cancelled worker leaves the card alone: whoever cancelled it owns the card from then on —
+/// `CancelWake` clears it, and a fresh `Wake` hands it to the next worker, whose card a stale
+/// clear from this one would wipe.
 fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_connect: bool, cancel: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("punktfunk-webos-console-wake".into())
@@ -1078,7 +1084,6 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
             let mut last_packet: Option<Instant> = None;
             loop {
                 if cancel.load(Ordering::SeqCst) {
-                    handles.console.set_wake(None);
                     return;
                 }
                 let elapsed = started.elapsed();
@@ -1088,6 +1093,13 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
                     last_packet = Some(Instant::now());
                 }
                 let online = punktfunk_core::client::NativeClient::probe(&row.addr, row.port, budget::PROBE);
+                // Again after the probe, which blocks for up to `budget::PROBE` — where a cancel
+                // against a sleeping host almost always lands. Publishing now would put back the
+                // card the cancel just cleared, and an `online` with `then_connect` would launch
+                // the stream the user had just called off.
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
                 handles.console.set_wake(Some(WakeStatus {
                     key: row.key.clone(),
                     name: row.name.clone(),
@@ -1115,14 +1127,24 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
 ///
 /// Disk first (`services::art`): leaving a shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
 /// reason returning to the host list felt slow.
-fn spawn_art(addr: String, mgmt: u16, port: u16, identity: (String, String), games: Vec<GameEntry>) -> ArtReceiver {
+///
+/// Held to the pin the library list itself was fetched under: covers come over the same mTLS lane,
+/// and an unpinned agent would hand this TV's client certificate — and the cover cache and image
+/// decoder — to whoever answered at the host's address.
+fn spawn_art(
+    addr: String,
+    mgmt: u16,
+    port: u16,
+    identity: (String, String),
+    pin: Option<[u8; 32]>,
+    games: Vec<GameEntry>,
+) -> ArtReceiver {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancelled.clone();
     std::thread::Builder::new()
         .name("punktfunk-webos-console-art".into())
         .spawn(move || {
-            let pin = None;
             let Ok(agent) = library::agent(&identity, pin) else {
                 return;
             };

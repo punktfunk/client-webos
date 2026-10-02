@@ -142,6 +142,22 @@ pub(super) fn frame(
     Ok(())
 }
 
+/// Whether a cosmetic frame drew, warning once per streak. webOS composites this app's
+/// punch-through plane only while it holds the SAM foreground, so a TV panel over the video —
+/// the settings one the remote opens — fails every GL call on this surface until it closes. That
+/// has to freeze the overlay and nothing else: the stream and calibration loops' `Err` leaves
+/// `run_inner` and ends the process.
+pub(super) fn drawn(result: Result<()>, warned: &mut bool) -> bool {
+    let Err(e) = result else {
+        *warned = false;
+        return true;
+    };
+    if !std::mem::replace(warned, true) {
+        tracing::warn!("overlay frame skipped — this surface is not ours to draw on: {e:#}");
+    }
+    false
+}
+
 /// Fully transparent: what the stream clears to so the video plane shows through.
 pub(super) const TRANSPARENT: Color4f = Color4f::new(0.0, 0.0, 0.0, 0.0);
 
