@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 
+use crate::platform::webos::dl::{self, Lib};
+
 const LIB_NAME: &CStr = c"libNDL_directmedia.so.1";
 
 // --- C structs -------------------------------------------------------------------------------
@@ -327,47 +329,13 @@ impl V1 {
 
 // --- Resolution ------------------------------------------------------------------------------
 
-/// An open handle to [`LIB_NAME`]. Never closed — the resolved function pointers outlive it by
-/// design, as a `DT_NEEDED` load would have.
-struct Lib(*mut c_void);
-
-impl Lib {
-    /// `RTLD_GLOBAL` matches what a `DT_NEEDED` load would have given the process.
-    fn open() -> Result<Self> {
-        // SAFETY: `LIB_NAME` is a NUL-terminated literal.
-        let handle = unsafe { libc::dlopen(LIB_NAME.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
-        if handle.is_null() {
-            bail!("dlopen({LIB_NAME:?}) failed — NDL DirectMedia is not available on this device");
-        }
-        Ok(Self(handle))
-    }
-
-    /// One symbol, or an error naming it — *which* symbol is missing is what says which
-    /// generation this device has. `T` must be a function-pointer type.
-    fn sym<T: Sized>(&self, name: &CStr) -> Result<T> {
-        // SAFETY: `self.0` is a live `dlopen` handle and `name` NUL-terminated.
-        let ptr = unsafe { libc::dlsym(self.0, name.as_ptr()) };
-        if ptr.is_null() {
-            bail!("{LIB_NAME:?} is missing symbol {name:?}");
-        }
-        debug_assert_eq!(size_of::<T>(), size_of::<*mut c_void>(), "T must be a function pointer");
-        // SAFETY: `T` is a function-pointer type and `ptr` is non-null and dlsym-verified.
-        Ok(unsafe { std::mem::transmute_copy(&ptr) })
-    }
-}
-
-/// Resolve a table once, caching the outcome **including the failure**: a symbol missing from
-/// this device's library won't appear on a retry. Text rather than `anyhow::Error` because
-/// errors aren't `Clone` and callers only print it.
+/// Resolve a table once from [`LIB_NAME`], caching the outcome including the failure — the
+/// shared [`dl::cached`], named for the log.
 fn cached<T: 'static>(
     cache: &'static OnceLock<std::result::Result<T, String>>,
     build: impl FnOnce(&Lib) -> Result<T>,
 ) -> Result<&'static T> {
-    cache
-        .get_or_init(|| Lib::open().and_then(|lib| build(&lib)).map_err(|e| format!("{e:#}")))
-        .as_ref()
-        .map_err(|e| anyhow::Error::msg(e.clone()))
-        .context("NDL DirectMedia")
+    dl::cached(cache, LIB_NAME, build).context("NDL DirectMedia")
 }
 
 pub(super) fn common() -> Result<&'static Common> {

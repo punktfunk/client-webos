@@ -428,10 +428,13 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 fn ensure_init(app_id: &str, api2: bool) -> Result<()> {
     // The last session may still be unloading behind the menu.
     await_teardown();
+    // Resolved before the flag flips: a library that fails to resolve must not leave `INIT_DONE`
+    // set with nothing initialised (every later call would answer `Ok`), and `quit` relies on a
+    // set flag meaning the table resolved.
+    let fns = ffi::common()?;
     if INIT_DONE.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    let fns = ffi::common()?;
     let c_app_id = CString::new(app_id).unwrap_or_default();
     if let Err(e) = fns.init(&c_app_id, api2) {
         INIT_DONE.store(false, Ordering::SeqCst);

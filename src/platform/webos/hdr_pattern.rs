@@ -110,10 +110,15 @@ impl Drop for Playback {
         let Some(handle) = self.handle.take() else { return };
         // A thread wedged inside FFI must not be raced by the unload, so a timed-out join poisons
         // NDL instead of quitting it — same contract, and the same helper, as a stream's teardown.
-        if join_with_timeout(handle, JOIN_TIMEOUT, "hdr-pattern", ndl::poison) {
-            ndl::quit();
-        } else {
+        if !join_with_timeout(handle, JOIN_TIMEOUT, "hdr-pattern", ndl::poison) {
             tracing::warn!("HDR pattern feed did not stop in time — skipping NDL unload for this run");
+        } else if let Err(e) = ndl::ensure_not_poisoned() {
+            // The feed's load was refused at that same gate — a wedged session thread or a
+            // cancelled connect still inside NDL — so it never touched NDL, and quitting now would
+            // race whoever is.
+            tracing::info!("HDR pattern: leaving NDL to its current owner ({e:#})");
+        } else {
+            ndl::quit();
         }
     }
 }

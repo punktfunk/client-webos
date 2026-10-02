@@ -30,34 +30,45 @@ use plane::PLANE_CONFIRM_GRACE;
 /// must cost the picture, never the session.
 const DEAD_AFTER_REFUSED: Duration = Duration::from_secs(10);
 
-/// How long the pipeline has been refusing every frame, as ns-since-load of the streak's first
-/// refusal (0 = frames are landing).
+/// How long the pipeline has been refusing every frame it was offered: the span from the
+/// streak's first refusal to its latest, as ns-since-load (0 = frames are landing).
 ///
 /// NDL only latches [`super::FATAL`] for the one state measured to kill a load, and deliberately
 /// refuses to read an unmapped state as fatal. A pipeline whose resources the TV reclaimed can
 /// therefore die with no callback anyone can name, and the feeds are then the only evidence.
+///
+/// First to LATEST refusal, not first refusal to now: only an attempt is evidence. After a
+/// refusal the stage holds and feeds nothing until a reanchor, and an idle host sends nothing at
+/// all, so time since the first refusal also counts stretches where nothing was tried — a static
+/// desktop held for ten seconds then ended a healthy session on its next frame, before NDL had
+/// seen it. A pipeline that is really gone keeps refusing the reanchors the hold asks for.
 #[derive(Default)]
-struct RefusalStreak(AtomicU64);
+struct RefusalStreak {
+    first: AtomicU64,
+    last: AtomicU64,
+}
 
 impl RefusalStreak {
-    /// Records one feed at `now_ns` (ns since load). The streak keeps its FIRST refusal, since
-    /// its age is what [`Self::len`] answers with.
+    /// Records one feed at `now_ns` (ns since load). Called on the feeding thread only.
     fn note(&self, fed: bool, now_ns: u64) {
         if fed {
-            self.0.store(0, Ordering::Relaxed);
+            self.first.store(0, Ordering::Relaxed);
+            self.last.store(0, Ordering::Relaxed);
         } else {
             // `max(1)` so a refusal in the first ns of a load still reads as a streak.
+            let now_ns = now_ns.max(1);
             let _ = self
-                .0
-                .compare_exchange(0, now_ns.max(1), Ordering::Relaxed, Ordering::Relaxed);
+                .first
+                .compare_exchange(0, now_ns, Ordering::Relaxed, Ordering::Relaxed);
+            self.last.store(now_ns, Ordering::Relaxed);
         }
     }
 
-    /// How long every feed has failed for; zero while any is landing.
-    fn len(&self, now_ns: u64) -> Duration {
-        match self.0.load(Ordering::Relaxed) {
+    /// How long every attempted feed has failed for; zero while any is landing.
+    fn span(&self) -> Duration {
+        match self.first.load(Ordering::Relaxed) {
             0 => Duration::ZERO,
-            since => Duration::from_nanos(now_ns.saturating_sub(since)),
+            first => Duration::from_nanos(self.last.load(Ordering::Relaxed).saturating_sub(first)),
         }
     }
 }
@@ -224,7 +235,7 @@ impl VideoSink for std::sync::Arc<NdlVideo> {
     /// a reclaimed plane can refuse every frame without ever reporting a state anyone can name,
     /// and the session must end rather than sit on a picture that cannot come back.
     fn is_dead(&self) -> bool {
-        let refused = self.refused.len(self.elapsed_ns());
+        let refused = self.refused.span();
         if refused > DEAD_AFTER_REFUSED {
             tracing::error!("NDL refused every frame for {refused:?} — the pipeline is gone");
             return true;
@@ -235,38 +246,44 @@ impl VideoSink for std::sync::Arc<NdlVideo> {
 
 #[cfg(test)]
 mod refusal_tests {
+    use std::time::Duration;
+
     use super::{RefusalStreak, DEAD_AFTER_REFUSED};
 
     const S: u64 = 1_000_000_000;
 
-    /// A streak times from its first refusal, and one accepted frame ends it.
+    /// A streak spans its first refusal to its latest, and one accepted frame ends it.
     #[test]
     fn only_an_unbroken_streak_ages() {
         let streak = RefusalStreak::default();
-        assert_eq!(
-            streak.len(S),
-            std::time::Duration::ZERO,
-            "nothing fed yet is not a refusal"
-        );
+        assert_eq!(streak.span(), Duration::ZERO, "nothing fed yet is not a refusal");
         streak.note(false, S);
         streak.note(false, 5 * S);
-        assert_eq!(
-            streak.len(11 * S).as_secs(),
-            10,
-            "aged from the FIRST refusal, not the last"
-        );
+        assert_eq!(streak.span().as_secs(), 4, "first to latest refusal");
+        streak.note(false, 11 * S);
         assert!(
-            streak.len(11 * S) <= DEAD_AFTER_REFUSED,
+            streak.span() <= DEAD_AFTER_REFUSED,
             "the ceiling itself is not yet dead"
         );
-        assert!(streak.len(12 * S) > DEAD_AFTER_REFUSED);
+        streak.note(false, 12 * S);
+        assert!(streak.span() > DEAD_AFTER_REFUSED);
         streak.note(true, 12 * S);
-        assert_eq!(
-            streak.len(30 * S),
-            std::time::Duration::ZERO,
-            "one accepted frame clears it"
-        );
+        assert_eq!(streak.span(), Duration::ZERO, "one accepted frame clears it");
         streak.note(false, 31 * S);
-        assert!(streak.len(32 * S) < DEAD_AFTER_REFUSED, "a fresh streak starts over");
+        assert!(streak.span() < DEAD_AFTER_REFUSED, "a fresh streak starts over");
+    }
+
+    /// Time with no feed attempt is not evidence: one refusal, then a long hold or an idle host,
+    /// is a streak of one frame however long ago it was.
+    #[test]
+    fn idle_time_is_not_a_refusal() {
+        let streak = RefusalStreak::default();
+        streak.note(false, S);
+        assert_eq!(streak.span(), Duration::ZERO);
+        streak.note(false, 30 * S);
+        assert!(
+            streak.span() > DEAD_AFTER_REFUSED,
+            "the next attempt refused too: now it is evidence"
+        );
     }
 }
