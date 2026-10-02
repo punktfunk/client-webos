@@ -152,7 +152,7 @@ impl PatchRect {
 }
 
 /// One CTU row of luma, written into `row` — only ever needed for the handful of CTUs a patch
-/// edge crosses. The rows below 1080 are never covered by a patch, so they inherit the
+/// edge crosses. The rows below [`HEIGHT`] are never covered by a patch, so they inherit the
 /// background and the crop boundary cannot show.
 fn ctu_row(rects: &[PatchRect], background: u16, cx: u32, y: u32, row: &mut [u16]) {
     row.fill(background);

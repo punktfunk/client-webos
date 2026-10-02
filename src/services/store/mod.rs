@@ -37,12 +37,7 @@ fn read_document() -> Option<Value> {
 
 /// Loads the whole persisted document. Absent, unreadable and unparseable all answer with
 /// defaults — a torn file must not take the app down (`services::atomic` is what prevents one).
-///
-/// Migrates the pre-consolidation layout in place, so callers never see the old shape.
 pub fn load() -> Persisted {
-    // A nested `settings` key means the current shape. Otherwise the fields sit at the top level
-    // — or the file is missing entirely, which still needs migrating, since pairing a host wrote
-    // `known-hosts.json` without ever writing settings.
     let mut state = read_document().map_or_else(Persisted::default, from_document);
     stamp_version(&mut state);
     // A document written on a more capable TV can hold HEVC, HDR and 7.1 on a device with none
@@ -66,9 +61,8 @@ fn stamp_version(state: &mut Persisted) {
     }
 }
 
-/// The document, with its `settings` object read out of the shared schema into this client's
-/// own shape (see [`shared`]). A pre-shared object is converted here once; the next [`save`]
-/// writes it back in the shared schema.
+/// The document as stored: its `settings` object is the shared schema verbatim (see [`shared`]).
+/// No migration — a document that doesn't deserialize answers with defaults.
 fn from_document(doc: Value) -> Persisted {
     serde_json::from_value(doc).unwrap_or_default()
 }

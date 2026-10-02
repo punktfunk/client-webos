@@ -124,8 +124,8 @@ impl StateWriter {
 
 impl Drop for StateWriter {
     /// Wakes the worker with `stop` set so it exits after flushing any pending save, then joins it
-    /// — otherwise every menu re-entry (a fresh `App`, a fresh `StateWriter`) leaked one thread
-    /// parked forever on the `Condvar`.
+    /// — otherwise every menu re-entry (`console_flow::run` spawns a fresh `StateWriter`) leaked
+    /// one thread parked forever on the `Condvar`.
     fn drop(&mut self) {
         let (lock, cvar) = &*self.queue;
         lock.lock().expect(POISONED).stop = true;

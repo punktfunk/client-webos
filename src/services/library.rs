@@ -2,8 +2,7 @@
 //! https://<host>:<mgmt_port>/api/v1/library`, mTLS-authenticated by this device's
 //! paired identity (no bearer token — the host authorizes by client certificate).
 //! A trimmed port of `pf-client-core::library` (same wire shape, same mTLS pinning
-//! verifier) rather than a dependency on that crate — see `session.rs`'s module docs
-//! for why this client doesn't pull in `pf-client-core` at all.
+//! verifier).
 use std::sync::Arc;
 
 use ureq::unversioned::resolver::DefaultResolver;
@@ -80,7 +79,7 @@ pub(crate) fn base_url(addr: &str, mgmt_port: u16) -> String {
 }
 
 /// Builds mTLS `ureq::Agent` reusable across requests (avoids repeated TLS handshakes).
-/// Exposed for art.rs to build once outside its per-game loop.
+/// Exposed for `console::model` to build once outside its per-game art loop.
 pub fn agent(identity: &(String, String), pin: Option<[u8; 32]>) -> Result<ureq::Agent, LibraryError> {
     agent_within(identity, pin, crate::services::budget::REQUEST)
 }
@@ -255,14 +254,14 @@ pub fn load_games_async(
     rx
 }
 
-/// Fetches one piece of cover art's raw bytes (JPEG/PNG, undecoded) from a
-/// host-relative `art_path` (one of `GameEntry::art`'s fields), reusing an
-/// already-built `agent` (see `fetch_games`) to avoid a fresh mTLS handshake per
-/// cover. Decoding happens in `art.rs`, off this module's REST concern.
 /// Content types this build can decode. CDNs ignoring this header (Steam) send WebP, caught
 /// from the header before body downloads. `q=0.1` on wildcard keeps hosts that ignore headers working.
 const ART_ACCEPT: &str = "image/jpeg,image/png,image/*;q=0.1";
 
+/// Fetches one piece of cover art's raw bytes (JPEG/PNG, undecoded) from a
+/// host-relative `art_path` (one of `GameEntry::art`'s fields), reusing an
+/// already-built `agent` (see `fetch_games`) to avoid a fresh mTLS handshake per
+/// cover. Decoding happens in `art.rs`, off this module's REST concern.
 pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str) -> Result<Vec<u8>, LibraryError> {
     // Some hosts hand back a full external URL (e.g. a SteamGridDB CDN link) instead
     // of a host-relative path — that can't go through the pinned agent (wrong CA,

@@ -113,8 +113,8 @@ const REBROWSE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12
 
 /// A running browse for punktfunk hosts, drained from the menu tick. No thread of its own —
 /// mdns-sd's daemon already runs one. That daemon re-queries on its own timers, so what keeps
-/// discovery off the network during a stream is `App` dropping this (and with it the daemon)
-/// when the menu loop exits, not the tick.
+/// discovery off the network during a stream is `console::model::Service` dropping this (and
+/// with it the daemon) when the menu loop exits, not the tick.
 pub struct Discovery {
     daemon: ServiceDaemon,
     events: mdns_sd::Receiver<ServiceEvent>,
