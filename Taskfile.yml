@@ -175,7 +175,6 @@ tasks:
       Usage: task deploy TV_HOST=root@<tv-ip> (or set in .env).
       TELEMETRY=<host:port> streams logs; TELEMETRY=auto uses LAN IP and random port.
       TELEMETRY_LEVEL (debug/info/warn/error, default debug) sets minimum level.
-      UI_SCALE=<factor> overrides panel size for tuning on glass.
     deps: [docker:package, register-device]
     vars:
       IPK: dist/{{.APP_ID}}_{{.PKG_VERSION}}_arm.ipk
@@ -197,10 +196,6 @@ tasks:
         if [ -n "{{.WEBOS_SDK}}" ]; then
           echo "forcing detected webOS SDK version: {{.WEBOS_SDK}}" >&2
           set -- "$@" -p "webos_sdk={{.WEBOS_SDK}}"
-        fi
-        if [ -n "{{.UI_SCALE}}" ]; then
-          echo "forcing UI scale: {{.UI_SCALE}}" >&2
-          set -- "$@" -p "ui_scale={{.UI_SCALE}}"
         fi
         if [ -n "$TELEMETRY" ]; then
           PORT="${TELEMETRY##*:}"

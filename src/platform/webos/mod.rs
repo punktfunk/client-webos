@@ -4,7 +4,6 @@ pub mod device;
 pub(crate) mod dl;
 pub mod dualsense;
 pub mod evdev;
-pub mod game_mode;
 pub mod gamepad;
 pub mod hdr_pattern;
 pub mod hidraw;

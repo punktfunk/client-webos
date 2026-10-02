@@ -47,7 +47,7 @@ impl MediaPipeline {
         client: &Arc<NativeClient>,
         stop: &Arc<AtomicBool>,
         stats: &Arc<StreamStats>,
-    ) -> Result<(Self, AudioRoutePref, bool)> {
+    ) -> Result<(Self, AudioRoutePref)> {
         let (player, is_hdr) = load_player(client, params)?;
         // Metronome rides any plane; real stream only proven ones. Route is locked once running.
         let plane = player.audio_plane();
@@ -90,7 +90,6 @@ impl MediaPipeline {
                 clock_thread,
             },
             route,
-            is_hdr,
         ))
     }
 

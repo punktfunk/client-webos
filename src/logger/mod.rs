@@ -18,10 +18,10 @@ use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{reload, Layer};
+use tracing_subscriber::Layer;
 
-pub use launch::{launch_level_override, ui_scale_override, webos_sdk_override};
-pub use level::{current_level_override, resolved_level, set_level_override};
+pub use launch::webos_sdk_override;
+pub use level::resolved_level;
 pub use ring::{recent_lines, set_ring_capture};
 pub use sink::{latest_log_file, previous_log_file};
 
@@ -53,13 +53,12 @@ pub fn init_subscriber(app_dir: &Path) -> Result<tracing_appender::non_blocking:
     let sink = sink::open(app_dir).context("open log sink")?;
     let (writer, guard) = tracing_appender::non_blocking(sink);
     let level = resolved_level();
-    let (filter, handle) = reload::Layer::new(LevelFilter::from_level(level));
-    level::install_handle(handle, level);
+    level::install(level);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(writer)
         .with_ansi(false)
         .event_format(HostLogFormat)
-        .with_filter(filter);
+        .with_filter(LevelFilter::from_level(level));
     // The ring layer is gated by its own `Filter` (see `ring::CaptureFilter`) so an
     // inactive overlay can't silence `fmt_layer`.
     tracing_subscriber::registry()

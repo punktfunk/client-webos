@@ -155,19 +155,6 @@ pub fn is_remote_at(subsystem: &sdl3::GamepadSubsystem, id: sdl3::joystick::Joys
     subsystem.name_for_id(id).is_ok_and(|name| is_tv_remote(&name))
 }
 
-/// Whether a real game pad is attached — what the "With a controller" console-UI mode reads.
-///
-/// [`is_tv_remote`] is the whole point of the filter: every webOS set enumerates its own remote
-/// as a controller, so trusting SDL's list would make that mode mean "always" on every TV.
-pub fn any_pad_connected(subsystem: &sdl3::GamepadSubsystem) -> bool {
-    subsystem
-        .gamepads()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| subsystem.name_for_id(id).ok())
-        .any(|name| !is_tv_remote(&name))
-}
-
 /// Declares pad `pad`'s kind to the host mid-session, for a controller plugged in AFTER the
 /// handshake: the session default was settled from whatever was attached at connect time, so a
 /// `DualSense` connected mid-stream would otherwise drive the host's default Xbox pad — wrong

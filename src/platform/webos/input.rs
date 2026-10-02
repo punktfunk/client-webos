@@ -104,49 +104,6 @@ pub fn face_by_label(which: sdl3::joystick::JoystickId) -> [sdl3::gamepad::Butto
     }
 }
 
-/// Stick deflection threshold for directional press (well past center noise).
-pub const STICK_MENU_DEADZONE: i16 = 16_000;
-
-/// Edge-detect left stick X/Y to `MenuEvents` (one-shot per cross, repeats on re-center).
-#[derive(Default)]
-pub struct StickMenuNav {
-    x: Option<MenuEvent>,
-    y: Option<MenuEvent>,
-}
-
-impl StickMenuNav {
-    pub fn axis_event(&mut self, axis: sdl3::gamepad::Axis, value: i16) -> Option<MenuEvent> {
-        use sdl3::gamepad::Axis;
-        match axis {
-            Axis::LeftX => Self::edge(&mut self.x, value, MenuEvent::Left, MenuEvent::Right),
-            Axis::LeftY => Self::edge(&mut self.y, value, MenuEvent::Up, MenuEvent::Down),
-            _ => None,
-        }
-    }
-
-    /// Whether `value` is inside the centre deadzone — i.e. this axis is holding no
-    /// direction. The threshold's one reader outside [`edge`](Self::edge), for a caller
-    /// running its own hold timer off the crossings [`axis_event`](Self::axis_event) reports.
-    pub const fn centred(value: i16) -> bool {
-        value.unsigned_abs() < STICK_MENU_DEADZONE.unsigned_abs()
-    }
-
-    fn edge(state: &mut Option<MenuEvent>, value: i16, neg: MenuEvent, pos: MenuEvent) -> Option<MenuEvent> {
-        let dir = if value <= -STICK_MENU_DEADZONE {
-            Some(neg)
-        } else if value >= STICK_MENU_DEADZONE {
-            Some(pos)
-        } else {
-            None
-        };
-        if dir == *state {
-            return None;
-        }
-        *state = dir;
-        dir
-    }
-}
-
 /// webOS Home key scancode. Polled because it sits outside rust-sdl3's `Scancode` enum.
 ///
 /// ⚠ 364, not 384: the webOS block sits at 352-375. Home and [`WEBOS_EXIT_SCANCODE`] are the
@@ -158,7 +115,7 @@ impl StickMenuNav {
 pub const WEBOS_HOME_SCANCODE: i32 = 364;
 
 /// webOS EXIT key scancode. A held Back becomes an EXIT gesture, distinct from a short Back tap.
-/// Reliable signal for opening the disconnect/quit dialog. Requires
+/// Reliable signal for quitting the menu or opening the disconnect dialog. Requires
 /// `SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT` at window creation to prevent `SIGTERM`. See `docs/NOTES.md`.
 pub const WEBOS_EXIT_SCANCODE: i32 = 375;
 
@@ -363,7 +320,7 @@ mod remote_keys_tests {
     }
 
     /// The invariant every Back bug broke: one physical press, one menu action.
-    /// Release must not read as a second press (it opened the quit dialog then dismissed it).
+    /// Release must not read as a second press.
     #[test]
     fn a_press_and_its_release_are_one_menu_press() {
         let mut keys = RemoteKeys::default();

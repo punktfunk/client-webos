@@ -1,69 +1,19 @@
-//! Sends the session log to a paired host, from either UI's host menu. The upload runs on a
-//! worker: the pointer UI reports it on the Home status bar, the console as a notice.
-use crate::app::App;
-use crate::core::screen::Screen;
+//! Sends the session log to a paired host from the console's host menu. Blocking; the caller
+//! runs it on a worker.
 use crate::services::library::{self, LibraryError};
 use std::path::Path;
-use std::sync::mpsc::TryRecvError;
 
 /// The tail of the log that travels; the file itself rotates at this size too.
 const MAX_LOG_BYTES: u64 = 960 * 1024;
 
-impl App {
-    /// The host menu's "Send logs to host": closes the menu and uploads to sidebar entry `idx`.
-    pub(crate) fn send_logs_to_host(&mut self, idx: usize) {
-        let target = self
-            .hosts
-            .entries
-            .get(idx)
-            .and_then(|e| self.known_host(e.host(), e.port()))
-            .and_then(|known| {
-                Some(HostTarget {
-                    name: known.name.clone(),
-                    addr: known.addr.clone(),
-                    mgmt_port: known.mgmt_port.unwrap_or(library::DEFAULT_MGMT_PORT),
-                    identity: self.identity.clone(),
-                    pin: known.fingerprint()?,
-                })
-            });
-        self.screens.host_menu_index = None;
-        self.nav.screen = Screen::Home;
-        let Some(target) = target else { return };
-        self.set_home_status(Some(format!("Sending logs to {}…", target.name)), false);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.jobs.send_logs = Some(rx);
-        std::thread::spawn(move || {
-            let _ = tx.send(upload_to_host(&target));
-        });
-    }
-
-    /// Drain the upload worker's result, if it has landed — called each tick
-    /// alongside the other `drain_*`s. Returns whether anything changed.
-    pub(crate) fn drain_send_logs(&mut self) -> bool {
-        let Some(rx) = &self.jobs.send_logs else { return false };
-        match rx.try_recv() {
-            Ok(Ok(s) | Err(s)) => {
-                self.set_home_status(Some(s), false);
-                self.jobs.send_logs = None;
-                true
-            }
-            Err(TryRecvError::Empty) => false,
-            Err(TryRecvError::Disconnected) => {
-                self.jobs.send_logs = None;
-                false
-            }
-        }
-    }
-}
-
 /// Host endpoint and credentials resolved before starting the worker.
 /// Deliberately omits `Debug` because `identity` contains private key material.
-pub(crate) struct HostTarget {
-    pub(crate) name: String,
-    pub(crate) addr: String,
-    pub(crate) mgmt_port: u16,
-    pub(crate) identity: (String, String),
-    pub(crate) pin: [u8; 32],
+pub struct HostTarget {
+    pub name: String,
+    pub addr: String,
+    pub mgmt_port: u16,
+    pub identity: (String, String),
+    pub pin: [u8; 32],
 }
 
 /// Reads the newest `budget` bytes, dropping any partial leading line.
@@ -97,7 +47,7 @@ fn log_tail(path: &Path, budget: u64) -> Result<String, String> {
 
 /// Posts the newest log tail to `target` as plain text on the paired mTLS identity. Blocks, so
 /// call it from a worker. Either side of the result is the status line to show.
-pub(crate) fn upload_to_host(target: &HostTarget) -> Result<String, String> {
+pub fn upload_to_host(target: &HostTarget) -> Result<String, String> {
     post_log(target)
         .inspect(|s| tracing::info!("send logs: {s}"))
         .inspect_err(|e| tracing::warn!("send logs failed: {e}"))
@@ -143,11 +93,7 @@ fn post_log(target: &HostTarget) -> Result<String, String> {
         Err(e) => Err(match library::classify(e) {
             LibraryError::Http(413) => "Log file too large to send (1 MB limit).".into(),
             LibraryError::NotPaired => format!("{} refused the logs — pair with it again.", target.name),
-            other => format!(
-                "{}: {}",
-                target.name,
-                crate::app::view::hostpower::refusal_message(&other)
-            ),
+            other => format!("{}: {other}", target.name),
         }),
     }
 }

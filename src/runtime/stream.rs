@@ -1,6 +1,7 @@
 use super::overlay::{self, ConfirmAction, ConfirmDialog};
 use super::*;
 use crate::core::dial::PadRoute;
+use crate::core::event::MenuEvent;
 use crate::core::settings::TvSettings;
 use crate::platform::webos::device;
 use crate::platform::webos::input::{
@@ -14,14 +15,11 @@ use std::sync::Arc;
 const RING_FRAME: Duration = Duration::from_millis(16);
 /// A synthetic system-button tap holds this long, so the host sees the press.
 const TAP_PRESS: Duration = Duration::from_millis(50);
-/// How long the finished launch frame is held waiting for the first frame to reach the decoder
-/// before uncovering the video plane regardless. `None` only when the loading screen never
-/// started this budget — it waits on the same signal (`app::hero::handover_ready`) and hands
-/// over the deadline it was already running, so the two screens share one budget rather than
-/// spending it twice in a row.
-fn reveal_deadline(started: Option<Instant>) -> Instant {
-    started.unwrap_or_else(|| Instant::now() + crate::app::hero::FIRST_FRAME_WAIT)
-}
+/// Longest a launch holds the menu frame waiting for the first frame to reach the decoder
+/// before uncovering the video plane regardless. A host's first delivery can be seconds late
+/// (its startup capacity probe, or a new UDP flow the AP holds — see `session`'s
+/// `PROBE_WARMUP_CAP`), and until it lands the plane is black.
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(6);
 
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
@@ -56,7 +54,7 @@ fn redial(
     fonts: &pf_console_ui::theme::Fonts,
     display: (u32, u32),
     identity: &(String, String),
-    dial: (&crate::app::ConnectTarget, &store::Settings),
+    dial: (&ConnectTarget, &store::Settings),
 ) -> Result<crate::runtime::PendingConnect> {
     tracing::warn!("connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
     let text = format!("Connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
@@ -202,60 +200,29 @@ pub(super) fn run_inner() -> Result<()> {
     // The overlays' fonts: the kit's, the same faces every screen draws with.
     let overlay_fonts = pf_console_ui::theme::build_fonts().context("overlay fonts")?;
     let display = (display_mode.w as u32, display_mode.h as u32);
-    // The menu's layout box: the real mode divided by the panel-size correction, so a smaller
-    // set lays out fewer, larger units and the canvas scale below makes them back up to
-    // pixels. The window, the stream and the IME rect all keep the real mode.
-    let ui_layout = {
-        let k = crate::app::draw::panel_k();
-        LayoutBox {
-            w: (display_mode.w as f32 / k).round() as u32,
-            h: (display_mode.h as f32 / k).round() as u32,
-        }
-    };
 
     // Owned above the loop, not re-declared per iteration: `GamepadAdded` fires only
     // once per physical (re)connection, so pads opened earlier must carry across screens.
     let mut pads = pads::Pads::default();
-    // Why the *last* stream attempt bounced to the menu, shown on the fresh Home screen.
-    let mut menu_status: Option<String> = None;
-    // Same, but for a toast popup (e.g. the host closed the session) instead of the
-    // bottom status line — shown on the Home screen right after re-entering the menu.
-    let mut menu_toast: Option<String> = None;
+    // Why the *last* stream attempt bounced to the menu, shown as the shell's notice on return.
+    let mut menu_notice: Option<String> = None;
 
     // Held across menu entries rather than per entry: the shell's GL context carries every
     // compiled shader and its glyph atlas, and rebuilding those costs the cold-start stutter
-    // `console::gl` describes. `None` until the shell is first asked for, so a TV that never
-    // turns it on never creates a second GL context at all.
+    // `console::gl` describes.
     let mut console_gl: Option<console_flow::ConsoleGl> = None;
     // The loop's value is the exit action owed on the way out — see the single fire site
     // below it, which is the only reason this is a `break`-with-value rather than a `return`.
     let exit_plan = 'menu: loop {
-        // Which of the two menus this entry draws. Asked per entry, not once, because that is
-        // what makes the flip live: either side can write the setting and the other picks it
-        // up on the next return here.
-        let ui = if console_flow::wanted(crate::platform::webos::gamepad::any_pad_connected(&game_controller)) {
-            console_flow::run(
-                &mut canvas,
-                &mut console_gl,
-                &mut events,
-                &game_controller,
-                &mut pads,
-                &identity,
-                menu_toast.take().or_else(|| menu_status.take()),
-            )?
-        } else {
-            run_ui_flow(
-                &mut canvas,
-                &mut console_gl,
-                &mut events,
-                &game_controller,
-                &mut pads,
-                &identity,
-                ui_layout,
-                menu_status.take(),
-                menu_toast.take(),
-            )?
-        };
+        let ui = console_flow::run(
+            &mut canvas,
+            &mut console_gl,
+            &mut events,
+            &game_controller,
+            &mut pads,
+            &identity,
+            menu_notice.take(),
+        )?;
         // A `let ... else` can't bind out of its own else arm, and the quit case is exactly
         // where the value is.
         let ConnectOutcome {
@@ -263,23 +230,25 @@ pub(super) fn run_inner() -> Result<()> {
             target,
             settings,
             gamepad_auto,
-            first_frame_deadline,
             exit_plan,
         } = match ui {
             UiOutcome::Launch(outcome) => *outcome,
             UiOutcome::Quit(plan) => break 'menu plan,
-            // The flip: re-enter and read the setting again.
-            UiOutcome::Reenter => continue 'menu,
+            UiOutcome::Calibrate => {
+                match calibration::run(&canvas, &mut console_gl, &mut events, &overlay_fonts, display)? {
+                    calibration::Exit::Menu => continue 'menu,
+                    calibration::Exit::Quit => break 'menu None,
+                }
+            }
         };
         tracing::debug!("settings: {settings:?}");
 
         // One pass per dial: the launch, then each reconnect of a lost link (`RECONNECT_ATTEMPTS`).
         let mut connect_thread = connect_thread;
-        let mut first_frame_deadline = first_frame_deadline;
         let mut reconnects: u8 = 0;
         let outcome = 'session: loop {
             // A reconnect dial can be given up on from the remote; the first dial was waited
-            // out by the loading screen, which read the remote itself.
+            // out by the shell, which read the remote itself.
             let gave_up = if reconnects > 0 {
                 wait_for_dial(&connect_thread, &mut events)
             } else {
@@ -291,7 +260,7 @@ pub(super) fn run_inner() -> Result<()> {
                 if gave_up == DialWait::Quit {
                     break 'session StreamOutcome::Quit;
                 }
-                menu_toast = Some("Connection lost".to_string());
+                menu_notice = Some("Connection lost".to_string());
                 break 'session StreamOutcome::ReturnToMenu;
             }
             // Joined BEFORE the window is cleared transparent, so the finished launch zoom stays
@@ -317,7 +286,7 @@ pub(super) fn run_inner() -> Result<()> {
                     // Return to the menu with the reason on screen instead of `?`-ing the app down.
                     tracing::error!("session connect failed: {e:#}");
                     let what = if reconnects > 0 { "reconnect" } else { "connect" };
-                    menu_status = Some(format!("Couldn't {what}: {}", crate::core::errors::friendly(&e)));
+                    menu_notice = Some(format!("Couldn't {what}: {}", crate::core::errors::friendly(&e)));
                     break 'session StreamOutcome::ReturnToMenu;
                 }
             };
@@ -329,7 +298,7 @@ pub(super) fn run_inner() -> Result<()> {
             // `LOADCOMPLETED` is not one either: some sets report it only once a frame has been fed.
             // Bounded — a host that never sends must not leave a stale menu frame up.
             let reveal_wait = Instant::now();
-            let deadline = reveal_deadline(first_frame_deadline);
+            let deadline = Instant::now() + FIRST_FRAME_WAIT;
             while !crate::platform::webos::ndl::presented() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(4));
             }
@@ -379,18 +348,11 @@ pub(super) fn run_inner() -> Result<()> {
                             connected.shutdown_and_quit();
                             cursor.set_captured(false, canvas.window());
                             cursor.flush(canvas.window(), &events);
-                            menu_status = Some(format!("Couldn't start audio: {e:#}"));
+                            menu_notice = Some(format!("Couldn't start audio: {e:#}"));
                             break 'session StreamOutcome::ReturnToMenu;
                         }
                     }
                 }
-            };
-            // Experimental: Game picture/sound mode, app-plane stand-in for HDMI ALLM. Best-effort;
-            // reverted on stream exit. See `game_mode`.
-            let restore_tv_modes = if settings.game_mode() {
-                crate::platform::webos::game_mode::enter(connected.hdr())
-            } else {
-                Vec::new()
             };
 
             // Pad audio (`0xD1`): each pad's render caps ride its arrival. Only toward a host that has
@@ -431,8 +393,7 @@ pub(super) fn run_inner() -> Result<()> {
                 pad_session::bring_up(&connected, &mut pads, id, kind_setting, &settings, pad_audio.as_ref());
             }
 
-            // Every button the client synthesizes rather than forwards: the remote's OK gestures and
-            // its Red key — see `RemoteButtons`. Fed only the remote's own input; a real HID mouse's
+            // The remote's Red key as the right button — see `RemoteButtons`. Fed only the remote's own input; a real HID mouse's
             // clicks never reach it.
             let mut buttons = mouse::RemoteButtons::default();
             let mut relative_motion = mouse::RelativeMotion::default();
@@ -480,7 +441,7 @@ pub(super) fn run_inner() -> Result<()> {
             connected.stats().set_diagnostics(stats_enabled);
             connected.set_hud_enabled(stats_enabled);
             // Fades in/out on the same curve as the toast below — see `ModalFade::visibility_alpha`.
-            let mut stats_fade = crate::ui::fade::ModalFade::<()>::overlay();
+            let mut stats_fade = overlay::fade::ModalFade::<()>::overlay();
             if stats_enabled {
                 stats_fade.open();
             }
@@ -520,9 +481,7 @@ pub(super) fn run_inner() -> Result<()> {
             let mut disconnect = ConfirmDialog::new(
                 "Stop streaming?",
                 "The stream will end and you'll return to the menu.",
-                Some(crate::app::view::icons::ICON_CLOSE),
                 "Stop streaming",
-                crate::app::screens::confirm::Tone::Danger,
             );
             // The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
             let mut ring = pf_console_ui::Ring::new();
@@ -814,36 +773,8 @@ pub(super) fn run_inner() -> Result<()> {
                                 } else {
                                     mouse::move_event(x, y, display_mode.w as u32, display_mode.h as u32)
                                 };
-                                // Drift/drag arbitration for an OK press in flight, off whichever of
-                                // the two the pointer actually reports meaningfully. Runs *before*
-                                // the motion is forwarded: when this is the motion that commits to a
-                                // drag, the host must see the button go down at the press point and
-                                // only then the travel, or the drag grabs `DRAG_SLOP` px late — which
-                                // moves a window by the wrong offset and starts a selection
-                                // rectangle in the wrong place.
-                                if relative {
-                                    buttons.motion_rel(xrel, yrel, |ev| connected.send_input(ev));
-                                } else {
-                                    buttons.motion_abs(x, y, |ev| connected.send_input(ev));
-                                }
                                 connected.send_input(&ev);
                             }
-                        }
-                        // With `cursor_gestures` on, the remote's only pointer button carries
-                        // three gestures. Off (the default), and for every other button, and for
-                        // a real mouse's clicks, the arms below pass the press straight through
-                        // as they always have.
-                        Event::MouseButtonDown {
-                            mouse_btn: sdl3::mouse::MouseButton::Left,
-                            x,
-                            y,
-                            ..
-                        } if !hid_clicks && settings.cursor_gestures() => buttons.ok_press(x as i32, y as i32),
-                        Event::MouseButtonUp {
-                            mouse_btn: sdl3::mouse::MouseButton::Left,
-                            ..
-                        } if !hid_clicks && settings.cursor_gestures() => {
-                            buttons.ok_release(|ev| connected.send_input(ev))
                         }
                         Event::MouseButtonDown { mouse_btn, .. } if !hid_clicks => {
                             if let Some(ev) = mouse::button_event(mouse_btn, true) {
@@ -964,15 +895,11 @@ pub(super) fn run_inner() -> Result<()> {
                 // An open dialog swallows pointer input from here on, so no release ever arrives for
                 // whatever is down — the same trap `DisconnectChord::clear` covers for the pad. Done
                 // here rather than at each `open` site so every path into the dialog is covered.
-                // Otherwise: a held OK commits to a drag once `DRAG_HOLD` is up, and a stationary
-                // hold emits no events at all, so this tick is the only thing that can notice.
                 if disconnect.is_open() {
                     if !input_suspended {
                         connected.release_input();
                     }
                     buttons.release_held(|ev| connected.send_input(ev));
-                } else {
-                    buttons.tick(|ev| connected.send_input(ev));
                 }
                 // Chord held long enough — open the dialog, then forget it so it fires once per hold.
                 if !disconnect.is_open() && pads.chord_held(EXIT_HOLD) {
@@ -1099,7 +1026,7 @@ pub(super) fn run_inner() -> Result<()> {
                 let notif_active = notif_frame.is_some();
                 let hint_frame = exit_hint_at
                     .filter(|_| dialog_frame.is_none())
-                    .and_then(|at| crate::ui::fade::hold_alpha(at, EXIT_HINT_HOLD, EXIT_HINT_FADE));
+                    .and_then(|at| overlay::fade::hold_alpha(at, EXIT_HINT_HOLD, EXIT_HINT_FADE));
                 // Fade in/out on the toast's curve instead of cutting instantly; `visibility_alpha`
                 // keeps returning `Some` through the close fade after the toggle itself flips off.
                 let stats_alpha = stats_fade.visibility_alpha(stats_enabled);
@@ -1183,7 +1110,7 @@ pub(super) fn run_inner() -> Result<()> {
                 // and the user would sit in front of a frozen picture — end it here instead.
                 if connected.stats().decoder_dead.load(Ordering::Relaxed) {
                     tracing::error!("decoder failed for good — returning to the menu");
-                    menu_toast = Some("Video decoder failed — session ended".to_string());
+                    menu_notice = Some("Video decoder failed — session ended".to_string());
                     break 'running StreamOutcome::ReturnToMenu;
                 }
                 if connected.is_session_ended() {
@@ -1193,7 +1120,7 @@ pub(super) fn run_inner() -> Result<()> {
                     // (Back/dialog, SIGTERM) — no toast for those, the user just asked for it.
                     if !client_initiated_disconnect {
                         lost = reason == punktfunk_core::client::PunktfunkEndReason::Lost;
-                        menu_toast = Some(connected.end_message());
+                        menu_notice = Some(connected.end_message());
                     }
                     break 'running StreamOutcome::ReturnToMenu;
                 }
@@ -1239,8 +1166,6 @@ pub(super) fn run_inner() -> Result<()> {
                 }
                 // Joins the video thread and drops `client` so the QUIC close frame actually sends.
                 connected.shutdown_and_quit();
-                // Put the TV's picture/sound modes back (no-op unless game mode switched them).
-                crate::platform::webos::game_mode::restore(restore_tv_modes);
                 tracing::info!("session torn down");
             });
             cursor.set_captured(false, canvas.window());
@@ -1258,9 +1183,7 @@ pub(super) fn run_inner() -> Result<()> {
                 break 'session outcome;
             }
             reconnects += 1;
-            menu_toast = None;
-            // A fresh first-frame budget: the loading screen's deadline belongs to the first dial.
-            first_frame_deadline = None;
+            menu_notice = None;
             connect_thread = redial(
                 reconnects,
                 &mut console_gl,

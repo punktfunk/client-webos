@@ -21,10 +21,10 @@ use pf_console_ui::{
     WakeStatus,
 };
 
-use crate::app::state::sendlogs::{upload_to_host, HostTarget};
 use crate::core::model::{GameEntry, KnownHost};
 use crate::services::discovery::{DiscoveredHost, Discovery};
 use crate::services::library::{self, GamesLoaded, LibraryError, DEFAULT_MGMT_PORT};
+use crate::services::logs::{upload_to_host, HostTarget};
 use crate::services::power::{self, PowerRights};
 use crate::services::store::console::ConsoleStore;
 use crate::services::store::{self, shared, ExitAction};
@@ -46,8 +46,7 @@ const SERVICE_EVERY: Duration = Duration::from_millis(100);
 const WAKE_TIMEOUT: Duration = Duration::from_secs(90);
 const WAKE_RESEND_EVERY: Duration = Duration::from_secs(6);
 
-/// What a finished pairing ceremony reports. Mirrors `app::PairingOutcome`, minus the fields
-/// only the old UI's host list needs — the shell re-reads its rows from the document.
+/// What a finished pairing ceremony reports. The shell re-reads its rows from the document.
 struct PairOutcome {
     name: String,
     addr: String,
@@ -106,9 +105,7 @@ pub(crate) struct Service {
     rows_revision: Option<u64>,
     rows_dirty: bool,
     games: Option<Receiver<GamesLoaded>>,
-    /// Covers as they arrive, encoded — see [`spawn_art`]. Deliberately NOT through
-    /// `services::art`, which decodes to a card-sized pixmap for the old UI's tiny-skia
-    /// compositor.
+    /// Covers as they arrive, encoded — see [`spawn_art`].
     art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
     /// A Request access knock in flight — see [`Service::request_access`].
@@ -259,7 +256,7 @@ impl Service {
     }
 
     /// The row for the host the document last had selected, if it is still known and paired —
-    /// what the console enters on, mirroring the classic menus' own restore.
+    /// what the console enters on.
     pub(crate) fn selected_row(&self) -> Option<HostRow> {
         let state = self.store.snapshot();
         let (host, port) = state.selected_host.clone()?;
@@ -298,8 +295,7 @@ impl Service {
             can_wake: !online && !h.mac.is_empty(),
             // This client has no per-host clipboard flag; see `ConsoleCmd::SetClipboard`.
             clipboard_sync: false,
-            // No launch history on the record — `services::recents` keys per host and game,
-            // and ordering by name is honest rather than pretending to a recency it lacks.
+            // No launch history on the record: ordering by name rather than a recency it lacks.
             last_used: None,
             os: advert
                 .filter(|d| !d.os.is_empty())
@@ -889,9 +885,8 @@ impl Service {
         }
     }
 
-    /// Whether this host answered its last check. Unknown counts as down, the same rule the
-    /// classic menus' exit path reads — a host that has never been probed must not cost the
-    /// exit budget on a connection that cannot complete.
+    /// Whether this host answered its last check. Unknown counts as down: a host that has never
+    /// been probed must not cost the exit budget on a connection that cannot complete.
     pub(crate) fn is_online(&self, h: &KnownHost) -> bool {
         self.discovered.iter().any(|d| same_host(h, d))
             || self.reachable.get(&shared::known_host_key(h)).copied().unwrap_or(false)
@@ -951,7 +946,7 @@ impl Service {
             .ok();
     }
 
-    /// Upload this TV's log to one host — the same upload as the pointer UI's host menu row.
+    /// Upload this TV's log to one host.
     fn send_logs(&self, addr: String, mgmt: u16, fp_hex: &str, host_name: String) {
         // The shell offers the row on paired hosts only, so a missing pin is a stale row.
         let Some(pin) = shared::parse_fp(fp_hex) else {
@@ -974,8 +969,7 @@ impl Service {
             .ok();
     }
 
-    /// Measure the path to one host and report phases. Shell has already raised takeover;
-    /// this uses the same probe as `Screen::SpeedTest` so both UIs measure identically.
+    /// Measure the path to one host and report phases. Shell has already raised takeover.
     fn speed_test(&self, key: String, addr: String, port: u16, fp_hex: &str, host_name: String) {
         let identity = self.identity.clone();
         let pin = shared::parse_fp(fp_hex);
@@ -1103,8 +1097,7 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
 /// The shell decodes on its own worker, only the covers near the cursor, and caps how many it
 /// holds. A cover decoded here bypasses that cap, so a large library would sit in memory whole.
 ///
-/// Disk first (`services::art`), which is the same cache the classic menus fill: leaving a
-/// shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
+/// Disk first (`services::art`): leaving a shelf and coming back re-asks for every cover, and over Wi-Fi that was ~10 MB and the whole
 /// reason returning to the host list felt slow.
 fn spawn_art(addr: String, mgmt: u16, port: u16, identity: (String, String), games: Vec<GameEntry>) -> ArtReceiver {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
@@ -1120,7 +1113,7 @@ fn spawn_art(addr: String, mgmt: u16, port: u16, identity: (String, String), gam
             let mut cache = crate::services::art::CoverCache::new(&addr, port);
             let mut fetch = |game: &GameEntry| {
                 crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
-                    // Match `services::art`'s priority for old UI covers: portrait, then header, then hero.
+                    // Portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
                         .into_iter()
                         .flatten()

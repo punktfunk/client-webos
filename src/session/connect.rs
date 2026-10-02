@@ -35,13 +35,6 @@ impl ConnectAttempt {
         state.media_started.then(crate::platform::webos::ndl::suspend_loads)
     }
 
-    pub fn if_active(&self, action: impl FnOnce()) {
-        let state = self.0.lock().expect("connect attempt poisoned");
-        if !state.cancelled {
-            action();
-        }
-    }
-
     fn enter_media(&self) -> Result<()> {
         let mut state = self.0.lock().expect("connect attempt poisoned");
         anyhow::ensure!(!state.cancelled, "connection cancelled");
@@ -62,10 +55,6 @@ pub struct Connected {
     /// Where this session's audio actually ended up — the preference, resolved against what the
     /// load produced.
     pub audio_route: crate::services::store::AudioRoutePref,
-    /// Whether HDR mastering metadata is being applied this session (negotiated codec is
-    /// HEVC *and* the host signalled HDR). Drives which Game picture mode the runtime asks
-    /// the TV for — `game` vs `hdrGame` (see `platform::webos::game_mode`).
-    pub hdr: bool,
 }
 
 impl Connected {
@@ -132,15 +121,6 @@ pub struct ConnectParams {
     /// `CLIENT_CAP_PAD_AUDIO`. The per-pad declaration rides the arrival, not the handshake.
     pub pad_audio_caps: u8,
     pub audio_route: crate::services::store::AudioRoutePref,
-    /// Let the host cut a picture into several slices (`webos.multi_slice`, Experimental).
-    ///
-    /// Without the cap the host pins `max_slices = 1` for every client, deliberately — "single-slice
-    /// frames for TV-SoC decoders". A sliced picture is what lets the host emit the front of a
-    /// frame while its tail is still being encoded — the pipelining survives this
-    /// client reassembling whole AUs (slice-progressive feeding is off). Off by default until a set
-    /// is measured, because the failure mode it guards against is a wedged hardware decoder, not a
-    /// slow one.
-    pub multi_slice: bool,
     pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
     pub display_hdr: quic::HdrMeta,
@@ -203,7 +183,7 @@ impl Negotiated {
             codecs[0]
         };
         // HDR only ever applies to HEVC. An explicit H.264 pick disables it end to end
-        // (the Settings toggle is hidden too — see `ui::settings`'s `row_shown`); on Automatic the
+        // (the shell hides the toggle too); on Automatic the
         // caps are still advertised and the host resolves the codec, with application gated
         // on the *negotiated* codec being HEVC in `load_player`.
         let hdr = params.hdr_enabled && caps.hdr && codec_pref != CodecPref::H264;
@@ -219,11 +199,6 @@ impl Negotiated {
                     quic::VIDEO_CAP_10BIT | quic::VIDEO_CAP_HDR
                 } else if ten_bit_sdr {
                     quic::VIDEO_CAP_10BIT
-                } else {
-                    0
-                }
-                | if params.multi_slice {
-                    quic::VIDEO_CAP_MULTI_SLICE
                 } else {
                     0
                 },
@@ -315,7 +290,7 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
     let stats = Arc::new(StreamStats::default());
     // Spawns the decode threads; fails atomically if any setup step fails.
     attempt.enter_media()?;
-    let (pipeline, route, is_hdr) = MediaPipeline::build(params, &client, &stop, &stats)?;
+    let (pipeline, route) = MediaPipeline::build(params, &client, &stop, &stats)?;
 
     Ok(Connected {
         client,
@@ -324,6 +299,5 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
         stats,
         pipeline,
         audio_route: route,
-        hdr: is_hdr,
     })
 }

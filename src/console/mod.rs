@@ -2,11 +2,10 @@
 //!
 //! Two halves, mirroring the Android client's `clients/android/native/src/console/`: [`gl`]
 //! owns the GL context and the Skia surface, [`model`] owns everything the shell asks the
-//! binary to do. The frame loop that joins them is `runtime::console_flow`, because it has to
-//! hand back the same `UiOutcome` this client's own menus do.
+//! binary to do. The frame loop that joins them is `runtime::console_flow`.
 //!
-//! Nothing here is a second app. It reads and writes the ONE settings document
-//! (`services::store`), through the app's own writer — see `services::store::console`.
+//! It reads and writes the ONE settings document (`services::store`) through the app's own
+//! writer — see `services::store::console`.
 
 mod gl;
 mod model;

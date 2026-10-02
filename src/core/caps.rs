@@ -1,9 +1,9 @@
 //! What the active video backend can present — one fact, read by everything that must agree
 //! about it: `session::connect` (what's advertised — authoritative, the codec is negotiated
-//! before any decoder opens), `ui::settings` (what's offerable), `Settings::clamp_to_caps`
+//! before any decoder opens), the shell's settings (what's offerable), `Settings::clamp_to_caps`
 //! (normalising a document written on a more capable TV).
 //!
-//! In `core`, not `platform`, because `ui`/`services` can't depend on `platform::webos`. Hence
+//! In `core`, not `platform`, because `services` can't depend on `platform::webos`. Hence
 //! the install-once global: the platform layer publishes at startup, every layer reads. **Unset
 //! reads as [`VideoCaps::FULL`]** — today's webOS 5+ behaviour, so host builds, tests and any
 //! pre-install path see exactly what shipped before this existed.
@@ -49,10 +49,9 @@ impl VideoCaps {
     };
 
     /// The codec preferences worth offering here, in display order — the one place the codec set
-    /// is spelled, so the Settings dropdown, the persisted-document clamp and the advertised wire
-    /// set can't disagree. Without HEVC only one codec is decodable, so `Automatic` would resolve
-    /// to it anyway and the list collapses to a single entry, leaving the row locked (see
-    /// `app::menu`'s `row_lock`).
+    /// is spelled, so the persisted-document clamp and the advertised wire set can't disagree.
+    /// Without HEVC only one codec is decodable, so `Automatic` would resolve to it anyway and
+    /// the list collapses to a single entry.
     pub fn codec_prefs(self) -> &'static [CodecPref] {
         if self.h265 {
             &[CodecPref::Auto, CodecPref::H264, CodecPref::Hevc]

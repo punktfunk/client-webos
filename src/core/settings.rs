@@ -1,20 +1,17 @@
 //! This client's typed view of the shared settings document (`pf_client_core::trust::
 //! Settings`), which is the one settings type it stores and edits (plan WP4). Shared fields
 //! read straight; the ones this TV alone has live in the document's `extra` map under a
-//! `webos.` prefix, and the two names the console shell shares stay unprefixed.
+//! `webos.` prefix.
 
 use pf_client_core::trust::Settings;
 use punktfunk_core::config::GamepadPref;
 
-use crate::core::model::{AudioRoutePref, CodecPref, GamepadType, GamepadUiMode, HdrDisplay, LogLevelOverride};
+use crate::core::model::{AudioRoutePref, CodecPref, GamepadType, HdrDisplay};
 use crate::core::model::{HDR_BLACK, HDR_FRAME_AVG, HDR_PEAK};
 
 /// Prefix for rows only this client has. Namespaced so a future shared field of the same name
 /// cannot collide with what a TV persisted.
 const P: &str = "webos.";
-/// The console-vs-cursor pair, spelled as `pf_console_ui`'s own settings rows spell it.
-const GAMEPAD_UI_KEY: &str = "gamepad_ui_enabled";
-const GAMEPAD_UI_MODE_KEY: &str = "gamepad_ui_mode";
 
 fn key(name: &str) -> String {
     format!("{P}{name}")
@@ -91,23 +88,8 @@ pub trait TvSettings {
     fn hdr_frame_avg_nits(&self) -> u16;
     fn hdr_black_code(&self) -> u16;
     fn hdr_calibrated(&self) -> bool;
-    fn log_level_override(&self) -> LogLevelOverride;
-    fn set_log_level_override(&mut self, level: LogLevelOverride);
-    fn show_logs(&self) -> bool;
-    fn set_show_logs(&mut self, on: bool);
-    fn game_mode(&self) -> bool;
-    fn set_game_mode(&mut self, on: bool);
-    fn multi_slice(&self) -> bool;
-    fn set_multi_slice(&mut self, on: bool);
     fn audio_route(&self) -> AudioRoutePref;
     fn set_audio_route(&mut self, route: AudioRoutePref);
-    fn cursor_gestures(&self) -> bool;
-    fn gamepad_ui(&self) -> bool;
-    fn set_gamepad_ui(&mut self, on: bool);
-    fn gamepad_ui_mode(&self) -> GamepadUiMode;
-    /// Whether the shared shell should be fronting the app right now. Android's rule minus its
-    /// `tv` term: every webOS set is a TV, and the cursor UI is the one a remote wants.
-    fn gamepad_ui_active(&self, pad_connected: bool) -> bool;
     /// The panel volume to advertise — see [`HdrDisplay`].
     fn hdr_display(&self) -> HdrDisplay;
     /// The one writer of the stored volume: the three measured fields move with the flag that
@@ -176,65 +158,12 @@ impl TvSettings for Settings {
         get(self, &key("hdr_calibrated")).unwrap_or(false)
     }
 
-    fn log_level_override(&self) -> LogLevelOverride {
-        get(self, &key("log_level_override")).unwrap_or(LogLevelOverride::Info)
-    }
-
-    fn set_log_level_override(&mut self, level: LogLevelOverride) {
-        put(self, key("log_level_override"), &level);
-    }
-
-    fn show_logs(&self) -> bool {
-        get(self, &key("show_logs")).unwrap_or(false)
-    }
-
-    fn set_show_logs(&mut self, on: bool) {
-        put(self, key("show_logs"), &on);
-    }
-
-    fn game_mode(&self) -> bool {
-        get(self, &key("game_mode")).unwrap_or(false)
-    }
-
-    fn set_game_mode(&mut self, on: bool) {
-        put(self, key("game_mode"), &on);
-    }
-
-    fn multi_slice(&self) -> bool {
-        get(self, &key("multi_slice")).unwrap_or(false)
-    }
-
-    fn set_multi_slice(&mut self, on: bool) {
-        put(self, key("multi_slice"), &on);
-    }
-
     fn audio_route(&self) -> AudioRoutePref {
         get(self, &key("audio_route")).unwrap_or_default()
     }
 
     fn set_audio_route(&mut self, route: AudioRoutePref) {
         put(self, key("audio_route"), &route);
-    }
-
-    fn cursor_gestures(&self) -> bool {
-        get(self, &key("cursor_gestures")).unwrap_or(false)
-    }
-
-    fn gamepad_ui(&self) -> bool {
-        // On, taking over only while a pad is attached — the cross-client default.
-        get(self, GAMEPAD_UI_KEY).unwrap_or(true)
-    }
-
-    fn set_gamepad_ui(&mut self, on: bool) {
-        put(self, GAMEPAD_UI_KEY.to_string(), &on);
-    }
-
-    fn gamepad_ui_mode(&self) -> GamepadUiMode {
-        get(self, GAMEPAD_UI_MODE_KEY).unwrap_or_default()
-    }
-
-    fn gamepad_ui_active(&self, pad_connected: bool) -> bool {
-        self.gamepad_ui() && (self.gamepad_ui_mode() == GamepadUiMode::Always || pad_connected)
     }
 
     fn hdr_display(&self) -> HdrDisplay {
@@ -321,18 +250,16 @@ mod tests {
         assert!(s.cursor_capture());
         s.set_cursor_capture(false);
         assert_eq!(s.mouse_mode, "desktop");
-        s.set_game_mode(true);
-        s.set_log_level_override(LogLevelOverride::Debug);
+        s.set_audio_route(AudioRoutePref::NdlOpus);
         s.set_codec_pref(CodecPref::Hevc);
         s.set_gamepad_type(GamepadType::DualSense);
-        assert!(s.game_mode());
-        assert_eq!(s.log_level_override(), LogLevelOverride::Debug);
+        assert_eq!(s.audio_route(), AudioRoutePref::NdlOpus);
         assert_eq!(s.codec_pref(), CodecPref::Hevc);
         assert_eq!(s.gamepad_type(), GamepadType::DualSense);
-        assert!(s.extra.contains_key("webos.game_mode"));
+        assert!(s.extra.contains_key("webos.audio_route"));
         assert_eq!(s.hdr_display().peak_nits, 800);
         let json = serde_json::to_value(&s).unwrap();
         let back: Settings = serde_json::from_value(json).unwrap();
-        assert!(back.game_mode() && back.gamepad_ui());
+        assert_eq!(back.audio_route(), AudioRoutePref::NdlOpus);
     }
 }

@@ -43,52 +43,22 @@ Build/check/lint/test, preview, and license metadata use `--locked` to preserve 
 
 ## UI rendering
 
-Immediate mode on Skia over shell GL context (`console::gl`), drawn with console kit (`pf_console_ui`). Redraw on change/animate; stream loop: 33ms/500ms cadence for overlays, transparent clear for NDL plane.
+The menu is the shared shell (`pf_console_ui`) on Skia over its own GL context (`console::gl`).
+The stream loop draws its overlays on the same context: 33ms/500ms cadence, transparent clear for
+the NDL plane.
 
-- **Covers are Skia images built from the art loader's RGBA buffers** (`app::draw::home`), one copy
-  when the art lands; Skia uploads on first draw and keeps the texture. The window that requests
-  and evicts them is `app::render::prepare_grid`.
-- **Text is the kit's**: Geist through Skia, shaped per frame. A string drawn every frame is fine;
-  a document (About) is wrapped once per width and kept.
-- **Glass over the menu is a backdrop blur** (`app::draw::glass_card`); over the stream there is no
-  framebuffer to blur, so the dialog is the kit's panel on a transparent clear.
-- **Modal and game-card glass share the face, rim shader and GPU blur path.** The game strip
-  samples its cover; dialogs sample the page. Warmup uses the real game-strip painter and
-  advances separate host/settings widgets through arrival and settling, submitting each sample.
-  Warming only the material or a few static samples misses programs used later in the animation.
-  Driver measurements confirmed 19–36 ms compilation stalls during first openings; the complete
-  warmup removed the reported stutter on TV. Keep it once per GL context. Release the single
-  cached cover blur before streaming, while preserving compiled programs.
-- **Keep list widgets alive through modal fades.** Recreating the departing list restarts its
-  row entrance while the panel closes. Cross-fades need separate widgets for both screens;
-  sharing one slot rebuilds each on every frame. Retire the outgoing widget after its fade.
-- **Coalesce backdrop refreshes through widget motion**, not just the 75ms panel fade.
-  Refresh dirty pages at most every 100ms (150ms during motion), so continuous animation
-  cannot freeze the background. Retain the previous blur on capture failure, and warm
-  scrolling lists too: their edge masks add a layer missing from short-list warmup.
-- **The drawable can differ from the display mode** on webOS: every frame scales the canvas from
-  layout-box units to `size_in_pixels`, and every layout and hit test works in layout units.
-- **Icons are Lucide, by name** (`app::view::icons`), from the kit's table. A new mark is added to
-  `assets/lucide/` in `unom/punktfunk` and regenerated there, not here.
-- **Slow frames are GPU raster inside the shared shell, not this client's painters** (measured on
-  the TV). The one client-controlled cost worth fixing was cover art: covers are normalised on the
-  way into the cache (≤480x720, re-encoded **JPEG**, older entries shrunk in place on first read)
-  because the shell's scaled-decode fast path only fires on JPEG, and decode happens on the fetch
-  thread, not the render thread. Per-card antialiased clips and per-frame mask-filter blurs were
-  the other costs — draw covers as one rounded rect with an image shader, bake halos and shadows as
-  nine-patches.
-- **The menu is scaled to the panel's physical size.** webOS hands every set the same 1920x1080
-  surface, so text on a 48-inch panel is physically smaller by the diagonal ratio, and there is no
-  display-scale signal to follow — the diagonal itself is the signal
-  (`tv.model.moduleInchType` in LG's per-model config). The correction is the **square root** of
-  the ratio (a smaller set is usually a closer set), capped at 1.25, and it divides the layout box
-  while the canvas scale makes it back up, which is what carries Home's pixel geometry along with
-  the type. Home's 1080p pixel metrics must go through `px_1080`, or the division cancels the canvas
-  scale and boxes grow while the type inside them doesn't. **The gamepad shell opts out**: the kit's
-  design box is `height / 800` and its screens are laid out to fill it, so a correction shortens the
-  box and the screens run off the bottom instead of reflowing.
-- ⚠ **The `ui_scale` launch param is deliberately untyped.** Tuning unowned panels on glass requires it. Type rejection silently kills all other params; `ares-launch` sends strings.
-- ⚠ **Swap interval is vsync in menus, immediate over streams.** Menu loop needs blocking sleep; stream loop must not (same thread forwards input). Vsync adds ~16ms per UI action over stream. Pushed after `make_current` — interval is per SURFACE, shared by SDL renderer.
+- **Over the stream there is no framebuffer to blur**: the video sits on a hardware plane the GL
+  context cannot read, so overlay cards are opaque.
+- **The drawable can differ from the display mode** on webOS: pointer events arrive in window
+  units and the shell hit-tests in surface pixels (`console_flow::pointer_scale`).
+- **Slow frames are GPU raster inside the shared shell, not this client** (measured on the TV).
+  The one client-controlled cost worth fixing was cover art: covers are normalised on the way into
+  the cache (≤480x720, re-encoded **JPEG**, older entries shrunk in place on first read) because
+  the shell's scaled-decode fast path only fires on JPEG, and decode happens on the fetch thread,
+  not the render thread.
+- **No panel-size correction.** The kit's design box is `height / 800` and its screens are laid out
+  to fill it; a correction shortens the box and the screens run off the bottom instead of reflowing.
+- ⚠ **Swap interval is vsync in the menu, immediate over streams.** Menu loop needs blocking sleep; stream loop must not (same thread forwards input). Vsync adds ~16ms per UI action over stream. Pushed after `make_current` — interval is per SURFACE, shared by SDL renderer.
 
 ## Video decode (NDL DirectMedia)
 
@@ -107,7 +77,6 @@ Immediate mode on Skia over shell GL context (`console::gl`), drawn with console
 - ⚠ **Request keyframe only while SKIPPED, never before checking hold lift.** Resume frame restarts itself. Early check returned `NeedKeyframe` for already-fed AU, dropping pieces of resume keyframe on v2 (slice-progressive) — second freeze after recovery.
 - **Count on `Presented`, not arrival.** Otherwise fps overlay ticks through freezes and refused plays count as frames.
 - **Name hold only after 300ms** (`HOLD_TOAST_AFTER`, once per hold). RFI and startup probe loss clear inside round trip; rising-edge toast fires on every Wi-Fi session start.
-- **Multi-slice stays opt-in** (`webos.multi_slice`, Settings ▸ Display ▸ TV). On, it advertises `VIDEO_CAP_MULTI_SLICE` so the host can emit slices while still encoding — overlapping encode and transport. The client still feeds NDL whole AUs only: `frame_parts` is always `false` and NDL's `partial_au` cap is `false`, so core reassembles one complete access unit and `NDL_DirectVideoPlay` runs once per picture. That removes the partial-AU copies/submissions and the unsafe broken-AU recovery (the required flush kills the audio plane) while keeping whatever host-side pipelining the slicing buys. Whole-AU feeding may avoid the corruption incomplete-AU feeding caused, but multi-slice decoder compatibility and bitrate efficiency stay device-dependent — no guarantee on smearing or compression artifacts.
 - HDR mastering metadata can change mid-session — drain `next_hdr_meta` every frame.
 - **`NDL_DirectVideoSetHDRInfo` forces panel to HDR on any call.** Ignores SDR; SDR/H.264 shows in HDR mode. No-op when `meta` is `None`; only real HDR metadata reaches NDL. Costs: no VUI fix, HDR gated to HEVC end-to-end.
 - **Re-entering HDR per packet drops panel to 60Hz.** Applying on every host HDR packet caused 1440p120+ stutter; apply once and on change only.
@@ -216,17 +185,10 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - **Black screen despite decode:** launch via real lifecycle (`luna-send .../launch`, SAM jailed uid). NDL punch-through composites for SAM foreground app only.
 - No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
 - SDL/Wayland may report `refresh_rate=0`; clamp to default. (SDL3 reports it as a float plus an exact numerator/denominator pair, so 59.94 is no longer rounded to 60.)
-- **Game mode/ALLM rooted-only:** public bus denies `settingsservice`; routes via hbchannel root exec. Settings row shown on rooted TV only.
 
 ## ChaCha20 over AES-GCM
 
 32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`; 32-bit ARM falls back. ChaCha20 (add/rotate/xor, no intrinsics) stays fast. Advertise `VIDEO_CAP_CHACHA20` unconditionally — only cipher here.
-
-## Large library handling
-
-- **Cover window is O(visible):** requests art within `CARD_PREFETCH_ROWS` of viewport, evicts outside `CARD_KEEP_ROWS` (hysteresis). Only on window move.
-- **Cover art:** `ArtLoader` request/response (UI asks visible, forgets scrolled). Cached as encoded bytes (`$HOME/art-cache/`, write-then-rename). Failed decodes deleted.
-- 365 titles: decoded drops from 365 to viewport (~5 cols).
 
 ## Audio: two routes, one pipeline (SDL is the default)
 
@@ -328,7 +290,7 @@ Route picked from PROVEN plane (`AudioPlane::accepts_stream`), not asked-for: un
 
 Real audio feed gates on `LOADCOMPLETED` latch, not `feed_unblocked` (video gate, latches optimistic). Real audio on unconfirmed plane costs session sound; silence free — feeds gate differently.
 
-Load blocks `session::connect` between handshake and first `next_frame`. Anything timing launch must cover it. `app::hero` fine (`FIRST_FRAME_WAIT` after connect, 30s max); `hdr_pattern` `PRESENT_DEADLINE` from `Playback::start`, must exceed sequence.
+Load blocks `session::connect` between handshake and first `next_frame`. Anything timing launch must cover it; `runtime::stream`'s `FIRST_FRAME_WAIT` starts after connect.
 
 ⚠ **Prime stamps and player clock share origin — `load_instant` is load CALL**, where NDL PTS starts. Used to stamp after wait, domains differed by D, every consumer corrected — offload real lead `PLANE_LEAD_MS − D` ≈ 0 on CX. One origin removes all. `last_real_feed_ms` seeded at construction, not 0.
 
@@ -380,7 +342,7 @@ Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone.
 - **`min_slack` = complete-AU deadline margin** (`Pacing::note_submitted`, minimum not mean, one bad frame visible; taken/re-armed on print line — re-arm IS take, read elsewhere shortens window). Loop folds AU FIRST piece only (deliberate, tail arrival re-map), never sees slice-progressive COMPLETED. Negative `min_slack` while healthy `jitter` = large AU vs first-piece deadline. Slice-progressive >~25 Mb/s (core past FEC block ≈22KB), keyframes split, reachable ordinary. Read vs `parts=` video line: `parts=0` = inert. ⚠ Populated only while timed (`report_decode_latency || diagnostics`), diagnostic not steering — loop built on it silently open-loop.
 - ⚠ **Stamp ceiled to whole ms in BOTH intents.** Rounding used to live in Smoothness branch. NDL truncates, rounding down spends cushion; generalizing is sub-ms behavior change to Lowest latency via Smoothness fix.
 
-**Slice-progressive feed stays off** (`frame_parts` never requested, `partial_au` false). Core's `FramePart` contract is only for decoders with a `PARTIAL_FRAME` capability, and a broken AU must flush — NDL has neither: it takes raw Annex-B and finds boundaries by start code (no partial-frame flag, v1 can't even repeat a timestamp across pieces), and mid-stream flush kills the audio plane permanently. Host multi-slice transport pipelining (`VIDEO_CAP_MULTI_SLICE`) is separate and still offered: core reassembles one complete AU and NDL gets one play call per picture. `session::stage::parts` still implements the contract for a future sink that can honour it; the `partial_au` cap is what gates it.
+**Slice-progressive feed stays off** (`frame_parts` never requested, `partial_au` false). Core's `FramePart` contract is only for decoders with a `PARTIAL_FRAME` capability, and a broken AU must flush — NDL has neither: it takes raw Annex-B and finds boundaries by start code (no partial-frame flag, v1 can't even repeat a timestamp across pieces), and mid-stream flush kills the audio plane permanently. `VIDEO_CAP_MULTI_SLICE` is not advertised, so the host sends single-slice pictures. `session::stage::parts` still implements the contract for a future sink that can honour it; the `partial_au` cap is what gates it.
 
 ⚠ **Real audio on plane must carry lead or PICTURE stutters.** Plane queue depth paces video; offload = real packets only, wire-fed ≈ player clock, depth ≈ 0, renderer edge-underrun, stutter on jitter. Fixed by `PLANE_LEAD_MS` (40ms) added to every stamp in `play_audio`; clock plane targets same, neither pushes ceiling. NDL no depth arg; stamp-future only way. Cost: lip sync `PLANE_LEAD_MS` behind. Walk down vs `lead` overlay audio line/`plane_lead=` heartbeat (only observable places).
 

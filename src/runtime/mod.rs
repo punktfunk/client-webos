@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use punktfunk_core::config::{CompositorPref, Mode};
 
-use crate::app::hero::Connect;
-use crate::app::{App, HomeFocus, Screen};
-use crate::core::event::MenuEvent;
+use crate::core::model::ConnectTarget;
 use crate::core::settings::TvSettings;
 use crate::platform::webos::cursor;
 use crate::platform::webos::gamepad;
@@ -46,23 +44,17 @@ impl Drop for PendingConnect {
     }
 }
 
-/// A launch handed from the menu to the streaming loop: the connect thread (started early to
-/// overlap the animation), the settings it was started with, and how much of the first-frame
-/// budget the loading screen has already spent.
+/// A launch handed from the menu to the streaming loop: the finished connect thread and the
+/// settings it was started with.
 struct ConnectOutcome {
     handle: PendingConnect,
     /// What was dialled, kept so a lost link can be dialled again (`stream`'s reconnect).
-    target: crate::app::ConnectTarget,
+    target: ConnectTarget,
     settings: store::Settings,
     /// Whether the user's pick was `Automatic` — `settings.gamepad_type()` has already been
     /// resolved against the attached pad, so this is the only thing left that says a pad
     /// hotplugged mid-stream should re-decide the kind rather than keep the session default.
     gamepad_auto: bool,
-    /// When the wait for a decoded frame runs out — one deadline for the whole launch, set by
-    /// the loading screen (`app::hero`) and honoured again by the reveal in `stream`, so a host
-    /// that connects and then decodes nothing costs [`crate::app::hero::FIRST_FRAME_WAIT`] once
-    /// rather than once per screen. `None` when the loading screen never got that far.
-    first_frame_deadline: Option<Instant>,
     /// What to do to this host when the app exits, captured in the menu because a Quit out of
     /// the stream never returns there.
     ///
@@ -77,8 +69,7 @@ struct ConnectOutcome {
 /// session only.
 ///
 /// Session-only on purpose: the returned `Settings` drives the handshake and the stream
-/// loop, while `App`'s own copy (what `StateWriter` persists and what the Settings row
-/// displays) keeps saying `Automatic`. Resolving into the stored value instead would turn
+/// loop, while the stored document keeps saying `Automatic`. Resolving into the stored value instead would turn
 /// a preference that means "match my pad" into a fixed pad kind the next time a different
 /// controller was plugged in.
 fn resolve_gamepad_type(mut settings: store::Settings, game_controller: &sdl3::GamepadSubsystem) -> store::Settings {
@@ -108,20 +99,13 @@ fn stream_mode(settings: &store::Settings, native: Mode) -> Mode {
     }
 }
 
-/// Set when a connect attempt returns an error, cleared as the next one is spawned. The
-/// loading screen otherwise has only `is_finished`, which success and failure reach alike —
-/// and a failure never presents a frame, so it sat out the whole
-/// [`crate::app::hero::HERO_LOADING_MAX`] backstop before the error could be shown.
-static CONNECT_FAILED: AtomicBool = AtomicBool::new(false);
-
 /// Start the connect on its own thread. Caller joins after animation (or immediately).
 fn spawn_connect(
     identity: (String, String),
-    target: crate::app::ConnectTarget,
+    target: ConnectTarget,
     settings: store::Settings,
 ) -> Result<PendingConnect> {
     let (host, port, fp, launch) = (target.host, target.port, target.fingerprint, target.launch);
-    CONNECT_FAILED.store(false, Ordering::Relaxed);
     let attempt = std::sync::Arc::new(session::ConnectAttempt::default());
     let worker_attempt = attempt.clone();
     std::thread::Builder::new()
@@ -154,17 +138,11 @@ fn spawn_connect(
                     // inside a session that claimed the cap up front — probing here would cost hotplug.
                     pad_audio_caps: crate::session::pad_audio::caps_for(&settings, true, true),
                     audio_route: settings.audio_route(),
-                    multi_slice: settings.multi_slice(),
                     present_priority: settings.present_priority(),
                     display_hdr: settings.hdr_display().hdr_meta(),
                 },
                 &worker_attempt,
             )
-            // Flagged before the handle is joined, so the loading screen can stop waiting
-            // for a stream that is not coming — the error itself still travels by `Result`.
-            .inspect_err(|_| {
-                worker_attempt.if_active(|| CONNECT_FAILED.store(true, Ordering::Relaxed));
-            })
         })
         .map(|handle| PendingConnect {
             handle: Some(handle),
@@ -270,19 +248,6 @@ fn cycle_log_overlay() {
     LOG_OVERLAY_STATE.store(next as u8, Ordering::Relaxed);
 }
 
-/// Diagnostics' "Show logs" toggle, for remotes without a Yellow button. Unlike
-/// `cycle_log_overlay`'s 3-state cycle this only ever lands on Off/Live; the
-/// preference itself is persisted separately, in `Settings::show_logs`.
-pub(crate) fn set_log_overlay_enabled(enabled: bool) {
-    crate::logger::set_ring_capture(enabled);
-    let next = if enabled {
-        LogOverlayState::Live
-    } else {
-        LogOverlayState::Off
-    };
-    LOG_OVERLAY_STATE.store(next as u8, Ordering::Relaxed);
-}
-
 /// Current lines to render; None if Off.
 fn log_overlay_lines() -> Option<Vec<String>> {
     match log_overlay_state() {
@@ -314,8 +279,7 @@ pub fn run() -> Result<()> {
     // Logged before anything else can fail: a report from a model neither developer
     // owns is only actionable if the log says what it was running on.
     crate::platform::webos::device::DeviceInfo::detect().log();
-    // Before settings load or any UI exists: `store::load` clamps against this and
-    // `app::menu::row_shown` hides what it can't offer.
+    // Before settings load or any UI exists: `store::load` clamps against this.
     crate::core::caps::install(crate::platform::webos::device::video_caps());
     // A panic on ANY thread otherwise goes only to stderr, which a SAM-launched
     // native app has no terminal for — the app simply vanishes back to the
@@ -348,9 +312,6 @@ pub fn run() -> Result<()> {
 }
 
 /// How one pass through the menu ended.
-///
-/// `Option<ConnectOutcome>` used to say this, with `None` meaning "quit" — but the quit case
-/// now carries something, and a sentinel that carries a payload wants a name.
 enum UiOutcome {
     /// A launch was committed; the stream loop takes it from here. Boxed: the shared settings
     /// document inside is hundreds of bytes and the other two arms carry almost nothing.
@@ -358,33 +319,28 @@ enum UiOutcome {
     /// The user (or the OS) asked to close the app, carrying the selected host's exit action
     /// UNFIRED — see [`ConnectOutcome::exit_plan`] for why nothing runs it here.
     Quit(Option<crate::services::power::ExitPlan>),
-    /// The other menu flow was asked for. The menu loop re-enters and reads
-    /// [`console_flow::wanted`] again, which is the whole of the old-UI ⇄ shell flip: each
-    /// side reloads the document on entry, so neither can show the other's changes stale.
-    Reenter,
+    /// The remote's Blue key: run HDR calibration, then re-enter the menu.
+    Calibrate,
 }
 
 enum StreamOutcome {
     /// The system asked the app to close (not just this stream) — exit fully.
     Quit,
-    /// The host ended the session, or the user held Back — go back to the
-    /// host-list/settings UI instead of exiting the app.
+    /// The host ended the session, or the user held Back — go back to the menu instead of
+    /// exiting the app.
     ReturnToMenu,
 }
 
+mod calibration;
+mod console_flow;
 mod input;
 mod overlay;
 mod pad_session;
 mod pads;
 mod session_ext;
 mod stream;
-mod ui_flow;
 use input::*;
 use stream::run_inner;
-use ui_flow::run_ui_flow;
-
-/// The shared gamepad shell's flow. `runtime` is Linux-only, and so is the shell.
-mod console_flow;
 
 #[cfg(test)]
 mod tests {

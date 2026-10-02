@@ -139,7 +139,7 @@ impl Pads {
 
     /// Brings the table in line with what SDL has attached now: drops pads that went away and
     /// opens ones that arrived. For entering a loop, since a loop that was not running — the
-    /// connect wait, the launch animation — consumed or never saw the hotplug events.
+    /// connect wait — consumed or never saw the hotplug events.
     ///
     /// Drops tell the host nothing: call only before this session's slots are announced.
     pub(super) fn sync(&mut self, subsystem: &sdl3::GamepadSubsystem) {
@@ -203,30 +203,21 @@ impl Pads {
         self.slots.iter().find_map(|s| s.physical)
     }
 
-    /// What the menus list, in player order.
-    pub(super) fn detected(&self) -> Vec<crate::app::DetectedPad> {
-        self.slots
-            .iter()
-            .map(|s| crate::app::DetectedPad {
-                name: s.pad.name().unwrap_or_default(),
-                kind: s.physical,
-                index: s.index,
-            })
-            .collect()
-    }
-
     /// Every pad as the shared shell lists it, each named by the kind the host builds it as.
     pub(super) fn pad_infos(
         &self,
         setting: GamepadType,
     ) -> impl Iterator<Item = pf_client_core::menu_nav::PadInfo> + '_ {
-        self.slots.iter().map(move |s| {
-            crate::app::DetectedPad {
-                name: s.pad.name().unwrap_or_default(),
-                kind: Some(s.host_kind(setting)),
-                index: s.index,
-            }
-            .pad_info()
+        // Battery and rumble are reported absent: this client reads neither.
+        self.slots.iter().map(move |s| pf_client_core::menu_nav::PadInfo {
+            name: s.pad.name().unwrap_or_default(),
+            key: s.index.to_string(),
+            pref: crate::core::settings::gamepad_pref(s.host_kind(setting)),
+            steam_virtual: false,
+            battery: None,
+            detail: format!("Player {}", s.index + 1),
+            forwarded: true,
+            rumble: false,
         })
     }
 

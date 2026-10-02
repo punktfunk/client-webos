@@ -15,14 +15,11 @@ pub struct ConnectTarget {
     pub fingerprint: [u8; 32],
     /// Library entry id to launch, or `None` for desktop.
     pub launch: Option<String>,
-    /// A profile for this launch alone ("Connect with", a pinned card), over every binding.
-    pub profile: Option<String>,
 }
 
 /// One saved host: the record every punktfunk client stores (`trust::KnownHost`, flattened
-/// into the same object — plan D8) plus what only this TV keeps: its power behaviour and the
-/// grid's collections. Reads of the shared fields go through `Deref`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// into the same object — plan D8) plus what only this TV keeps: its power behaviour. Reads of the shared fields go through `Deref`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnownHost {
     #[serde(flatten)]
@@ -32,22 +29,6 @@ pub struct KnownHost {
     /// What to do to this host when the app exits (per-host, off by default; sits under
     /// `wol_auto` in Host power settings — the two are the same switch pointing opposite ways).
     pub exit_action: ExitAction,
-    /// Grid section order, Library included as the [`Collection::dynamic`] entry. One vector
-    /// carries everything: order, names and membership. Change it through the methods below,
-    /// which keep a game in at most one collection and Library unremovable.
-    #[serde(default = "new_host_collections")]
-    pub(crate) collections: Vec<Collection>,
-}
-
-impl Default for KnownHost {
-    fn default() -> Self {
-        Self {
-            shared: pf_client_core::trust::KnownHost::default(),
-            wol_auto: false,
-            exit_action: ExitAction::default(),
-            collections: new_host_collections(),
-        }
-    }
 }
 
 impl std::ops::Deref for KnownHost {
@@ -83,9 +64,6 @@ pub enum ExitAction {
 }
 
 impl ExitAction {
-    /// Every value, in the order the dropdown lists them.
-    pub const ALL: [Self; 3] = [Self::None, Self::Sleep, Self::Shutdown];
-
     /// The host action id to invoke, or `None` when there is nothing to do.
     pub fn action_id(self) -> Option<&'static str> {
         match self {
@@ -96,54 +74,7 @@ impl ExitAction {
     }
 }
 
-/// One grid section: a named, ordered set of game ids. Exactly one per host is
-/// [`Collection::dynamic`] (Library), whose members are computed rather than stored.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Collection {
-    pub name: String,
-    /// Member ids ([`GameEntry::id`] or [`DESKTOP_PIN_ID`]), in user order. Unbounded — there
-    /// is no per-collection card limit.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub games: Vec<String>,
-    /// Library: holds whatever is in no other collection, so `games` is always empty on disk.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub dynamic: bool,
-}
-
-impl Collection {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            games: Vec::new(),
-            dynamic: false,
-        }
-    }
-
-    /// The one dynamic entry. Never removable, members never stored.
-    pub fn library() -> Self {
-        Self {
-            name: LIBRARY_COLLECTION.to_string(),
-            games: Vec::new(),
-            dynamic: true,
-        }
-    }
-}
-
-/// Max *user* collections per host. The dynamic Library entry is not one of them.
-pub const MAX_COLLECTIONS: usize = 20;
-
-/// Max collection name length, in chars.
-pub const MAX_COLLECTION_NAME: usize = 24;
-
-/// The dynamic entry's name on a freshly migrated host — renameable like any other.
-pub const LIBRARY_COLLECTION: &str = "Library";
-
-/// The collection a migrated host's old pins land in, and the one a new host starts with.
-pub const PINNED_COLLECTION: &str = "Pinned";
-
-/// Pin ID for the "Desktop" card — a `games` key and a collection member like any other.
-/// Never pruned, since no library listing contains it.
+/// Pin ID for the "Desktop" card — a `game_presets` key like any game id.
 pub const DESKTOP_PIN_ID: &str = "__desktop__";
 
 impl KnownHost {
@@ -167,198 +98,16 @@ impl KnownHost {
         self.paired = true;
     }
 
-    /// The grid sections, in order. Never empty: every record carries at least Library.
-    pub fn collections(&self) -> &[Collection] {
-        &self.collections
-    }
-
-    fn collections_mut(&mut self) -> &mut Vec<Collection> {
-        if self.collections.is_empty() {
-            self.collections.push(Collection::library());
-        }
-        &mut self.collections
-    }
-
-    /// Index of the dynamic (Library) entry. Present on every migrated host; `None` only
-    /// before migration, where there is nothing to draw anyway.
-    pub fn library_index(&self) -> Option<usize> {
-        self.collections().iter().position(|c| c.dynamic)
-    }
-
-    /// Which collection holds `id`, or `None` for Library — where every id that no
-    /// collection names implicitly lives.
-    pub fn collection_of(&self, id: &str) -> Option<usize> {
-        self.collections()
-            .iter()
-            .position(|c| !c.dynamic && c.games.iter().any(|g| g == id))
-    }
-
-    /// Moves `id` into collection `to`, or back to Library with `None`. A game is in at
-    /// most one collection, so this removes it from any other first. Appends: a just-moved
-    /// card is looked for at the end of the block it joined.
-    pub fn move_to(&mut self, id: &str, to: Option<usize>) {
-        let collections = self.collections_mut();
-        for entry in collections.iter_mut() {
-            entry.games.retain(|g| g != id);
-        }
-        if let Some(entry) = to.and_then(|i| collections.get_mut(i)).filter(|c| !c.dynamic) {
-            entry.games.push(id.to_string());
-        }
-    }
-
     /// This game's bound profile id, if it has one (the shared `game_presets`).
     pub fn game_profile(&self, id: &str) -> Option<&str> {
         self.shared.preset_for_game(id)
     }
-
-    /// Drops per-game state for ids the host no longer lists. `live` must come from a
-    /// *successful* library fetch — an error or an offline host would otherwise wipe
-    /// everything. [`DESKTOP_PIN_ID`] is always kept: it is never in a library listing.
-    /// Returns whether anything was removed.
-    pub fn prune_games(&mut self, live: impl Fn(&str) -> bool) -> bool {
-        let before = self.game_presets.len();
-        self.shared
-            .game_presets
-            .retain(|id, _| id == DESKTOP_PIN_ID || live(id));
-        let mut dropped = self.game_presets.len() != before;
-        for entry in &mut self.collections {
-            let before = entry.games.len();
-            entry.games.retain(|id| id == DESKTOP_PIN_ID || live(id));
-            dropped |= entry.games.len() != before;
-        }
-        dropped
-    }
-}
-
-/// Editing a host's collections: what the collections modal and its dialogs drive. Split out
-/// so the invariants have one home — a game in at most one collection, Library unremovable,
-/// names trimmed and unique — and so no caller can reach past them into the vector itself.
-///
-impl KnownHost {
-    /// The member `id` trades places with inside its own collection: its neighbour in
-    /// *grid* order. [`DESKTOP_PIN_ID`] is an ordinary member here — it moves, and is moved
-    /// past, like any card. `None` at either end of the block, and in Library, whose order
-    /// is recency rather than the user's.
-    pub fn collection_neighbour(&self, id: &str, forward: bool) -> Option<&str> {
-        let at = self.collection_of(id)?;
-        let games = &self.collections().get(at)?.games;
-        let pos = games.iter().position(|g| g == id)?;
-        if forward {
-            games.get(pos + 1)
-        } else {
-            games[..pos].last()
-        }
-        .map(String::as_str)
-    }
-
-    /// Swaps `id` with [`Self::collection_neighbour`] — the in-collection card reorder.
-    /// `false` when there is nowhere to go, which the caller shows as a reject nudge.
-    pub fn swap_within_collection(&mut self, id: &str, forward: bool) -> bool {
-        let Some(other) = self.collection_neighbour(id, forward).map(str::to_string) else {
-            return false;
-        };
-        let Some(at) = self.collection_of(id) else {
-            return false;
-        };
-        let Some(entry) = self.collections_mut().get_mut(at) else {
-            return false;
-        };
-        let (Some(a), Some(b)) = (
-            entry.games.iter().position(|g| g == id),
-            entry.games.iter().position(|g| *g == other),
-        ) else {
-            return false;
-        };
-        entry.games.swap(a, b);
-        true
-    }
-
-    /// Number of user collections — what [`MAX_COLLECTIONS`] bounds.
-    pub fn user_collection_count(&self) -> usize {
-        self.collections().iter().filter(|c| !c.dynamic).count()
-    }
-
-    pub fn can_add_collection(&self) -> bool {
-        self.user_collection_count() < MAX_COLLECTIONS
-    }
-
-    /// Whether `name` may be used for collection `at` (`None` when adding): trimmed,
-    /// non-empty, within [`MAX_COLLECTION_NAME`] and unique case-insensitively. What gates
-    /// the add/rename confirm button.
-    pub fn can_name(&self, at: Option<usize>, name: &str) -> bool {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > MAX_COLLECTION_NAME {
-            return false;
-        }
-        !self
-            .collections()
-            .iter()
-            .enumerate()
-            .any(|(i, c)| Some(i) != at && c.name.eq_ignore_ascii_case(name))
-    }
-
-    /// Appends a user collection, returning its index. `None` when the name is refused or
-    /// the host is at [`MAX_COLLECTIONS`].
-    pub fn add_collection(&mut self, name: &str) -> Option<usize> {
-        if !self.can_add_collection() || !self.can_name(None, name) {
-            return None;
-        }
-        let collections = self.collections_mut();
-        collections.push(Collection::new(name.trim()));
-        Some(collections.len() - 1)
-    }
-
-    /// Renames any entry, Library included. `false` when the name is refused.
-    pub fn rename_collection(&mut self, at: usize, name: &str) -> bool {
-        if !self.can_name(Some(at), name) {
-            return false;
-        }
-        let name = name.trim().to_string();
-        match self.collections_mut().get_mut(at) {
-            Some(entry) => {
-                entry.name = name;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Removes a user collection; its members fall back to Library. Refuses the dynamic
-    /// entry — the missing Remove icon on that row is not this rule's only enforcement.
-    pub fn remove_collection(&mut self, at: usize) -> bool {
-        if self.collections().get(at).is_none_or(|c| c.dynamic) {
-            return false;
-        }
-        self.collections_mut().remove(at);
-        true
-    }
-
-    /// Moves an entry within the order, the dynamic one included: this vector *is* the grid
-    /// section order.
-    pub fn reorder_collection(&mut self, from: usize, to: usize) -> bool {
-        let collections = self.collections_mut();
-        if from >= collections.len() || to >= collections.len() || from == to {
-            return false;
-        }
-        let entry = collections.remove(from);
-        collections.insert(to, entry);
-        true
-    }
-}
-
-/// The collections a genuinely new host starts with: "Pinned" holding the Desktop card,
-/// then Library — which is what a pre-collections install looked like after its first pair.
-pub fn new_host_collections() -> Vec<Collection> {
-    let mut pinned = Collection::new(PINNED_COLLECTION);
-    pinned.games.push(DESKTOP_PIN_ID.to_string());
-    vec![pinned, Collection::library()]
 }
 
 /// Upserts by `(addr, port)`, keeping the existing pin if the new record is unpaired (a fresh
 /// mDNS discovery shouldn't clobber a paired host) — same reasoning for `mac` and `os`,
-/// learned separately (see `App::drain_discovery`). The record's id, its profile bindings,
-/// its pins, `wol_auto`, the exit action and `collections` are *always* kept from the existing
-/// record: only their own screens change them, so no add/edit/re-pair flow may clobber any.
+/// learned separately. The record's id, its profile bindings, its pins, `wol_auto` and the
+/// exit action are *always* kept from the existing record: only their own screens change them, so no add/edit/re-pair flow may clobber any.
 ///
 /// Returns the inserted record when it was genuinely new, so the caller can seed what a first
 /// sighting gets ([`seed_new_host_profiles`]) without looking it up again. `None` for a merge:
@@ -383,7 +132,6 @@ pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Opti
     new.preset_id.clone_from(&existing.preset_id);
     new.pinned_presets.clone_from(&existing.pinned_presets);
     new.game_presets.clone_from(&existing.game_presets);
-    new.collections.clone_from(&existing.collections);
     new.wol_auto = existing.wol_auto;
     new.exit_action = existing.exit_action;
     *existing = new;
@@ -557,24 +305,10 @@ impl GamepadType {
     }
 }
 
-/// Override for the on-device log verbosity, settable live from the Diagnostics
-/// screen — see `logger::set_level_override`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevelOverride {
-    Debug,
-    #[default]
-    Info,
-    Warn,
-    Error,
-}
-
-/// Slider range, in 5 Mbps steps.
-pub const BITRATE_MIN_KBPS: u32 = 10_000;
-/// The one bitrate ceiling this client has. It bounds the manual slider AND, through `main`,
+/// The one bitrate ceiling this client has. It bounds the manual bitrate AND, through `main`,
 /// `punktfunk_core::abr`'s automatic wire-budget climb (`PUNKTFUNK_ABR_MAX_MBPS`) and the startup
 /// link-capacity probe's burst target (`PUNKTFUNK_ABR_PROBE_KBPS`) — an Automatic session that
-/// could climb past what the slider allows would just be a second, hidden setting.
+/// could climb past what the manual pick allows would just be a second, hidden setting.
 pub const BITRATE_MAX_KBPS: u32 = 200_000;
 
 /// 70% of measured goodput (headroom for FEC, loss).
@@ -627,13 +361,6 @@ impl Lattice {
         }
     }
 
-    /// The stop nearest a 0..1 position along the track — the inverse of [`Lattice::fraction`].
-    #[must_use]
-    pub fn stop_at(self, fraction: f32) -> i32 {
-        let last = self.stops().saturating_sub(1) as f32;
-        (fraction.clamp(0.0, 1.0) * last).round() as i32
-    }
-
     /// Clamps into range, then rounds to the nearest stop.
     #[must_use]
     pub fn snap(self, value: u32) -> u32 {
@@ -642,10 +369,9 @@ impl Lattice {
     }
 }
 
-/// Peak-brightness slider, in nits — and, while the calibration screen is up, the mastering
-/// maximum the pattern declares. The ceiling has to sit well above any panel the app runs on, or
-/// the slider ends before the TV starts compressing and the reading cannot be taken: a CX
-/// measures ~790, a G3 with MLA ~1300, a 2025 G5 ~2400.
+/// Peak-brightness slider, in nits — and, while calibration is up, the mastering maximum the
+/// pattern declares. The ceiling sits well above any panel the app runs on, or the slider ends
+/// before the TV starts compressing: a CX measures ~790, a G3 with MLA ~1300, a 2025 G5 ~2400.
 pub const HDR_PEAK: Lattice = Lattice {
     lo: 300,
     hi: 4_000,
@@ -672,7 +398,7 @@ pub const HDR_BLACK: Lattice = Lattice {
     step: 4,
 };
 
-/// The panel's HDR colour volume, as measured by the calibration screen.
+/// The panel's HDR colour volume, as measured by HDR calibration (`runtime::calibration`).
 ///
 /// These are the three luminances of the CTA-861.3 HDR static-metadata block. They travel to the
 /// TV (so its tone map onto this panel becomes an identity) and to the host in
@@ -706,8 +432,7 @@ impl HdrDisplay {
     /// so the game renders to this volume rather than to a placeholder someone else has to undo.
     /// One tone map, at the source — which is what `HGiG` asks for.
     ///
-    /// The defaults are an LG CX's, which is what this client sent to every TV before the
-    /// calibration screen existed.
+    /// The defaults are an LG CX's.
     #[must_use]
     pub fn hdr_meta(self) -> punktfunk_core::quic::HdrMeta {
         punktfunk_core::quic::HdrMeta {
@@ -721,19 +446,6 @@ impl HdrDisplay {
             max_fall: self.frame_avg_nits,
         }
     }
-}
-
-/// When the shared shell takes the menus over. Mirrors Android's `gamepad_ui_mode`, and
-/// serializes to the same two strings the shell's own row stores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GamepadUiMode {
-    /// Only while a real game pad is attached. A Magic Remote is not one — see
-    /// `platform::webos::gamepad::any_pad_connected`.
-    #[default]
-    Connected,
-    /// Whenever the switch is on, pad or no pad.
-    Always,
 }
 
 /// Everything this app persists, as one document — `settings.json`, written by
@@ -752,9 +464,8 @@ pub struct Persisted {
     #[serde(default = "crate::core::settings::default_document")]
     pub settings: pf_client_core::trust::Settings,
     pub known_hosts: Vec<KnownHost>,
-    /// The sidebar host row the user last had active — so relaunching lands back on its game
-    /// grid instead of an unfocused sidebar. `(host, port)`, not an index: `known_hosts` order
-    /// isn't stable across a forget/re-add.
+    /// The host the user last had active — so relaunching lands back on its library.
+    /// `(host, port)`, not an index: `known_hosts` order isn't stable across a forget/re-add.
     pub selected_host: Option<(String, u16)>,
     /// The app version that last wrote this document (`core::VERSION`). `None` means it
     /// was written before versioning existed — the only signal a future migration gets about
@@ -772,8 +483,8 @@ pub struct Persisted {
     pub profiles: Vec<StreamPreset>,
 }
 
-/// Cover-art paths for a title (host-relative, fetched via mTLS). Cards prefer
-/// `portrait` then `header` then `hero`; the hero backdrop prefers `hero`.
+/// Cover-art paths for a title (host-relative, fetched via mTLS). Covers prefer
+/// `portrait` then `header` then `hero`.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Artwork {
     pub portrait: Option<String>,
@@ -825,7 +536,6 @@ mod tests {
         assert_eq!(back, h);
         assert!(back.is_paired());
         assert_eq!(back.fingerprint(), Some([0x5a; 32]));
-        assert_eq!(back.collections().len(), 2, "a fresh record carries Pinned and Library");
 
         // Re-adding the host unpaired keeps the pin, the id and the bindings.
         let mut hosts = vec![h.clone()];
