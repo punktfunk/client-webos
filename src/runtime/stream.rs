@@ -510,11 +510,9 @@ pub(super) fn run_inner() -> Result<()> {
                         .is_some_and(crate::platform::webos::evdev::HidInput::has_mouse)
                 {
                     hid_device_seen = true;
+                    // Re-applies the capture — and with it the compositor hide, which only sticks
+                    // now that the node is grabbed: the one at connect raced the reader's scan.
                     cursor.disable_sdl_relative(canvas.window());
-                    // Only now is the node grabbed, so only now can a compositor hide stick — the one
-                    // at connect raced the reader thread's scan. Usually a no-op, since the call
-                    // above re-issued it already; kept so the retract doesn't hinge on that.
-                    cursor.reassert_hidden();
                     cursor.flush(canvas.window(), &events);
                 }
                 // The remote's presses, read before SDL's events so each is there to claim the key it
