@@ -41,7 +41,7 @@ impl MediaPipeline {
     /// returns, because a detached thread still feeding NDL would outlive the error the caller
     /// sees and race the `ndl::quit()` that follows it.
     ///
-    /// Returns the pipeline, the route it settled on, and whether HDR metadata is being applied.
+    /// Returns the pipeline and the route it settled on.
     pub fn build(
         params: &ConnectParams,
         client: &Arc<NativeClient>,
@@ -49,12 +49,12 @@ impl MediaPipeline {
         stats: &Arc<StreamStats>,
     ) -> Result<(Self, AudioRoutePref)> {
         let (player, is_hdr) = load_player(client, params)?;
-        // Metronome rides any plane; real stream only proven ones. Route is locked once running.
+        // The prime rides any plane; the real stream only a proven one. Route is locked once running.
         let plane = player.audio_plane();
         let proven = plane.as_ref().is_some_and(|p| p.accepts_stream());
         let route = resolve_route(params.audio_route, proven);
-        // Set before plane threads start. Only for streams riding the plane: metronome has no
-        // sync to hold, and its depth is a measured figure that must not be disturbed.
+        // Set before plane threads start. Only for streams riding the plane: the prime carries no
+        // sound to hold in sync.
         let extra_lead_ms = super::timeline::smooth_cushion_ms(client.mode().refresh_hz, params.present_priority);
         if route.on_ndl_plane() && extra_lead_ms > 0 {
             if let Some(p) = plane.as_ref() {
@@ -111,8 +111,8 @@ impl MediaPipeline {
 
 /// Downgrades the requested route to what the load proved. Software is the default and only
 /// route with known-good pacing: NDL paces against a fed plane, which inherits network jitter
-/// (silence plane cures this). Plane routes are kept selectable for comparison but unproven.
-/// `has_plane` is the proven plane, not the requested one — see the call site.
+/// (a plane left on its prime has none). Plane routes are kept selectable for comparison but
+/// unproven. `has_plane` is the proven plane, not the requested one — see the call site.
 fn resolve_route(pref: AudioRoutePref, has_plane: bool) -> AudioRoutePref {
     // The plane was loaded at the session's own width (stereo or 5.1), so only proof decides.
     match pref {
@@ -122,9 +122,9 @@ fn resolve_route(pref: AudioRoutePref, has_plane: bool) -> AudioRoutePref {
 }
 
 /// How long the V2 load waits for LOADCOMPLETED before starting unconfirmed. Only offload needs
-/// proof — metronome paces unconfirmed planes fine, but wrong audio route is silent forever. Issue
-/// #188: some sets report the callback only after the first video frame; extra waiting during load
-/// just adds black screen.
+/// proof — the clock plane carries the prime through an unconfirmed load, but a wrong audio route
+/// is silent forever. Issue #188: some sets report the callback only after the first video frame;
+/// extra waiting during load just adds black screen.
 fn plane_budget(pref: AudioRoutePref) -> std::time::Duration {
     match pref {
         AudioRoutePref::NdlOpus => crate::platform::webos::ndl::AUDIO_PROVE_BUDGET,
@@ -153,7 +153,7 @@ fn load_player(client: &NativeClient, params: &ConnectParams) -> Result<(Box<dyn
                 height,
                 codec,
                 Some(plane_budget(params.audio_route)),
-                // Offload loads the plane at the session's width; the metronome rides stereo.
+                // Offload loads the plane at the session's width; a prime-only plane rides stereo.
                 if params.audio_route == AudioRoutePref::NdlOpus {
                     client.audio_channels
                 } else {
@@ -202,7 +202,7 @@ fn audio_path_label(pref: AudioRoutePref, route: AudioRoutePref, has_plane: bool
         (AudioRoutePref::Software, true) if pref == AudioRoutePref::NdlOpus && !proven => {
             "software Opus decode -> SDL3 + NDL clock plane (offload asked for, plane unconfirmed)"
         }
-        // Plane is the pacing metronome; see `NdlVideo::run_clock_plane`.
+        // Plane paces the picture on its prime alone; see `NdlVideo::run_clock_plane`.
         (AudioRoutePref::Software, true) => "software Opus decode -> SDL3 + NDL clock plane",
         // No plane: NDL v1 has none, or load was refused.
         (AudioRoutePref::Software, false) => "software Opus decode -> SDL3, no clock plane",
@@ -228,7 +228,6 @@ fn spawn_video_thread(
     std::thread::Builder::new()
         .name("punktfunk-webos-video".into())
         .spawn(move || {
-            // VideoStage queries the panel refresh rate through SDL on construction.
             let stage = VideoStage::new(player, stats.clone(), &cfg);
             video_pump(client, stage, stop, stats, is_hdr, audio_rides_plane);
         })
@@ -238,10 +237,10 @@ fn spawn_video_thread(
 /// `(audio pump, clock plane)`.
 type PlaneThreads = (Option<std::thread::JoinHandle<()>>, Option<std::thread::JoinHandle<()>>);
 
-/// Threads feeding and riding NDL's audio plane: the keep-alive loop and real stream's pump
-/// (if the route rides it). NDL paces the picture against any fed plane regardless of audio routing;
-/// the route determines which thread feeds it: Software uses the metronome (silence only),
-/// `NdlOpus` yields to the real stream (hardware-stamped).
+/// Threads feeding and riding NDL's audio plane: the clock plane and real stream's pump (if the
+/// route rides it). NDL paces the picture against any fed plane regardless of audio routing; the
+/// clock plane carries the prime until LOADCOMPLETED, and the route decides what follows it:
+/// Software leaves the plane on its prime, `NdlOpus` yields to the real stream (hardware-stamped).
 fn spawn_plane_threads(
     client: &Arc<NativeClient>,
     ndl_audio: Option<Arc<dyn AudioPlane>>,

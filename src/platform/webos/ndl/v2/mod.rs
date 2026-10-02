@@ -89,8 +89,8 @@ pub struct NdlVideo {
     refused: RefusalStreak,
     /// Highest audio stamp fed (ms); shared by [`Self::play_audio`] and clock plane to prevent
     /// backward timestamps (NDL reads rewind as seek, mutes session). A floor (never driver):
-    /// feeders target player clock + [`PLANE_LEAD_MS`], so the ceiling stays one lead ahead of
-    /// real time.
+    /// each feeder targets player clock plus its own lead — the prime's `PRIME_LEAD` packets, the
+    /// real stream's [`PLANE_LEAD_MS`].
     last_audio_pts_ms: AtomicI64,
     /// Extra depth on REAL stream stamps (on top of [`PLANE_LEAD_MS`]) when Smoothness buffer
     /// moves picture later. See [`Self::set_plane_extra_lead_ms`].

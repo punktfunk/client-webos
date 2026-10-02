@@ -120,7 +120,8 @@ pub struct PadSink {
 }
 
 impl PadSink {
-    /// Opens the pad's card, or `None` when no wired pad has one.
+    /// Opens playback on `card` (see [`find_card`]); `Err` when libasound, the device or its params
+    /// refuse.
     ///
     /// Deliberately not `Send`: the raw handle belongs to whichever thread writes it, so it is
     /// opened there rather than handed over.

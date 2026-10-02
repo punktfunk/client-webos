@@ -71,7 +71,8 @@ struct VideoPump {
     hud: Arc<punktfunk_core::hud::Stats>,
     /// Whether to drain host HDR metadata (false for SDR or non-HEVC).
     is_hdr: bool,
-    /// True when real audio rides the NDL plane; false when plane is silent metronome only.
+    /// True when real audio rides the NDL plane; false when the plane is left on its prime, or there
+    /// is none.
     audio_rides_plane: bool,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
@@ -494,7 +495,8 @@ pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &A
     });
 }
 
-/// Spawns the audio thread for a session whose sink lives outside `connect` (SDL device).
+/// Spawns the audio thread feeding `stage`'s sink: the SDL device on the software route, the NDL
+/// plane on offload (`MediaPipeline::build`).
 pub fn spawn_audio_feed(
     client: Arc<NativeClient>,
     mut stage: AudioStage,

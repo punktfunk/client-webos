@@ -1,16 +1,16 @@
-//! Minimal one-shot Luna (webOS service bus) caller, used by [`crate::platform::webos::dualsense`].
+//! Minimal one-shot Luna (webOS service bus) caller: `device`'s system queries, [`launch_home`],
+//! and [`crate::platform::webos::dualsense`]'s feedback when the in-process bus can't register.
 //!
-//! **Why a subprocess and not `libluna-service2` directly.** In-process `LSCall` needs a
-//! registered `LSHandle` attached to a running `GMainLoop`, and — the deciding factor — LS2
-//! authorizes a caller by *which executable* is calling: permissions come from the role file
-//! matched to the binary's path (`/usr/share/luna-service2/roles.d/`). `luna-send-pub`'s own
-//! role is what was verified on-device to reach the Bluetooth HID methods from a dev-mode
-//! install; an app registering under its own name is a different, unverified client identity.
-//! Borrowing the tool's identity is the difference between "works on a non-rooted TV" and
-//! "works only where someone already granted our appid the `devices` group".
+//! **Why a subprocess as well as `libluna-service2`.** In-process `LSCall` needs a registered
+//! `LSHandle` attached to a running `GMainLoop`, and LS2 authorizes a caller by *which
+//! executable* is calling: permissions come from the role file matched to the binary's path
+//! (`/usr/share/luna-service2/roles.d/`). Registering from the app's own binary is verified on a
+//! G5 and is the fast path ([`crate::platform::webos::ls2`]); a hub that refuses it still leaves
+//! `luna-send-pub`, whose own role was verified on-device to reach the Bluetooth HID methods
+//! from a dev-mode install.
 //!
-//! Cost is one fork/exec per call, which is why nothing here is on a hot path: the only
-//! caller coalesces to the latest state and sends from its own thread (see
+//! Cost is one fork/exec per call, which is why nothing here is on a hot path: the feedback
+//! sender coalesces to the latest state and sends from its own thread (see
 //! [`crate::platform::webos::dualsense::Feedback`]). Never call this from the render/input loop.
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;

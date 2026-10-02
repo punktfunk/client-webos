@@ -28,7 +28,7 @@ use crate::core::caps::VideoCaps;
 /// TV capabilities detected at runtime (best-effort; missing sources fall back safely).
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
-    /// CPU cores (drives off-main-thread work before contention).
+    /// CPU cores. Diagnostics only — read by nothing but [`Self::log`].
     pub cores: usize,
     /// Major webOS release (5, 6, … 10), when it can be determined.
     pub webos_major: Option<u32>,

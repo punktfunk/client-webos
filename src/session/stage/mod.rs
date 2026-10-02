@@ -1,7 +1,7 @@
 //! The single place that talks to the video decoder.
 //!
 //! Everything between "an access unit arrived" and "NDL has been fed" lives here: host-PTS
-//! mapping on the refresh-rate-reconciled frame interval, backlog sampling,
+//! mapping on the negotiated stream's frame interval, backlog sampling,
 //! freeze-until-reanchor, and keyframe-request throttling. The video pump keeps only the
 //! parts that are wire-shaped — pulling frames, and *how* a keyframe is asked for, which it
 //! answers to [`SinkResult::NeedKeyframe`] with `NativeClient::request_keyframe`.
@@ -160,9 +160,8 @@ impl VideoStage {
         self.sink.set_color(meta, color)
     }
 
-    /// Drop everything derived from a mapping that no longer holds: the host anchor and the audio
-    /// plane's copy of it. The two move in lockstep or the planes end up on timelines that
-    /// disagree.
+    /// Drop everything derived from a mapping that no longer holds: the host anchor and the open
+    /// AU's stamp. The audio plane has nothing to reset — it stamps off the player clock on its own.
     fn reset_timeline(&mut self) {
         self.pacing.reset();
         self.au_base_ns = None;
@@ -195,8 +194,7 @@ impl VideoStage {
         }
     }
 
-    /// What the live mapping has to say for itself — see [`PacingHealth`]. The whole point of
-    /// publishing it on both mappings is that `late_stamps` makes them comparable.
+    /// What the live mapping has to say for itself — see [`PacingHealth`].
     pub fn pacing_health(&self) -> PacingHealth {
         self.pacing.health()
     }

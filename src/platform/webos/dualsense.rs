@@ -258,9 +258,7 @@ pub(crate) fn mac_from_serial(serial: &str) -> Option<String> {
 /// Matched on the `I:` ids first, and on the name only as a fallback: the kernel takes the input
 /// device's name straight from the HID/Bluetooth product name (`input_dev->name = hdev->name` in
 /// `hid-playstation`), and the pad advertises itself as a plain "Wireless Controller" — so a set
-/// that decorates the name is the lucky case, not the rule. The ids are the pad either way, which
-/// matters most to [`hid_playstation_bound`]: it asks specifically about the pads a *generic*
-/// binding is handling, and those are the ones least likely to be named after themselves.
+/// that decorates the name is the lucky case, not the rule. The ids are the pad either way.
 fn dualsense_blocks<'a>(devices: &'a str) -> impl Iterator<Item = &'a str> + 'a {
     devices.split("\n\n").filter(|block| {
         block.lines().any(|l| {
@@ -1008,10 +1006,9 @@ mod tests {
         assert_eq!(address_in(&format!("{USB}\n{BT}")), Some("aa:bb:cc:dd:ee:ff".into()));
     }
 
-    /// The pad a generic binding is handling is the one `hid_playstation_bound` exists to find,
-    /// and it is also the one least likely to be named `DualSense` — the kernel takes that name
-    /// from the product string, which the pad reports as a plain "Wireless Controller". So the
-    /// ids have to be enough on their own.
+    /// A pad is often not named `DualSense` at all — the kernel takes that name from the product
+    /// string, which the pad reports as a plain "Wireless Controller". So the ids have to be
+    /// enough on their own.
     #[test]
     fn a_pad_is_matched_by_its_ids_whatever_it_is_called() {
         const PLAIN: &str =

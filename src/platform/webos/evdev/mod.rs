@@ -17,17 +17,17 @@
 //! the compositor pointer is hidden. Capture off (desktop/absolute): a pointer-only node is left
 //! with the compositor so the TV cursor stays the one you aim — only keyboards are taken.
 //!
-//! **Access.** Unlike `/dev/hidraw*` (jail-blocked, see `dualsense.rs`), evdev nodes are
-//! reachable: `root:compositor 0660`, and the app's uid carries gid 505 in its supplementary
-//! groups — verified on-device, non-rooted, webOS 10.3.
+//! **Access.** Unlike a Bluetooth pad's `/dev/hidraw*` (none in the jail, see `dualsense.rs`),
+//! evdev nodes are reachable: `root:compositor 0660`, and the app's uid carries gid 505 in its
+//! supplementary groups — verified on-device, non-rooted, webOS 10.3.
 //!
 //! **Grabbed while active.** `EVIOCGRAB` is scoped to [`HidInput::set_active`], not held for the
-//! reader's whole life: `cursor::COMPOSITOR_CURSOR_CONTROL` is verified off on webOS 26 (see
-//! `cursor.rs`), so an ungrabbed node leaves the compositor drawing its own pointer from the same
-//! evdev reports we forward. Scoping it to "caller wants it" rather than the reader's whole life
-//! bounds a wedged thread's blast radius to "no HID input" instead of "no mouse input at all,
-//! TV-wide" — the kernel releases the grab the moment our fd closes (including on panic), and the
-//! surface-manager's own fd stays open throughout, just starved of events while ours holds it.
+//! reader's whole life. The grab is what keeps the compositor quiet (see `cursor.rs`): an
+//! ungrabbed node leaves it drawing its own pointer from the same evdev reports we forward.
+//! Scoping it to "caller wants it" rather than the reader's whole life bounds a wedged thread's
+//! blast radius to "no HID input" instead of "no mouse input at all, TV-wide" — the kernel
+//! releases the grab the moment our fd closes (including on panic), and the surface-manager's own
+//! fd stays open throughout, just starved of events while ours holds it.
 //! The Magic Remote never matches the mouse/keyboard filter: its keys reach the app through SDL.
 //! A scan still opens its own node, ungrabbed, as a [`RemoteNode`] for the caller to read, since
 //! SDL's keys name no device. [`HidInput::keyboard_busy`] drops SDL's echo of a HID keyboard.
@@ -321,7 +321,7 @@ struct Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // SAFETY: `fd` came from `open` in `open_mouse` and is owned solely by this struct.
+        // SAFETY: `fd` came from `open` in `open_hid` and is owned solely by this struct.
         unsafe { libc::close(self.fd) };
     }
 }
