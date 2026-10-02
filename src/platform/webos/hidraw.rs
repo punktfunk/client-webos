@@ -58,7 +58,7 @@ impl Hidraw {
     fn open(path: &str, flags: libc::c_int) -> Option<Self> {
         let c_path = CString::new(path).ok()?;
         // SAFETY: `c_path` is NUL-terminated and outlives the call.
-        let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_NONBLOCK) };
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_NONBLOCK | libc::O_CLOEXEC) };
         (fd >= 0).then(|| Self {
             fd,
             path: path.to_string(),

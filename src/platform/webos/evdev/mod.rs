@@ -335,31 +335,35 @@ enum Probe {
     Unopenable,
 }
 
-/// Opens every node this reader wants that isn't already in `seen`, appending the paths it takes.
+/// A node this reader has settled, by path AND inode. The kernel hands out the lowest free
+/// `eventN` again, so a path alone would leave a keyboard plugged in where a skipped pad used to
+/// be unprobed for the rest of the stream; devtmpfs gives every new node a fresh inode.
+type Settled = (PathBuf, u64);
+
+/// Opens every node this reader wants that isn't already in `seen`, appending the nodes it takes.
 fn scan(
-    seen: &mut Vec<PathBuf>,
+    seen: &mut Vec<Settled>,
     shared: &Shared,
     remote_gone: &std::sync::mpsc::Sender<PathBuf>,
     next_source: &mut u32,
 ) -> Vec<Device> {
+    use std::os::unix::fs::DirEntryExt;
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         tracing::warn!("/dev/input unreadable — no HID input support");
         return Vec::new();
     };
-    let mut paths: Vec<PathBuf> = entries
+    let listed: Vec<Settled> = entries
         .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("event"))
-        })
-        .filter(|p| !seen.contains(p))
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("event")))
+        .map(|e| (e.path(), e.ino()))
         .collect();
+    // A settled node that is gone, or was recreated for another device, settles nothing now.
+    seen.retain(|node| listed.contains(node));
+    let mut nodes: Vec<Settled> = listed.into_iter().filter(|node| !seen.contains(node)).collect();
     // Stable order so log lines and device indices don't shuffle between scans.
-    paths.sort();
+    nodes.sort();
     let mut devices = Vec::new();
-    for path in paths {
+    for (path, ino) in nodes {
         if shared.stop.load(Ordering::Relaxed) {
             break;
         }
@@ -371,11 +375,11 @@ fn scan(
                 };
                 dev.source = *next_source;
                 *next_source = next;
-                seen.push(path);
+                seen.push((path, ino));
                 devices.push(dev);
             }
             Probe::Remote(fd) => {
-                seen.push(path.clone());
+                seen.push((path.clone(), ino));
                 let node = RemoteNode {
                     fd,
                     path,
@@ -385,8 +389,8 @@ fn scan(
                     remotes.push(node);
                 }
             }
-            // Opened and isn't ours — settled, no rescan will change that.
-            Probe::Skip => seen.push(path),
+            // Opened and isn't ours — settled until the node goes away.
+            Probe::Skip => seen.push((path, ino)),
             // Not marked seen: an unopenable node (`ENXIO`) looks like a not-yet-plugged
             // dongle, so the next rescan retries it.
             Probe::Unopenable => {}
@@ -405,7 +409,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         return Probe::Skip;
     };
     // SAFETY: NUL-terminated path, standard flags; failure is reported as -1, not UB.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     // Normal case, not a diagnostic: ~30 event nodes on this TV have no device (`ENXIO`) or
     // belong to groups we're not in.
     if fd < 0 {
@@ -666,7 +670,7 @@ fn fd_uniq(fd: RawFd) -> Option<String> {
 pub fn node_uniq(path: &str) -> Option<String> {
     let c_path = std::ffi::CString::new(path).ok()?;
     // SAFETY: `c_path` is NUL-terminated and outlives the call.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     if fd < 0 {
         return None;
     }
@@ -779,13 +783,6 @@ fn scan_loop(
     let mut next_source = 1;
     let mut pending = None;
     while !shared.stop.load(Ordering::Relaxed) {
-        if let Some(found) = pending.take() {
-            match added.try_send(found) {
-                Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Full(found)) => pending = Some(found),
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-            }
-        }
         let due = last_scan.is_none_or(|at| at.elapsed() >= RESCAN_INTERVAL);
         if pending.is_none() && due {
             let first = last_scan.is_none();
@@ -803,11 +800,26 @@ fn scan_loop(
                 }
             }
         }
-        // Removals interrupt the scan interval.
-        let idle = last_scan.map_or(RESCAN_INTERVAL, |at| RESCAN_INTERVAL.saturating_sub(at.elapsed()));
+        // Handed over in the same pass as the scan that found them: before, they waited out the
+        // rest of the interval below first, so every stream start adopted its keyboard and mouse
+        // ~2 s late — ungrabbed, with SDL's pointer, meanwhile.
+        if let Some(found) = pending.take() {
+            match added.try_send(found) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(found)) => pending = Some(found),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+            }
+        }
+        // Removals interrupt the scan interval. A hand-over the reader has no room for yet is
+        // retried at the reader's own cadence rather than after the whole interval.
+        let idle = if pending.is_some() {
+            Duration::from_millis(POLL_TIMEOUT_MS as u64)
+        } else {
+            last_scan.map_or(RESCAN_INTERVAL, |at| RESCAN_INTERVAL.saturating_sub(at.elapsed()))
+        };
         match removed.recv_timeout(idle) {
             Ok(path) => {
-                seen.retain(|p| *p != path);
+                seen.retain(|(p, _)| *p != path);
                 // Freed node worth re-probing; reset mtime.
                 dir_mtime = None;
             }
