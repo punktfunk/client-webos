@@ -1,6 +1,5 @@
-//! The overlays drawn over live video and over the menus, on the console's GL context: the
-//! stats card, the log tail, the toast, and the two-button confirm dialog (stop streaming,
-//! quit). Immediate mode on the kit, like every menu screen (`app::draw`); the stream loop
+//! The overlays drawn over live video on the console's GL context: the stats card, the log
+//! tail, the toast, and the stop-streaming dialog. Immediate mode on the kit; the stream loop
 //! keeps its own redraw cadence and its transparent clear for NDL's punch-through plane.
 
 use std::time::{Duration, Instant};
@@ -8,15 +7,16 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use pf_console_ui::theme::{self, Fonts, PanelStroke, W};
 use punktfunk_core::hud::{HudCorner, HudLine, Role};
-use skia_safe::{Color4f, RRect, Rect};
+use skia_safe::{Canvas, Color4f, RRect, Rect};
 
-use crate::app::draw::dialog::{self, Motion};
-use crate::app::draw::{alpha_layer, line_h, wrap, Frame};
-use crate::app::screens::confirm::{Confirm, Tone};
 use crate::console::ConsoleGl;
 use crate::core::event::MenuEvent;
 use crate::platform::webos::input::RemoteKey;
-use crate::ui;
+
+mod dialog;
+pub(super) mod fade;
+
+use dialog::{Motion, Press, FOCUS_POP};
 
 /// Design units.
 const STATS_PAD: f32 = 14.0;
@@ -33,6 +33,88 @@ const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_SIZE: f64 = 15.0;
 pub(super) const LOG_LINES: usize = 9;
 const NOTIFICATION_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One frame's canvas and its size in display units.
+#[derive(Clone, Copy)]
+pub(super) struct Frame<'a> {
+    pub canvas: &'a Canvas,
+    pub fonts: &'a Fonts,
+    pub w: f32,
+    pub h: f32,
+    /// Pixels per design unit.
+    pub k: f32,
+}
+
+impl<'a> Frame<'a> {
+    fn new(canvas: &'a Canvas, fonts: &'a Fonts, w: u32, h: u32) -> Self {
+        Self {
+            canvas,
+            fonts,
+            w: w as f32,
+            h: h as f32,
+            k: scale(h),
+        }
+    }
+}
+
+/// The kit's own default: 800 design units tall, clamped between a Deck and a 4K panel.
+fn scale(h: u32) -> f32 {
+    (h as f32 / 800.0).clamp(0.75, 3.0)
+}
+
+/// Geist's line box at `size`: the ascent-to-descent span comes out near 1.25 em.
+pub(super) fn line_h(size: f64) -> f64 {
+    size * 1.25
+}
+
+/// Greedy word wrap on the kit's single-line measure. A word wider than `max_w` stands alone.
+pub(super) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Vec<String> {
+    let font = fonts.font(w, size);
+    let measure = |s: &str| f64::from(font.measure_str(s, None).0);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if line.is_empty() || measure(&candidate) <= max_w {
+            line = candidate;
+        } else {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// The overlays' card face.
+fn surface() -> Color4f {
+    theme::card_face(0.16)
+}
+
+/// An opaque card. Never frosted: the video sits on a hardware plane our GL context cannot read.
+pub(super) fn opaque_card(f: &Frame<'_>, rect: Rect, corner: f32) {
+    f.canvas.draw_rrect(
+        RRect::new_rect_xy(rect, corner * f.k, corner * f.k),
+        &theme::fill(surface()),
+    );
+    theme::panel(f.canvas, rect, corner, None, PanelStroke::Gradient, f.k);
+}
+
+/// Layer with optional alpha, skipped at full alpha. Caller must pair with one `restore`.
+/// The clip stops overflow (unwrapped words, shadows).
+pub(super) fn alpha_layer(c: &Canvas, r: Rect, alpha: f32) {
+    if alpha >= 1.0 {
+        c.save();
+        c.clip_rect(r, skia_safe::ClipOp::Intersect, false);
+        return;
+    }
+    c.save_layer_alpha_f(Some(r), alpha);
+}
 
 /// One frame on the GL context: the surface, cleared to `clear`, scaled from `display`
 /// units to the drawable. `draw` paints in display units; the frame is then swapped.
@@ -104,7 +186,7 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32, co
     alpha_layer(c, card, alpha);
     c.draw_rrect(
         RRect::new_rect_xy(card, STATS_CORNER * k, STATS_CORNER * k),
-        &theme::fill(crate::app::draw::surface()),
+        &theme::fill(surface()),
     );
     theme::panel(c, card, STATS_CORNER, None, PanelStroke::Plain(0.12), k);
     let x = f64::from(card.left + STATS_PAD * k);
@@ -160,7 +242,7 @@ pub(super) fn log(f: &Frame<'_>, lines: &[String]) {
     let h = stride * rows.len().max(1) as f32 + 2.0 * LOG_PAD * k;
     let strip = Rect::from_xywh(0.0, f.h - h, f.w, h);
     let c = f.canvas;
-    c.draw_rect(strip, &theme::fill(crate::app::draw::surface()));
+    c.draw_rect(strip, &theme::fill(surface()));
     for (i, (dx, text, tone)) in rows.iter().enumerate() {
         f.fonts.draw(
             c,
@@ -193,10 +275,7 @@ fn pill(f: &Frame<'_>, text: &str, alpha: f32, bottom: bool) {
     let pill = Rect::from_xywh((f.w - w) / 2.0, y, w, h);
     let c = f.canvas;
     alpha_layer(c, pill, alpha);
-    c.draw_rrect(
-        RRect::new_rect_xy(pill, h / 2.0, h / 2.0),
-        &theme::fill(crate::app::draw::surface()),
-    );
+    c.draw_rrect(RRect::new_rect_xy(pill, h / 2.0, h / 2.0), &theme::fill(surface()));
     theme::panel(c, pill, h / 2.0 / k, None, PanelStroke::Gradient, k);
     f.fonts.draw(
         c,
@@ -224,36 +303,31 @@ pub(super) enum ConfirmAction {
 // Decouple from stream's 2ms polling.
 const DIALOG_FRAME_STEP: Duration = Duration::from_millis(16);
 
-/// A two-button confirm dialog (stop streaming mid-stream, quit in the menu) with the same
-/// open/close fade as the menu's modals, drawn as `app::draw::dialog` draws them.
+/// A two-button confirm dialog: a destructive action and Cancel, with an open/close fade.
 pub(super) struct ConfirmDialog {
     title: &'static str,
-    confirm: Confirm,
+    subtitle: &'static str,
+    label: &'static str,
     focus: Option<usize>,
-    fade: ui::fade::ModalFade<usize>,
+    fade: fade::ModalFade<usize>,
     focus_anim: Option<Instant>,
     /// The focused button's press dip, playing out over the close fade it starts.
-    press: ui::animation::Press,
+    press: Press,
     hover_close: bool,
     last_draw: Option<Instant>,
     last_visual: Option<(usize, bool, bool, bool)>,
 }
 
 impl ConfirmDialog {
-    pub(super) fn new(
-        title: &'static str,
-        subtitle: &'static str,
-        icon: Option<&'static str>,
-        label: &'static str,
-        tone: Tone,
-    ) -> Self {
+    pub(super) fn new(title: &'static str, subtitle: &'static str, label: &'static str) -> Self {
         Self {
             title,
-            confirm: Confirm::new(icon, label, tone, "Cancel", subtitle.to_string()),
+            subtitle,
+            label,
             focus: None,
-            fade: ui::fade::ModalFade::modal(),
+            fade: fade::ModalFade::modal(),
             focus_anim: None,
-            press: ui::animation::Press::default(),
+            press: Press::default(),
             hover_close: false,
             last_draw: None,
             last_visual: None,
@@ -264,16 +338,11 @@ impl ConfirmDialog {
         self.focus.is_some()
     }
 
-    pub(super) fn open_with(&mut self, focus: usize, subtitle: &'static str) {
-        self.confirm.subtitle = subtitle.to_string();
-        self.open(focus);
-    }
-
     pub(super) fn open(&mut self, focus: usize) {
         self.last_visual = None;
         self.last_draw = None;
         self.focus = Some(focus);
-        self.press = ui::animation::Press::default();
+        self.press = Press::default();
         self.fade.reopen();
         self.focus_anim = Some(Instant::now());
     }
@@ -301,7 +370,7 @@ impl ConfirmDialog {
         let mut animating = self.fade.tick();
         animating |= self.press.armed() && !self.press.landed();
         if let Some(t) = self.focus_anim {
-            if t.elapsed() >= ui::animation::FOCUS_POP {
+            if t.elapsed() >= FOCUS_POP {
                 self.focus_anim = None;
             }
             animating = true;
@@ -339,16 +408,9 @@ impl ConfirmDialog {
     ) -> Option<ConfirmAction> {
         use sdl3::event::Event;
         let focus = self.focus?;
-        let l = dialog::layout(
-            fonts,
-            w as f32,
-            h as f32,
-            crate::app::draw::scale(h),
-            &self.confirm.subtitle,
-        );
+        let l = dialog::layout(fonts, w as f32, h as f32, scale(h), self.subtitle);
         match *event {
             Event::MouseMotion { x, y, .. } => {
-                let (x, y) = (x as i32, y as i32);
                 let hover_close = l.on_close(x, y);
                 let hover_changed = self.hover_close != hover_close;
                 self.hover_close = hover_close;
@@ -367,7 +429,6 @@ impl ConfirmDialog {
                 y,
                 ..
             } => {
-                let (x, y) = (x as i32, y as i32);
                 if l.on_close(x, y) {
                     self.dismiss();
                     return Some(ConfirmAction::Dismissed);
@@ -428,8 +489,15 @@ impl ConfirmDialog {
             press: self.press,
             hover_close: self.hover_close && !closing,
         };
-        let dy = ui::animation::modal_rise(alpha) as f32;
-        dialog::draw(f, self.title, &self.confirm, focus, Some(&motion), alpha, dy);
+        dialog::draw(
+            f,
+            self.title,
+            self.subtitle,
+            [self.label, "Cancel"],
+            focus,
+            &motion,
+            alpha,
+        );
     }
 }
 
@@ -455,7 +523,7 @@ impl Notification {
     /// The text and its alpha while visible; clears itself once faded.
     pub(super) fn frame(&mut self) -> Option<(&str, f32)> {
         let at = self.shown_at?;
-        match ui::fade::hold_alpha(at, NOTIFICATION_HOLD, ui::fade::OVERLAY_FADE) {
+        match fade::hold_alpha(at, NOTIFICATION_HOLD, fade::OVERLAY_FADE) {
             Some(alpha) => Some((&self.text, alpha)),
             None => {
                 self.shown_at = None;
@@ -472,9 +540,9 @@ mod dialog_tests {
     #[test]
     fn close_hover_requests_redraw_only_when_changed() {
         let fonts = theme::build_fonts().unwrap();
-        let mut dialog = ConfirmDialog::new("Quit?", "Close app", None, "Quit", Tone::Danger);
+        let mut dialog = ConfirmDialog::new("Stop?", "Close the stream", "Stop");
         dialog.focus = Some(0);
-        let l = dialog::layout(&fonts, 1920.0, 1080.0, crate::app::draw::scale(1080), "Close app");
+        let l = dialog::layout(&fonts, 1920.0, 1080.0, scale(1080), "Close the stream");
         let motion = |x, y| sdl3::event::Event::MouseMotion {
             timestamp: 0,
             window_id: 0,
@@ -497,9 +565,9 @@ mod dialog_tests {
 
     #[test]
     fn settled_dialog_stays_visible_without_requesting_frames() {
-        let mut dialog = ConfirmDialog::new("Quit?", "Close app", None, "Quit", Tone::Danger);
+        let mut dialog = ConfirmDialog::new("Stop?", "Close the stream", "Stop");
         dialog.focus = Some(0);
-        dialog.focus_anim = Some(Instant::now() - ui::animation::FOCUS_POP);
+        dialog.focus_anim = Some(Instant::now() - FOCUS_POP);
         assert!(dialog.tick());
         assert!(!dialog.tick());
         assert!(dialog.frame().is_some());

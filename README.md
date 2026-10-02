@@ -30,10 +30,10 @@ This repo is only the webOS-specific client: an SDL3 UI, NDL DirectMedia hardwar
 <summary><b>Screenshots</b></summary>
 
 <p align="center">
-  <img src="assets/screenshots/console-kit-home.jpg" width="32%" alt="Home / game library">
-  <img src="assets/screenshots/console-kit-settings.jpg" width="32%" alt="Settings">
-  <img src="assets/screenshots/controller-ui-home.jpg" width="32%" alt="Console Home">
-  <img src="assets/screenshots/controller-ui-game.jpg" width="32%" alt="Console Game">
+  <img src="assets/screenshots/controller-ui-home.jpg" width="48%" alt="Hosts">
+  <img src="assets/screenshots/console-kit-home.jpg" width="48%" alt="Games">
+  <img src="assets/screenshots/console-kit-settings.jpg" width="48%" alt="Settings">
+  <img src="assets/screenshots/controller-ui-game.jpg" width="48%" alt="Launching a game">
 </p>
 
 </details>
@@ -45,27 +45,24 @@ This repo is only the webOS-specific client: an SDL3 UI, NDL DirectMedia hardwar
   (NDL DirectMedia). No AV1: the pipeline never presented one.
 - **Bitrate** — Automatic mode adjusts to the network, or set a fixed rate from 10 to 200 Mbps.
   A per-host network speed test measures over the real data plane and applies a recommended rate.
+- **HDR calibration** — press the remote's **Blue** button in the menu to measure the panel's peak,
+  full-screen and black levels against test patterns on the video plane. The host then renders to
+  that volume.
 - **Audio** — stereo, 5.1 or 7.1 Opus, decoded in software on the TV. An experimental
   stereo-only route hands the Opus to the TV's media pipeline instead.
 - **Library** — the host's game library, custom collections and ordering.
 - **Settings profiles** — punktfunk's shared profiles: a named set of overrides (resolution,
   frame rate, bitrate, codec, HDR, audio, controller) bound to a game, picked per launch, or
   set as a host's default. The same profiles every other client edits.
-- **Two interfaces, one look** — the pointer menus built for the Magic Remote, and punktfunk's
-  shared controller UI, drawn with the same kit (fonts, marks, palettes, rows) the desktop and
-  Android clients use. The controller UI takes over while a game pad is connected; Settings ▸
-  Controller-optimized UI chooses whether and when.
+- **Interface** — punktfunk's shared controller UI, the same one the desktop and Android clients
+  use. Driven by a game pad, the Magic Remote, or a keyboard and mouse.
 - **Input** — Magic Remote pointer, gamepads, USB keyboard and mouse. Pointer capture for games,
-  absolute pointing for the desktop, gestures.
+  absolute pointing for the desktop; the Red button right-clicks.
 - **DualSense** — adaptive triggers, lightbar, player LEDs, touchpad, gyro, speakers and haptics over
   Bluetooth and wired (see the note below).
 - **Hosts** — LAN discovery (mDNS) or add a host by IP; PIN pairing with persisted trust, per-host settings.
 - **Host power** — Wake-on-LAN starts a sleeping host from the TV, and a paired host can be put to
   sleep or shut down on exit when it grants those rights.
-- **Game mode (rooted TVs)** — optional setting that switches picture and sound to Game mode while
-  streaming and restores the previous settings on exit. On a TV that is not rooted, pick
-  *Game Optimizer* in the TV's own picture menu while a stream is up; webOS remembers it for
-  the app, and it is the largest input-latency win the panel has.
 
 > **Controller advanced features need newer webOS version.** Haptics, triggers, speakers, touchpad, and
 > lightbar all rely on the kernel's `hid-playstation` driver, which LG ships only on webOS versions 10+.

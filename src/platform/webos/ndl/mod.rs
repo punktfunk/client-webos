@@ -247,7 +247,7 @@ pub fn presenting() -> bool {
 /// first accepted frame is decode-queued, not visible, and anything crossfading to live video
 /// on [`presenting`] alone crossfades into black. Measured from that first frame, so it holds
 /// the *pipeline* only — waiting for the host's first delivery has its own budget
-/// (`app::hero::FIRST_FRAME_WAIT`).
+/// (`runtime::stream`'s `FIRST_FRAME_WAIT`).
 const FIRST_PICTURE_HOLD: Duration = Duration::from_millis(250);
 
 /// Whether the panel should be *showing* the current load, not just holding its first frame —
@@ -463,8 +463,8 @@ pub fn log_audio_output() {
 /// Spawns the metronome that keeps the audio plane fed.
 ///
 /// NDL paces the *picture* off a fed audio plane — without one it ignores presentation times and
-/// the picture stalls (docs/NOTES.md § "NDL's audio plane"). Both callers spawn the same thread
-/// for the same reason: a stream whose audio decodes in software, and the HDR calibration feed.
+/// the picture stalls (docs/NOTES.md § "NDL's audio plane"). Spawned for a stream whose audio
+/// decodes in software, and for the HDR calibration feed.
 pub fn spawn_clock_plane(
     plane: std::sync::Arc<dyn crate::core::media::AudioPlane>,
     stop: std::sync::Arc<AtomicBool>,

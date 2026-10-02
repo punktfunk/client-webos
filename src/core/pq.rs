@@ -25,11 +25,8 @@ pub fn pq_code(nits: f32) -> u16 {
     (code.round() as i32).clamp(i32::from(BLACK_CODE), i32::from(WHITE_CODE)) as u16
 }
 
-/// The luminance a code stands for — [`pq_code`] the other way round.
-///
-/// The black-level measurement slides over codes rather than over nits, because near the floor
-/// several decades of nits share one code and a slider stepping through nits would sit still for
-/// most of its travel. This is how those codes are named afterwards.
+/// The luminance a code stands for — [`pq_code`] the other way round. The stored black level is a code rather than nits, because
+/// near the floor several decades of nits share one code.
 #[must_use]
 pub fn pq_nits(code: u16) -> f32 {
     let e = f32::from(code.clamp(BLACK_CODE, WHITE_CODE) - BLACK_CODE) / f32::from(WHITE_CODE - BLACK_CODE);

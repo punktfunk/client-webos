@@ -71,8 +71,8 @@ pub fn request_access(
     .context("request access connect")?;
     let fingerprint = client.host_fingerprint;
     // Deliberate teardown — the host should drop the parked/approved session now, not
-    // linger for a stream that isn't coming. (Runs on a background thread — see
-    // `App::try_request_access` — so no log handle here; the caller logs the outcome.)
+    // linger for a stream that isn't coming. (Runs on a background thread, so no log handle
+    // here; the caller logs the outcome.)
     client.disconnect_quit();
     Ok(fingerprint)
 }

@@ -2,9 +2,7 @@
 //!
 //! The window is already `.opengl()` (the stream clears it transparent for NDL's plane), so the
 //! console puts a SECOND GL context on it rather than a second window. GL state is per-context,
-//! so nothing drawn here can disturb the state SDL's renderer caches for its own — and SDL
-//! re-makes that context current on the next `Canvas` draw, which is what hands the screen back
-//! when the flip returns to the old menus.
+//! so nothing drawn here can disturb the state SDL's renderer caches for its own.
 
 use anyhow::{anyhow, Result};
 use skia_safe::gpu::{self, DirectContext, SurfaceOrigin};
@@ -26,7 +24,6 @@ pub(crate) struct ConsoleGl {
     /// What the window's config actually granted, not what was asked for — Skia must be told
     /// the truth or it clips paths against a buffer that is not there.
     stencil: usize,
-    glass_warmed: bool,
     /// Last interval handed to the driver, so only a CHANGE is logged — see
     /// [`Self::set_swap_interval`].
     swap_vsync: Option<bool>,
@@ -77,12 +74,11 @@ impl ConsoleGl {
             context,
             surface: None,
             stencil,
-            glass_warmed: false,
             swap_vsync: None,
         })
     }
 
-    /// Called on every console entry; old menus and the stream have both made their own
+    /// Called on every console entry and overlay frame, in case SDL's renderer made its own
     /// context current in between.
     pub(crate) fn make_current(&self, window: &sdl3::video::Window) -> Result<()> {
         window
@@ -142,11 +138,8 @@ impl ConsoleGl {
         }
         // The branch above either returned an error or filled it.
         let surface = &mut self.surface.as_mut().expect("just wrapped").0;
-        // Handed out at identity. The surface is cached by size and this context is shared by
-        // both menu flows and the stream overlays, so a canvas carries whatever matrix the last
-        // one left on it — the pointer UI scales by the panel correction, which silently cropped
-        // the gamepad shell until this reset existed. Resetting here rather than in each drawer
-        // is what keeps the next flow from having to know that.
+        // Handed out at identity. The surface is cached by size and shared by the shell and the
+        // stream overlays, so a canvas would otherwise carry whatever matrix the last one left.
         surface.canvas().reset_matrix();
         Ok(surface)
     }
@@ -156,34 +149,10 @@ impl ConsoleGl {
         self.context.flush_and_submit();
     }
 
-    pub(crate) fn warm_glass(
-        &mut self,
-        fonts: &pf_console_ui::theme::Fonts,
-        drawable: (u32, u32),
-        layout: (u32, u32),
-    ) -> Result<()> {
-        if self.glass_warmed {
-            return Ok(());
-        }
-        self.surface(drawable.0, drawable.1)?;
-        let surface = &mut self.surface.as_mut().expect("just wrapped").0;
-        let warmed = crate::app::draw::warmup::draw(surface, fonts, layout.0, layout.1, |target| {
-            self.context.flush_and_submit_surface(target, None);
-        });
-        if warmed.is_some() {
-            self.context.flush_submit_and_sync_cpu();
-            self.glass_warmed = true;
-        } else {
-            tracing::warn!("menu: could not allocate glass warmup surfaces");
-        }
-        Ok(())
-    }
-
     /// Hand the covers and glyph atlases back before a stream takes the GPU. The context and
     /// its compiled shaders stay, so returning to the console costs a re-upload, not the cold
     /// shader warm-up `ctx`'s doc describes.
     pub(crate) fn release_resources(&mut self) {
-        crate::app::draw::glass::clear_cover();
         self.surface = None;
         self.context.free_gpu_resources();
     }

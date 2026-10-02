@@ -7,7 +7,7 @@ fn main() {
         return;
     }
 
-    // Generate third-party notices (shown on About screen).
+    // Generate third-party notices (shown on the shell's licenses screen).
     generate_third_party_notices(&manifest_dir);
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=assets");

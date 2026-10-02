@@ -1,14 +1,11 @@
 //! Native webOS TV client for punktfunk (see `docs/NOTES.md` for architecture).
 //! Platform-gated to `target_os` = "linux" (both webOS and Linux dev boxes).
 //
-// `app`/`platform`/`session`/`runtime` are cfg-gated out on non-Linux hosts, so the `ui`/`core`/
+// `console`/`platform`/`session`/`runtime` are cfg-gated out on non-Linux hosts, so the `core`/
 // `services` items (and the glob re-exports feeding them) that they consume look "never used" on
 // the macOS host build. Silence that there only — the Linux CI build still surfaces real dead code.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
-#[cfg(target_os = "linux")]
-mod app;
-// The shared gamepad shell and the drawing kit both UIs use. Every Linux target: the host
-// build renders the pointer UI's screens in its tests (see Cargo.toml).
+// The shared gamepad shell (`pf-console-ui`), the app's only UI.
 #[cfg(target_os = "linux")]
 mod console;
 mod core;
@@ -18,7 +15,6 @@ mod platform;
 mod services;
 #[cfg(target_os = "linux")]
 mod session;
-mod ui;
 
 use crate::core::model::BITRATE_MAX_KBPS;
 

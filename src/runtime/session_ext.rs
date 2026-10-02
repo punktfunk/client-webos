@@ -87,11 +87,6 @@ impl Connected {
         &self.stats
     }
 
-    /// Whether HDR is being applied, for the Game-mode picture pick.
-    pub(crate) fn hdr(&self) -> bool {
-        self.hdr
-    }
-
     /// Channels to open the SDL audio device with, or `None` when the session needs no local
     /// device (the stream rides NDL's audio plane — see `core::model::AudioRoutePref`).
     pub(crate) fn audio_channels(&self) -> Option<u8> {

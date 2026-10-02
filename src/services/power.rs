@@ -11,8 +11,7 @@ use crate::services::library::{agent_within, base_url, classify, get_json, Libra
 use crate::services::store::ExitAction;
 
 /// One entry of `GET /api/v1/actions`, trimmed to the two flags this client acts on. Every
-/// other field (title, group, danger) is the host describing a row we don't render generically
-/// — the exit-behaviour dropdown names its own choices.
+/// other field (title, group, danger) is the host describing a row we don't render.
 #[derive(Debug, Deserialize)]
 struct ActionInfo {
     id: String,
@@ -42,11 +41,6 @@ pub struct PowerRights {
 }
 
 impl PowerRights {
-    /// Whether this host offers anything at all — what decides a locked row.
-    pub fn any(self) -> bool {
-        self.sleep || self.shutdown
-    }
-
     /// Whether one specific pick would be accepted. [`ExitAction::None`] sends nothing, so it
     /// is always allowed.
     pub fn allows(self, action: ExitAction) -> bool {
@@ -156,28 +150,13 @@ impl std::fmt::Debug for ExitPlan {
 }
 
 impl ExitPlan {
-    /// Sends the action and returns what the host said. `Ok(())` means accepted (202) — not
-    /// that it ran: the executor is on the other side of a deliberate grace period, and by
-    /// design the process that would report a failure is the one going down.
-    pub fn send(&self) -> Result<(), LibraryError> {
-        self.send_within(crate::services::budget::REQUEST)
-    }
-
-    /// [`send`](Self::send) under an explicit budget — [`budget::EXIT_ACTION`] for the quit
-    /// path, which the process blocks on.
+    /// Sends the action within `budget`. `Ok(())` means accepted (202), not that it ran.
     pub fn send_within(&self, budget: std::time::Duration) -> Result<(), LibraryError> {
         let Some(action_id) = self.action.action_id() else {
             return Ok(());
         };
         tracing::info!("power action: {action_id} on {}", self.addr);
         invoke(&self.addr, self.mgmt_port, &self.identity, self.pin, action_id, budget)
-    }
-
-    /// Asks which power actions this pairing may invoke, using the same target this plan would
-    /// send to — so a probe that says yes and an invoke that is refused cannot disagree about
-    /// which host, port or identity they meant.
-    pub fn probe_rights(&self) -> Result<PowerRights, LibraryError> {
-        probe_rights(&self.addr, self.mgmt_port, &self.identity, self.pin)
     }
 
     /// Fires the action on the way out, blocking for at most one management-API request.

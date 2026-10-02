@@ -203,7 +203,7 @@ mod tests {
 /// — one-off ?? per-title ?? host default, the shared resolver's own precedence — then the
 /// Desktop card's standing rule that pointer capture is off there (unless a profile is bound to
 /// that card, or the resolved one pins the mouse mode), then this set's caps. The single merge
-/// point both menu loops call.
+/// point every launch goes through.
 pub fn launch_settings(
     state: &Persisted,
     addr: &str,
@@ -276,8 +276,8 @@ pub fn set_pin(state: &mut Persisted, key: &str, profile_id: String, pin: bool) 
     true
 }
 
-/// Drop one profile and every binding or pin that named it, as the classic settings page
-/// does: the record never names a profile nothing resolves. Reports whether it changed.
+/// Drop one profile and every binding or pin that named it: the record never names a profile
+/// nothing resolves. Reports whether it changed.
 pub fn delete_profile(state: &mut Persisted, id: &str) -> bool {
     let before = state.profiles.len();
     state.profiles.retain(|p| p.id != id);

@@ -25,36 +25,22 @@ A host `cargo check` proves nothing: `app`/`platform` are cfg-gated out on macOS
 
 Layered, deps point inward, acyclic:
 
-`core` (pure domain: `Settings`, `Screen`, events, `caps`) ← `ui` (geometry, animation clocks, the
-focus map, **no sdl3**) and `services` (portable I/O: store, discovery, mTLS, art, wol) ←
-`session` (streaming on `punktfunk-core`, **no sdl3**) and `platform/webos` (the SDL3 and hardware
-boundary — input, NDL video, audio, evdev) ← `app` (the `App` state machine and its painters) ←
-`runtime` (the two top-level loops).
+`core` (pure domain: `Settings`, events, `caps`) ← `services` (portable I/O: store, discovery,
+mTLS, cover cache, wol) ← `session` (streaming on `punktfunk-core`, **no sdl3**) and
+`platform/webos` (the SDL3 and hardware boundary — input, NDL video, audio, evdev) ← `console`
+(the shared shell's GL host and service) ← `runtime` (the menu and stream loops).
 
-- **Everything draws on the console kit** (`pf_console_ui`), immediate mode per frame.
-  `app::draw::<screen>` painter uses one `layout` for both hit-testing and render.
-  Sizes scale by `Frame::k`; Home's grid/sidebar keep pixel geometry in `app::view::{home,sidebar}`.
-  `runtime::overlay` draws stream overlays (stats, log, toast, dialogs) over transparent clear.
-- **`app`** splits per screen: `state::<screen>`, `view::<screen>`, `draw::<screen>`.
-  `app::render` holds `prepare_grid` and state. `App` owns `nav`, `jobs`, `library`, `hosts`,
-  `settings_ui`, `screens::slots`, `render` (all `pub(crate)`, written via setters).
-- **`console`** hosts the shared gamepad shell on the same GL context (Linux-only; Skia prebuilt
-  for armv7/aarch64; macOS/Windows stub out `runtime::console_flow`).
-- **`runtime`** alternates menu and stream on `StreamOutcome`. Menu is `ui_flow` or `console_flow`
-  per `Settings::console_ui`; both reload settings on entry.
-
-Add a screen: confirm = `app::screens::confirm` + title in `app::draw::dialog::title_of`.
-Row list = `ListCard` arm in `App::list_card` + rows via `app::draw::list::row_spec`.
-Other = own `app::draw::<screen>` with layout, joins `app::draw::ported`.
-`app::screens` tables are exhaustive over `Screen`.
+- **The only UI is punktfunk's shared controller shell** (`pf_console_ui`). Screens, rows and
+  navigation live in the kit; this client adds none. `console::model::Service` answers what the
+  shell asks the binary to do (pairing, library, art, wake, speed test, log upload).
+- **`console`** hosts the shell on a GL context on the app's window (Linux-only; Skia prebuilt
+  for armv7/aarch64; macOS/Windows stub out `runtime`).
+- **`runtime`** alternates `console_flow` (menu) and `stream` on `StreamOutcome`. The menu
+  reloads settings on entry. `runtime::overlay` draws the stream overlays (stats, log, toast,
+  stop dialog) on the same context over a transparent clear.
 
 ## Invariants worth knowing before you edit
 
-- **The grid is O(visible), not O(library)**: covers, focus, hit-testing are arithmetic.
-  Never walk `self.games` per frame or input.
-- `focus_window` must always contain current focus, or focus silently freezes.
-- **The kit's list widget mirrors `nav`'s cursor, never the reverse.**
-  Visual feedback (recoil, dip, slip) is `App::kit_list_visual`; meaning is the handler.
 - **NDL is `dlopen`'d, never linked** — a `DT_NEEDED` breaks webOS 4 startup before `main`.
 - **`settings.json` is the shared schema, stored whole.** TV settings = `pf_client_core::trust::
   Settings` (webos.* rows via `core::settings::TvSettings`); hosts = `trust::KnownHost` flattened

@@ -1,12 +1,7 @@
-//! The shared gamepad shell as one of this client's two menu flows.
+//! The shared gamepad shell, this client's menu. It hands a launch or a quit back to the
+//! streaming loop as a [`UiOutcome`], and reloads the settings document on every entry.
 //!
-//! A sibling of [`super::ui_flow`], not a replacement: it hands back the same [`UiOutcome`], so
-//! the streaming loop below it cannot tell which menu produced a launch. Only one of the two is
-//! live at a time, which is what lets both own the settings document in turn — each reloads it
-//! on entry (`store::load`), so a value changed on one side is never stale on the other.
-//!
-//! The shell renders through its own GL context on the app's window; SDL's renderer takes the
-//! screen back on its next `Canvas` draw. See `console::gl`.
+//! The shell renders through its own GL context on the app's window. See `console::gl`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +13,6 @@ use pf_console_ui::{Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, Input
 use super::*;
 use crate::console::Service;
 use crate::core::perf::{ArtSnapshot, Perf};
-use crate::core::settings::TvSettings;
 use crate::services::store::console::ConsoleStore;
 use crate::services::store::{shared, StateWriter};
 
@@ -34,15 +28,6 @@ const TICK_BUDGET: Duration = Duration::from_millis(16);
 const IDLE_AFTER: Duration = Duration::from_secs(60);
 const IDLE_FRAME_STEP: Duration = Duration::from_millis(16);
 
-/// Whether this launch should draw the shared shell rather than this client's own menus.
-///
-/// Read from disk on every menu entry rather than cached, because either UI's own switch writes
-/// it and the flip is meant to land the moment you leave that screen. `pad_connected` is the
-/// other half: under the default "With a controller" mode, plugging one in IS the switch.
-pub(super) fn wanted(pad_connected: bool) -> bool {
-    store::load().state.settings.gamepad_ui_active(pad_connected)
-}
-
 /// Run the shell until it commits a launch or asks to leave.
 pub(super) fn run(
     canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
@@ -51,36 +36,23 @@ pub(super) fn run(
     game_controller: &sdl3::GamepadSubsystem,
     open_pads: &mut pads::Pads,
     identity: &(String, String),
-    // Why the last stream bounced back here, if it did. The old menus put this on the Home
-    // status line; dropping it would leave a failed connect explaining nothing.
+    // Why the last stream bounced back here, if it did.
     notice: Option<String>,
 ) -> Result<UiOutcome> {
-    // The document as it is right now — the old menus may have written it since the last entry.
-    let state = store::load().state;
+    let state = store::load();
     let writer = Arc::new(StateWriter::spawn(state.clone()));
     let store = Arc::new(ConsoleStore::new(state, writer));
     let handles = ConsoleHandles::new();
     let mut service = Service::new(handles.clone(), store.clone(), identity.clone());
 
-    // A preview UI must not be able to take the app down with it: if GL or Skia will not come
-    // up on this set, say so, turn the shell back off in the document and let the classic menus
-    // have the screen. Returning `Err` here would propagate out of the whole menu loop.
-    let console_gl = match bring_up(gl, canvas, true) {
-        Ok(gl) => gl,
-        Err(e) => {
-            tracing::error!("console: no GL host on this TV ({e:#}) — falling back to the classic menus");
-            return Ok(leave_for_classic(&store));
-        }
-    };
+    let console_gl = bring_up(gl, canvas, true).context("console: GL host")?;
 
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
         deck: false,
         tv: true,
-        // This client does have another UI to fall back to, and the shell's own
-        // "Controller-optimized UI" row is gated on saying so — turning it off there is the
-        // way back to the cursor menus.
-        fallback_ui: true,
+        // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
+        fallback_ui: false,
         // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
         pyrowave_ok: false,
         av1_ok: false,
@@ -89,8 +61,7 @@ pub(super) fn run(
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
         screen: None,
     };
-    // Land back on the shelf the last stream was launched from, the way the classic menus
-    // restore `selected_host` on entry. The fetch is seeded here because the shell only asks
+    // Land back on the shelf the last stream was launched from (`selected_host`). The fetch is seeded here because the shell only asks
     // for a library when it navigates to one, and this entry skips that navigation.
     let entry = service.selected_row().map_or(ConsoleEntry::Home, |row| {
         handles.bus.send(pf_console_ui::ConsoleCmd::FetchLibrary {
@@ -101,14 +72,7 @@ pub(super) fn run(
         ConsoleEntry::Library(Box::new(row))
     });
     let opened_on_a_shelf = matches!(entry, ConsoleEntry::Library(_));
-    let mut console = match Console::new(opts, entry, &handles) {
-        Ok(console) => console,
-        // Same reasoning as the GL bring-up above — most likely the font build.
-        Err(e) => {
-            tracing::error!("console: shell would not build ({e:#}) — falling back to the classic menus");
-            return Ok(leave_for_classic(&store));
-        }
-    };
+    let mut console = Console::new(opts, entry, &handles).context("console: shell")?;
     // Every tab drawn once, unseen, so the GL driver compiles their programs now rather than
     // stalling 50–170 ms on the first visit to each. Each frame is flushed and waited out
     // behind the splash: one flush for the whole tour allocates every frame's textures at once.
@@ -140,9 +104,6 @@ pub(super) fn run(
     // hotplug only to avoid per-frame string allocations.
     open_pads.sync(game_controller);
     let mut pad_name: Option<String> = open_pads.first_name();
-    // Both answers SDL's device list can give, sampled on the same hotplug events. Polling them
-    // per frame walked every device and allocated a name for each.
-    let mut pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
     // What the shell was told last frame, so `pads` is rebuilt only when it changes.
     // `None` means "not built yet": an inner `None` is a real answer (no pad), so a plain
     // `Option` could not tell the two apart and left a removed pad's legend standing.
@@ -154,13 +115,8 @@ pub(super) fn run(
     // The one resolver for the remote's own keys in this loop — see `RemoteKeys`.
     let mut remote_keys = crate::platform::webos::input::RemoteKeys::default();
     // A launch the shell committed: the connect runs while the shell keeps drawing its
-    // Connecting card, exactly as the old menus overlap it with the loading screen.
-    let mut connect: Option<(
-        crate::runtime::PendingConnect,
-        crate::app::ConnectTarget,
-        store::Settings,
-        bool,
-    )> = None;
+    // Connecting card.
+    let mut connect: Option<Started> = None;
     // A Request access launch waiting on the host's approval — see `Service::request_access`.
     let mut access: Option<Launch> = None;
 
@@ -174,9 +130,7 @@ pub(super) fn run(
         if home_key_fired(&mut home_held) {
             crate::platform::webos::luna::launch_home();
         }
-        // A held/root-level Back arrives as the discrete EXIT key, not as a long Back — the
-        // classic menus quit on it, so this does too rather than being the one screen where
-        // the gesture does nothing.
+        // A held/root-level Back arrives as the discrete EXIT key, not as a long Back.
         if exit_gesture_fired(&mut exit_held) {
             tracing::info!("console: EXIT gesture — quitting app");
             break 'ui UiOutcome::Quit(exit_plan(&service, identity));
@@ -210,6 +164,17 @@ pub(super) fn run(
                     // screen it has no d-pad fallback.
                     RemoteKey::Red => MenuEvent::Secondary,
                     RemoteKey::Green => MenuEvent::Tertiary,
+                    // HDR calibration has no row in the shared shell, so Blue opens it.
+                    RemoteKey::Blue if !console.editing() => {
+                        if crate::core::caps::video_caps().hdr {
+                            tracing::info!("console: opening HDR calibration");
+                            break 'ui UiOutcome::Calibrate;
+                        }
+                        handles
+                            .console
+                            .set_notice("HDR calibration needs an HDR-capable TV.".to_string());
+                        continue;
+                    }
                     _ => continue,
                 };
                 console.menu(ev, InputSource::Keys);
@@ -221,7 +186,6 @@ pub(super) fn run(
                     break 'ui UiOutcome::Quit(exit_plan(&service, identity));
                 }
                 Event::GamepadAdded { which, .. } => {
-                    pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
                     if open_pads.add(game_controller, which).is_some() {
                         pad_name = open_pads.first_name();
                         // The legend describes the handle, so it is rebuilt with it.
@@ -239,7 +203,6 @@ pub(super) fn run(
                         pad_name = open_pads.first_name();
                         last_pref = None;
                     }
-                    pad_connected = crate::platform::webos::gamepad::any_pad_connected(game_controller);
                 }
                 Event::KeyDown {
                     keycode: Some(k),
@@ -439,7 +402,7 @@ pub(super) fn run(
         }
 
         // The handshake landed (or failed): the streaming loop takes it from here, and a
-        // failure goes back to the menu with the reason, exactly as the old flow does.
+        // failure comes back here with the reason.
         if connect.as_ref().is_some_and(|(h, ..)| h.is_finished()) {
             let (handle, target, settings, gamepad_auto) = connect.take().expect("just checked");
             break 'ui UiOutcome::Launch(Box::new(ConnectOutcome {
@@ -447,9 +410,6 @@ pub(super) fn run(
                 target,
                 settings,
                 gamepad_auto,
-                // The shell has no loading screen of its own to spend a budget on — the
-                // streaming loop starts the first-frame wait fresh.
-                first_frame_deadline: None,
                 exit_plan: exit_plan(&service, identity),
             }));
         }
@@ -461,22 +421,8 @@ pub(super) fn run(
             idled = IDLE_FRAME_STEP;
         }
         let (w, h) = canvas.window().size_in_pixels();
-        // The switch, watched the way the cursor menus watch theirs: the shell's own
-        // "Controller-optimized UI" row writes it, and under "With a controller" an unplugged
-        // pad withdraws it without writing anything. Plain `Reenter` — `leave_for_classic`
-        // would turn the switch off, and a pad going flat is not the user saying "off".
-        // 🛑 `pad_connected`, not the open handle: a handle that went stale while a pad is still
-        // attached made the loop enter here, leave, and enter again forever, drawing no frame —
-        // a freeze on the way out of a stream. It is refreshed on the hotplug events below.
-        //
-        // Two fields, read in place: the whole-document clone `snapshot` does was allocating
-        // every known host and every string in it, once a frame, to answer them.
-        let (ui_active, stored_kind) =
-            store.with(|s| (s.settings.gamepad_ui_active(pad_connected), s.settings.gamepad_type()));
-        if !ui_active {
-            tracing::info!("console: the controller UI no longer applies — back to the cursor menus");
-            break 'ui UiOutcome::Reenter;
-        }
+        // Read in place: a whole-document `snapshot` clone per frame allocates every known host.
+        let stored_kind = store.with(|s| s.settings.gamepad_type());
         // 🛑 `None` unless a real pad is open, not the stored preference: this picks the GLYPH
         // LEGEND, and claiming a pad prints button marks for buttons that are not in the room.
         // It is also what the home screen reads to put Options and Settings on the d-pad
@@ -506,11 +452,8 @@ pub(super) fn run(
                 // No insets: webOS hands a native app a clean 1080p surface with no overscan
                 // margin to keep chrome out of.
                 //
-                // No panel-size correction either, unlike the pointer UI. The kit's default
-                // scale is `height / 800`, so its design box is always exactly 800 units tall
-                // and every shell screen is laid out to fill that; a correction shortens the
-                // box and the screens run off the bottom instead of reflowing. Growing this
-                // one is a kit change, not a client change.
+                // No panel-size correction either: the kit's default scale is `height / 800`,
+                // and every shell screen is laid out to fill that 800-unit box.
                 &Viewport::plain(w, h),
                 label,
                 pad_pref,
@@ -570,26 +513,11 @@ pub(super) fn bring_up<'a>(
         *gl = Some(ConsoleGl::new(canvas.window(), canvas.window().subsystem())?);
     }
     let gl = gl.as_mut().expect("just built");
-    // The classic menus and the stream have both made their own context current in between.
+    // The stream overlays may have left the context current on another surface state.
     gl.make_current(canvas.window())?;
     // After `make_current`, since the interval belongs to the shared window surface.
     gl.set_swap_interval(canvas.window().subsystem(), vsync);
     Ok(gl)
-}
-
-/// Turn the console off in the document, so the next menu entry lands on the classic menus.
-/// Hand the menus back and turn the switch off, for the cases where this shell cannot run at
-/// all. A user who turned it off in the shell's own row has already written `false`, and a pad
-/// being unplugged must NOT write anything — the switch stays on, [`wanted`] simply stops
-/// agreeing until the next pad arrives.
-fn leave_for_classic(store: &Arc<ConsoleStore>) -> UiOutcome {
-    store.edit(|state| {
-        state.settings.set_gamepad_ui(false);
-        true
-    });
-    // Not a quit: `UiOutcome::Quit` ends the app. The streaming loop's menu loop re-enters
-    // with the setting now off, which is the flip.
-    UiOutcome::Reenter
 }
 
 /// What the shell committed to launch: the host, a title or the desktop, and a one-off profile.
@@ -601,18 +529,17 @@ struct Launch {
     profile: Option<String>,
 }
 
+/// A connect in flight: its thread, what it dialled, the session settings, and whether the
+/// pad kind was `Automatic`.
+type Started = (PendingConnect, ConnectTarget, store::Settings, bool);
+
 /// Start the connect for a launch the shell committed.
 fn start_launch(
     store: &Arc<ConsoleStore>,
     identity: &(String, String),
     game_controller: &sdl3::GamepadSubsystem,
     want: Launch,
-) -> Result<(
-    crate::runtime::PendingConnect,
-    crate::app::ConnectTarget,
-    store::Settings,
-    bool,
-)> {
+) -> Result<Started> {
     let Launch {
         addr,
         port,
@@ -621,29 +548,27 @@ fn start_launch(
         profile,
     } = want;
     let state = store.snapshot();
-    let fingerprint = state
-        .known_hosts
-        .iter()
-        .find(|h| h.addr == addr && h.port == port)
+    let known = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
+    let delivery = known.and_then(|h| h.delivery);
+    let fingerprint = known
         .and_then(crate::core::model::KnownHost::fingerprint)
         .or_else(|| shared::parse_fp(&fp_hex))
         .context("that host isn't paired with this TV yet")?;
     let mut settings = shared::launch_settings(&state, &addr, port, launch.as_deref(), profile.as_deref());
     let gamepad_auto = settings.gamepad_type() == store::GamepadType::Auto;
     settings = resolve_gamepad_type(settings, game_controller);
-    let target = crate::app::ConnectTarget {
+    let target = ConnectTarget {
         host: addr,
         port,
         fingerprint,
         launch,
-        profile,
+        delivery,
     };
     let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
     Ok((handle, target, settings, gamepad_auto))
 }
 
-/// What to do to the selected host on the way out. Same rule as `App::exit_plan`: the selected
-/// host only, and only one that answered its last reachability check — a host already down
+/// What to do to the selected host on the way out: the selected host only, and only one that answered its last reachability check — a host already down
 /// costs the whole budget on a connection that cannot complete.
 fn exit_plan(service: &Service, identity: &(String, String)) -> Option<crate::services::power::ExitPlan> {
     let state = service.store.snapshot();
@@ -749,9 +674,7 @@ fn pointer_button(button: sdl3::mouse::MouseButton) -> Option<PointerButton> {
     }
 }
 
-/// A remote or keyboard key as a menu move. The same vocabulary
-/// `platform::webos::input::menu_event_for_key` maps for the classic menus, in the shell's terms.
-/// The Magic Remote's own Back is NOT here: it has no `Keycode` rust-sdl3 can name, so the arm
+/// A remote or keyboard key as a menu move. The Magic Remote's own Back is NOT here: it has no `Keycode` rust-sdl3 can name, so the arm
 /// above matches it — with the colour keys — on the key event's `raw` evdev code instead.
 fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     use sdl3::keyboard::Keycode as K;

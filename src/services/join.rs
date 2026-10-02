@@ -1,7 +1,6 @@
 //! Bounded thread joins.
 //!
-//! Teardown of anything holding the vendor video stack — a stream's pumps, the HDR calibration
-//! screen's pattern feed — has the same problem: the thread re-checks its stop flag on a bounded
+//! Teardown of anything holding the vendor video stack — a stream's pumps, the HDR calibration pattern feed — has the same problem: the thread re-checks its stop flag on a bounded
 //! cadence, but the FFI call it is inside between checks has no timeout of its own. Lives here
 //! rather than in `session` so `platform` can reach it too.
 
