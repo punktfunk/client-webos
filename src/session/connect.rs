@@ -292,8 +292,19 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StreamStats::default());
     // Spawns the decode threads; fails atomically if any setup step fails.
-    attempt.enter_media()?;
-    let (pipeline, route) = MediaPipeline::build(params, &client, &stop, &stats)?;
+    let media = attempt
+        .enter_media()
+        .and_then(|()| MediaPipeline::build(params, &client, &stop, &stats));
+    let (pipeline, route) = match media {
+        Ok(built) => built,
+        Err(e) => {
+            // Past the handshake the host holds a session (and may have launched a game) for
+            // us: end it deliberately rather than leave it lingering for a stream that isn't
+            // coming — the same teardown `PendingConnect`'s drop gives a connect that finished.
+            client.disconnect_quit();
+            return Err(e);
+        }
+    };
 
     Ok(Connected {
         client,

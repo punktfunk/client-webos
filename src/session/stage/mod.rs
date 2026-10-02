@@ -419,6 +419,8 @@ mod tests {
     struct FakeSink {
         depth: Cell<Option<u32>>,
         refuse: bool,
+        /// Fail every feed with a real decode error (not [`NotReady`]) while set.
+        broken: Arc<AtomicBool>,
         clock: Arc<FakeClock>,
         plane: Option<Arc<dyn AudioPlane>>,
         fed: Mutex<Vec<u64>>,
@@ -429,6 +431,7 @@ mod tests {
             Self {
                 depth: Cell::new(None),
                 refuse: false,
+                broken: Arc::new(AtomicBool::new(false)),
                 clock: Arc::new(FakeClock::default()),
                 plane: None,
                 fed: Mutex::new(Vec::new()),
@@ -451,6 +454,9 @@ mod tests {
         fn feed(&self, _au: &[u8], pts_ns: u64) -> anyhow::Result<()> {
             if self.refuse {
                 return Err(NotReady.into());
+            }
+            if self.broken.load(Ordering::Relaxed) {
+                anyhow::bail!("decode error");
             }
             self.fed.lock().expect("fed").push(pts_ns);
             Ok(())
@@ -646,6 +652,38 @@ mod tests {
             SinkResult::Presented { .. }
         ));
         assert!(!s.holding(), "the next AU must not read the resumed one as lost");
+    }
+
+    /// A real decode error freezes the picture even inside the keyframe throttle: the resume
+    /// keyframe lands within the window of the hold's own request, and the P-frames after a
+    /// refused one must not reach a decoder that never got their reference.
+    #[test]
+    fn a_refused_resume_frame_rearms_the_hold() {
+        let broken = Arc::new(AtomicBool::new(false));
+        let mut s = stage_on(FakeSink {
+            broken: Arc::clone(&broken),
+            ..FakeSink::default()
+        });
+        assert!(matches!(
+            s.submit(&frame(1, None, false, true)),
+            SinkResult::NeedKeyframe
+        ));
+        broken.store(true, Ordering::Relaxed);
+        assert!(
+            matches!(s.submit(&frame(2, None, true, false)), SinkResult::Held),
+            "the request slot is still the hold's"
+        );
+        assert!(s.holding(), "a refused resume frame re-arms the hold");
+        broken.store(false, Ordering::Relaxed);
+        assert!(
+            !matches!(s.submit(&frame(3, None, false, false)), SinkResult::Presented { .. }),
+            "a P-frame after the refused keyframe is skipped, not fed"
+        );
+        assert!(matches!(
+            s.submit(&frame(4, None, true, false)),
+            SinkResult::Presented { .. }
+        ));
+        assert!(!s.holding());
     }
 
     /// Only decoded pictures increment `frames`. Held and refused deliveries don't.
