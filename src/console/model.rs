@@ -357,9 +357,7 @@ impl Service {
                 fp_hex,
                 host_name,
             } => self.speed_test(key, addr, port, &fp_hex, host_name),
-            // No platform screen here, and the pad grants and rumble tests are Android's
-            // `InputDevice` API.
-            ConsoleCmd::OpenPlatformScreen { id } => tracing::info!("console: no platform screen {id} on webOS"),
+            // The pad grants and rumble tests are Android's `InputDevice` API.
             ConsoleCmd::PadAction { action, .. } => tracing::info!("console: no pad action {action} on webOS"),
             ConsoleCmd::UnpairHost { key } => self.unpair_host(&key),
             ConsoleCmd::SavePreset { id, name, overrides } => self.save_preset(id, name, overrides),
@@ -397,11 +395,13 @@ impl Service {
             // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
+            // - `Install`: no title here carries `install` (see `to_model`), likewise.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PadTest { .. }
             | ConsoleCmd::PromptAnswer { .. }
-            | ConsoleCmd::EndGame { .. } => {}
+            | ConsoleCmd::EndGame { .. }
+            | ConsoleCmd::Install { .. } => {}
         }
     }
 
@@ -1256,6 +1256,8 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             // Host state, and this client never asks for it — see `ConsoleCmd::RefreshRunning`.
             running: false,
             endable: false,
+            // Plugin installs ride on the desktop's catalog; this one lists installed titles.
+            install: None,
         })
         .collect()
 }

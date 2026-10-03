@@ -1,6 +1,8 @@
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR set by cargo");
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+    println!("cargo:rustc-env=PF_CORE_VERSION={}", core_version(&manifest_dir));
+    println!("cargo:rerun-if-changed=Cargo.lock");
 
     // Only webOS cross target needs glibc shim; dev box's glibc has getauxval/gettid/sendmmsg.
     if std::env::var("TARGET").as_deref() != Ok("armv7-unknown-linux-gnueabi") {
@@ -9,7 +11,6 @@ fn main() {
 
     // Generate third-party notices (shown on the shell's licenses screen).
     generate_third_party_notices(&manifest_dir);
-    println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=assets");
     let cc = std::env::var("CC_armv7_unknown_linux_gnueabi")
         .or_else(|_| std::env::var("CC"))
@@ -42,6 +43,28 @@ fn main() {
 
     // The TV has no libSDL3 at all; it ships in ipk/lib/ and is found by $ORIGIN-relative rpath.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
+}
+
+/// The pinned shell (pf-console-ui) as `0.42.0 (db9011b)`, off `Cargo.lock`: its own `VERSION` is
+/// crate-private, and a git pin can sit on many commits of one version.
+fn core_version(manifest_dir: &str) -> String {
+    let lock = std::fs::read_to_string(format!("{manifest_dir}/Cargo.lock")).unwrap_or_default();
+    let Some(block) = lock
+        .split("[[package]]")
+        .find(|b| b.contains("\nname = \"pf-console-ui\"\n"))
+    else {
+        return "unknown".into();
+    };
+    let field = |key: &str| {
+        block
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(" = \"")?.strip_suffix('"'))
+            .unwrap_or_default()
+    };
+    match field("source").rsplit_once('#') {
+        Some((_, rev)) => format!("{} ({})", field("version"), &rev[..rev.len().min(7)]),
+        None => field("version").to_string(),
+    }
 }
 
 fn generate_third_party_notices(manifest_dir: &str) {
