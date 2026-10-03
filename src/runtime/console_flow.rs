@@ -125,6 +125,9 @@ pub(super) fn run(
     let mut connect: Option<Started> = None;
     // A Request access launch waiting on the host's approval — see `Service::request_access`.
     let mut access: Option<Launch> = None;
+    // A connect that landed, held while the shell keeps animating until its first frame
+    // reaches NDL: leaving now would freeze the Connecting card for the whole wait.
+    let mut reveal: Option<Reveal> = None;
 
     let outcome = 'ui: loop {
         let frame_start = Instant::now();
@@ -366,10 +369,10 @@ pub(super) fn run(
                 // action exists for a host that keeps the console and its stream side by side.
                 OverlayAction::ShowStream => {}
                 OverlayAction::CancelConnect => {
-                    // Dropping the handle IS the cancel: the worker runs to completion and
-                    // drops the `Connected` it built, which tears the session down cleanly —
-                    // just a handshake later than the button press.
-                    if connect.take().is_some() || access.take().is_some() {
+                    // Dropping a pending connect, or abandoning a landed one, tears the session
+                    // down off this thread. `|` so every slot is cleared.
+                    let revealing = reveal.take().map(Reveal::abandon).is_some();
+                    if connect.take().is_some() | access.take().is_some() | revealing {
                         tracing::info!("console: connect cancelled");
                         service.cancel_access();
                         console.session_phase(SessionPhase::Ended(None));
@@ -407,15 +410,42 @@ pub(super) fn run(
             }
         }
 
-        // The handshake landed (or failed): the streaming loop takes it from here, and a
-        // failure comes back here with the reason.
+        // The handshake landed: a failure goes straight to the streaming loop, which brings the
+        // reason back here; a success waits out its first frame with the shell still drawing.
         if connect.as_ref().is_some_and(|(h, ..)| h.is_finished()) {
             let (handle, target, settings, gamepad_auto) = connect.take().expect("just checked");
+            match handle.join().expect("connect thread panicked") {
+                Ok(connected) => {
+                    reveal = Some(Reveal {
+                        connected,
+                        since: Instant::now(),
+                        target,
+                        settings,
+                        gamepad_auto,
+                    });
+                }
+                Err(e) => {
+                    break 'ui UiOutcome::Launch(Box::new(ConnectOutcome {
+                        connected: Err(e),
+                        target,
+                        settings,
+                        gamepad_auto,
+                        exit_plan: exit_plan(&service, identity),
+                    }));
+                }
+            }
+        }
+        if reveal
+            .as_ref()
+            .is_some_and(|r| super::stream::live::first_frame_ready(r.since))
+        {
+            let r = reveal.take().expect("just checked");
+            super::stream::live::log_reveal(r.since.elapsed());
             break 'ui UiOutcome::Launch(Box::new(ConnectOutcome {
-                handle,
-                target,
-                settings,
-                gamepad_auto,
+                connected: Ok(r.connected),
+                target: r.target,
+                settings: r.settings,
+                gamepad_auto: r.gamepad_auto,
                 exit_plan: exit_plan(&service, identity),
             }));
         }
@@ -482,6 +512,10 @@ pub(super) fn run(
         }
     };
 
+    // A quit while the first frame was due: nothing will stream it.
+    if let Some(launch) = reveal.take() {
+        launch.abandon();
+    }
     if let Some(report) = perf.finish(art_snapshot()) {
         tracing::info!("{}", report.line());
     }
@@ -533,6 +567,28 @@ struct Launch {
     fp_hex: String,
     launch: Option<String>,
     profile: Option<String>,
+}
+
+/// A joined connect waiting for its first frame before the shell hands over.
+struct Reveal {
+    connected: crate::session::Connected,
+    since: Instant,
+    target: ConnectTarget,
+    settings: store::Settings,
+    gamepad_auto: bool,
+}
+
+impl Reveal {
+    /// Tears the session down off this thread, holding the load gate until it is gone. Deferred
+    /// so process exit waits for it before an exit plan the host refuses mid-session.
+    fn abandon(self) {
+        let connected = self.connected;
+        let guard = crate::platform::webos::ndl::suspend_loads();
+        crate::platform::webos::ndl::defer_teardown(move || {
+            super::teardown(connected);
+            drop(guard);
+        });
+    }
 }
 
 /// A connect in flight: its thread, what it dialled, the session settings, and whether the

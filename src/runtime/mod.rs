@@ -36,8 +36,7 @@ impl Drop for PendingConnect {
         // Hold the load gate before returning to a menu that can launch another session.
         let joiner = std::thread::spawn(move || {
             if let Ok(Ok(connected)) = handle.join() {
-                connected.disconnect_quit();
-                connected.shutdown_and_quit();
+                teardown(connected);
             }
             drop(guard);
         });
@@ -64,10 +63,16 @@ fn await_abandoned_connects() {
     }
 }
 
-/// A launch handed from the menu to the streaming loop: the finished connect thread and the
-/// settings it was started with.
+/// Ends a session nothing will stream, in the order the host and NDL expect.
+fn teardown(connected: session::Connected) {
+    connected.disconnect_quit();
+    connected.shutdown_and_quit();
+}
+
+/// A launch handed from the menu to the streaming loop: the joined connect, with its first
+/// frame already on the plane when it succeeded, and the settings it was started with.
 struct ConnectOutcome {
-    handle: PendingConnect,
+    connected: Result<session::Connected>,
     /// What was dialled, kept so a lost link can be dialled again (`stream`'s reconnect).
     target: ConnectTarget,
     settings: store::Settings,

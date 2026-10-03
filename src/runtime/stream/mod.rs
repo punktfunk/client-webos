@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 mod events;
 mod hud;
-mod live;
+pub(super) mod live;
 
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
@@ -144,43 +144,51 @@ impl App {
         })
     }
 
-    /// One launch: the dial the menu started, the stream, and each reconnect of a lost link
-    /// (`RECONNECT_ATTEMPTS`). Leaves the reason on [`Self::menu_notice`] when it ends badly.
+    /// One launch: the dial the menu joined (its first frame already waited out), the stream,
+    /// and each reconnect of a lost link (`RECONNECT_ATTEMPTS`). Leaves the reason on
+    /// [`Self::menu_notice`] when it ends badly.
     fn launch(
         &mut self,
-        mut connect_thread: PendingConnect,
+        first_dial: Result<session::Connected>,
         target: &ConnectTarget,
         settings: &store::Settings,
         gamepad_auto: bool,
     ) -> Result<StreamOutcome> {
+        let mut first_dial = Some(first_dial);
+        let mut connect_thread: Option<PendingConnect> = None;
         let mut reconnects: u8 = 0;
         loop {
-            // A reconnect dial can be given up on from the remote; the first dial was waited
-            // out by the shell, which read the remote itself.
-            let gave_up = if reconnects > 0 {
-                wait_for_dial(&connect_thread, &mut self.events)
-            } else {
-                DialWait::Done
-            };
-            if gave_up != DialWait::Done {
-                tracing::info!("reconnect given up: {gave_up:?}");
-                drop(connect_thread);
-                if gave_up == DialWait::Quit {
-                    return Ok(StreamOutcome::Quit);
+            let dialled = match connect_thread.take() {
+                None => first_dial.take().expect("only the launch has no thread"),
+                Some(handle) => {
+                    // A reconnect can be given up on from the remote; the launch was waited out by
+                    // the shell, which read the remote itself.
+                    let gave_up = wait_for_dial(&handle, &mut self.events);
+                    if gave_up != DialWait::Done {
+                        tracing::info!("reconnect given up: {gave_up:?}");
+                        drop(handle);
+                        if gave_up == DialWait::Quit {
+                            return Ok(StreamOutcome::Quit);
+                        }
+                        self.menu_notice = Some("Connection lost".to_string());
+                        return Ok(StreamOutcome::ReturnToMenu);
+                    }
+                    // Joined BEFORE the window is cleared transparent, so the reconnect toast stays
+                    // up across the handshake and NDL load instead of a black punch-through hole.
+                    let connected = handle.join().expect("connect thread panicked");
+                    if connected.is_ok() {
+                        // No menu is up to keep drawing: the toast holds until the first frame.
+                        live::wait_first_frame();
+                    }
+                    connected
                 }
-                self.menu_notice = Some("Connection lost".to_string());
-                return Ok(StreamOutcome::ReturnToMenu);
-            }
-            // Joined BEFORE the window is cleared transparent, so whatever covers the connect —
-            // the console's Connecting card, or the reconnect toast — stays on screen across the
-            // handshake and NDL load instead of a black punch-through hole, and a failed connect
-            // never uncovers the plane at all.
-            let connected = match connect_thread.join().expect("connect thread panicked") {
+            };
+            let connected = match dialled {
                 Ok(c) => c,
                 Err(e) if reconnects > 0 && reconnects < RECONNECT_ATTEMPTS => {
                     tracing::warn!("reconnect failed: {e:#}");
                     reconnects += 1;
-                    connect_thread = self.redial(reconnects, target, settings)?;
+                    connect_thread = Some(self.redial(reconnects, target, settings)?);
                     continue;
                 }
                 Err(e) => {
@@ -207,7 +215,7 @@ impl App {
             }
             reconnects += 1;
             self.menu_notice = None;
-            connect_thread = self.redial(reconnects, target, settings)?;
+            connect_thread = Some(self.redial(reconnects, target, settings)?);
         }
     }
 
@@ -299,7 +307,7 @@ pub(super) fn run_inner() -> Result<()> {
         // A `let ... else` can't bind out of its own else arm, and the quit case is exactly
         // where the value is.
         let ConnectOutcome {
-            handle,
+            connected,
             target,
             settings,
             gamepad_auto,
@@ -321,7 +329,7 @@ pub(super) fn run_inner() -> Result<()> {
             }
         };
         tracing::debug!("settings: {settings:?}");
-        match app.launch(handle, &target, &settings, gamepad_auto)? {
+        match app.launch(connected, &target, &settings, gamepad_auto)? {
             StreamOutcome::Quit => break exit_plan,
             StreamOutcome::ReturnToMenu => {}
         }

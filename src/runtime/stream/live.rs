@@ -27,6 +27,34 @@ const TAP_PRESS: Duration = Duration::from_millis(50);
 /// `PROBE_WARMUP_CAP`), and until it lands the plane is black.
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(6);
 
+/// The first frame is on the plane, or it is late enough that a black plane beats a stale
+/// menu: a host that never sends must not hold the reveal forever.
+///
+/// `presented` is the signal because NDL's own `PLAYING` lands during `load()`, before anything
+/// is fed, and some sets report `LOADCOMPLETED` only once a frame has been.
+pub(in crate::runtime) fn first_frame_ready(since: Instant) -> bool {
+    crate::platform::webos::ndl::presented() || since.elapsed() >= FIRST_FRAME_WAIT
+}
+
+/// Blocks on [`first_frame_ready`] for a reconnect. The launch never comes here: the shell
+/// keeps animating through that wait instead.
+pub(super) fn wait_first_frame() {
+    let started = Instant::now();
+    while !first_frame_ready(started) {
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    log_reveal(started.elapsed());
+}
+
+/// `presented` and `playing` at the moment the video plane is uncovered.
+pub(in crate::runtime) fn log_reveal(waited: Duration) {
+    tracing::info!(
+        "NDL reveal after {waited:?} (presented={} playing={})",
+        crate::platform::webos::ndl::presented(),
+        crate::platform::webos::ndl::playing(),
+    );
+}
+
 impl App {
     /// Runs one stream on `connected`, the finished handshake `settings` was dialled with, and
     /// hands its teardown off. Leaves the reason on [`Self::menu_notice`] when it ends badly.
@@ -37,23 +65,6 @@ impl App {
         gamepad_auto: bool,
     ) -> Ended {
         tracing::info!("session connected, entering event loop");
-        // `connect` returns with the load issued and the pump feeding; the reveal then waits for
-        // a frame to actually reach NDL, so the menu is swapped straight for live video. NDL's own
-        // `PLAYING` is NOT that signal — it lands during `load()`, before anything is fed, and
-        // `LOADCOMPLETED` is not one either: some sets report it only once a frame has been fed.
-        // Bounded — a host that never sends must not leave a stale menu frame up.
-        let reveal_wait = Instant::now();
-        let deadline = Instant::now() + FIRST_FRAME_WAIT;
-        while !crate::platform::webos::ndl::presented() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        tracing::info!(
-            "NDL reveal after {:?} (presented={} playing={})",
-            reveal_wait.elapsed(),
-            crate::platform::webos::ndl::presented(),
-            crate::platform::webos::ndl::playing(),
-        );
-
         // `hide()` unmaps the surface entirely, silently breaking the Magic Remote's pointer
         // forwarding since Wayland has nowhere left to route motion. aurora-tv never hides its
         // window either — stays mapped, cleared fully transparent so the video shows through.
