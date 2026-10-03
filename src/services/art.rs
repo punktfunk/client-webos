@@ -62,27 +62,6 @@ pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
         .ok();
 }
 
-/// This host's cached ENCODED cover bytes for `game_id`, if the cache holds them.
-pub(crate) fn cached_cover(host: &str, port: u16, game_id: &str) -> Option<Vec<u8>> {
-    let path = cache_dir(host, port).join(cache_name(game_id));
-    let bytes = std::fs::read(&path).ok().filter(|b| !b.is_empty())?;
-    match shrink_cover(&bytes) {
-        Shrink::Keep => Some(bytes),
-        // An entry written by a build that cached full-size covers costs ~99 ms to decode, every
-        // visit, forever. Shrink it the first time it is read and this visit is the last one.
-        Shrink::Shrunk(shrunk) => {
-            write_cover(&path, &shrunk);
-            Some(shrunk)
-        }
-        // Kept by a build that cached whatever came back. Served, it would be a miss that never
-        // refetches; dropped, the next fetch can replace it.
-        Shrink::Undecodable => {
-            let _ = std::fs::remove_file(&path);
-            None
-        }
-    }
-}
-
 /// The size a cached cover is kept at. No client draws one larger than a library tile, which is
 /// a few hundred pixels wide on a 1080p panel even zoomed; everything above this is decode time
 /// nobody sees, paid on every visit.
@@ -151,6 +130,29 @@ impl CoverCache {
         Self { dir, total }
     }
 
+    /// This host's cached ENCODED cover bytes for `game_id`, if the cache holds them.
+    pub(crate) fn cached(&mut self, game_id: &str) -> Option<Vec<u8>> {
+        let path = self.dir.join(cache_name(game_id));
+        let bytes = std::fs::read(&path).ok().filter(|b| !b.is_empty())?;
+        match shrink_cover(&bytes) {
+            Shrink::Keep => Some(bytes),
+            // An entry written by a build that cached full-size covers costs ~99 ms to decode,
+            // every visit, forever. Shrink it the first time it is read and this visit is the last.
+            Shrink::Shrunk(shrunk) => {
+                self.put(&path, &shrunk);
+                Some(shrunk)
+            }
+            // Kept by a build that cached whatever came back. Served, it would be a miss that never
+            // refetches; dropped, the next fetch can replace it.
+            Shrink::Undecodable => {
+                if std::fs::remove_file(&path).is_ok() {
+                    self.total = self.total.saturating_sub(bytes.len() as u64);
+                }
+                None
+            }
+        }
+    }
+
     /// Caches a fetched cover and returns the bytes to hand the shell: the normalised ones the
     /// cache now holds, so a first visit decodes the same small JPEG every later visit does.
     /// `None` for bytes this build cannot decode — nothing to cache, and nothing worth showing.
@@ -160,15 +162,19 @@ impl CoverCache {
             Shrink::Shrunk(shrunk) => shrunk,
             Shrink::Undecodable => return None,
         };
-        let path = self.dir.join(cache_name(game_id));
+        self.put(&self.dir.join(cache_name(game_id)), &bytes);
+        Some(bytes)
+    }
+
+    /// Writes one entry and keeps `total` in step, pruning once it runs over budget.
+    fn put(&mut self, path: &std::path::Path, bytes: &[u8]) {
         let old_len = path.metadata().map_or(0, |meta| meta.len());
-        if write_cover(&path, &bytes) {
+        if write_cover(path, bytes) {
             self.total = self.total.saturating_sub(old_len).saturating_add(bytes.len() as u64);
             if self.total > CACHE_BUDGET {
                 self.total = prune_cache(&self.dir);
             }
         }
-        Some(bytes)
     }
 }
 

@@ -18,3 +18,18 @@ pub mod pad_link;
 pub(crate) mod proc_input;
 pub mod sdl_webos;
 pub mod usb_audio;
+
+use std::time::{Duration, Instant};
+
+/// Sleeps in 2 ms steps until `done` or `limit` elapses; `true` if `done` won. For waits on work
+/// another thread finishes (NDL's callbacks, Luna replies) that offer nothing to block on.
+pub(crate) fn poll_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    while !done() {
+        if start.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    true
+}

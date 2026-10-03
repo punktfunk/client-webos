@@ -184,9 +184,7 @@ impl Envelope {
     pub fn take_coils(&self, out: &mut [[i8; 2]; COIL_REPORT_FRAMES]) -> bool {
         let mut ring = self.coils.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let had = !ring.is_empty();
-        for slot in out.iter_mut() {
-            *slot = ring.pop_front().unwrap_or([0, 0]);
-        }
+        fill_from(&mut ring, out, [0, 0]);
         had
     }
 
@@ -211,9 +209,7 @@ impl Envelope {
         if ring.len() < out.len() {
             return false;
         }
-        for v in out.iter_mut() {
-            *v = ring.pop_front().unwrap_or(0.0);
-        }
+        fill_from(&mut ring, out, 0.0);
         true
     }
 
@@ -258,20 +254,28 @@ impl Envelope {
         drain_pcm(&self.speaker, out);
     }
 
-    /// Decimates one decoded coil frame (interleaved stereo 48 kHz) into the ring.
+    /// Decimates one decoded coil frame (interleaved stereo 48 kHz) into the ring. The soft-float
+    /// math runs before the lock, which the Bluetooth sender takes every report.
     fn push_coils(&self, pcm: &[f32]) {
-        let mut ring = self.coils.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for block in pcm.chunks_exact(COIL_DECIMATION * 2) {
-            let (mut l, mut r) = (0f32, 0f32);
-            for s in block.chunks_exact(2) {
-                l += s[0];
-                r += s[1];
+        // Mean of the block scaled to s8; 127/16 is exact, so this equals `/ N * 127`.
+        const SCALE: f32 = 127.0 / COIL_DECIMATION as f32;
+        let q = |v: f32| (v * SCALE).round().clamp(-127.0, 127.0) as i8;
+        let mut frames = [[0i8; 2]; 64];
+        for blocks in pcm.chunks(COIL_DECIMATION * 2 * frames.len()) {
+            let mut n = 0;
+            for block in blocks.chunks_exact(COIL_DECIMATION * 2) {
+                let (mut l, mut r) = (0f32, 0f32);
+                for s in block.chunks_exact(2) {
+                    l += s[0];
+                    r += s[1];
+                }
+                frames[n] = [q(l), q(r)];
+                n += 1;
             }
-            let q = |v: f32| (v / COIL_DECIMATION as f32 * 127.0).round().clamp(-127.0, 127.0) as i8;
-            if ring.len() >= COIL_RING_MAX {
-                ring.pop_front();
-            }
-            ring.push_back([q(l), q(r)]);
+            let mut ring = self.coils.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let overflow = (ring.len() + n).saturating_sub(COIL_RING_MAX).min(ring.len());
+            ring.drain(..overflow);
+            ring.extend(&frames[..n]);
         }
     }
 
@@ -455,9 +459,16 @@ fn push_pcm(ring: &Mutex<VecDeque<f32>>, pcm: &[f32]) {
 /// Fills `out` from a PCM ring, zero-filling the tail when the lane is quiet.
 fn drain_pcm(ring: &Mutex<VecDeque<f32>>, out: &mut [f32]) {
     let mut ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for v in out.iter_mut() {
-        *v = ring.pop_front().unwrap_or(0.0);
+    fill_from(&mut ring, out, 0.0);
+}
+
+/// Moves the head of `ring` into `out`, padding with `zero` past what the ring holds.
+fn fill_from<T: Copy>(ring: &mut VecDeque<T>, out: &mut [T], zero: T) {
+    let n = out.len().min(ring.len());
+    for (o, v) in out.iter_mut().zip(ring.drain(..n)) {
+        *o = v;
     }
+    out[n..].fill(zero);
 }
 
 /// Peak absolute sample per channel of interleaved stereo.

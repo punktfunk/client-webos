@@ -121,17 +121,16 @@ pub(super) struct Motion {
     pub hover_close: bool,
 }
 
-/// Draw the card at `alpha`, risen with it. Button 0 is the destructive action.
+/// Draw the card laid out as `l` at `alpha`, risen with it. Button 0 is the destructive action.
 pub(super) fn draw(
     f: &Frame<'_>,
+    l: &Layout,
     title: &str,
-    subtitle: &str,
     labels: [&str; 2],
     focus: usize,
     motion: &Motion,
     alpha: f32,
 ) {
-    let l = layout(f.fonts, f.w, f.h, f.k, subtitle);
     let (c, k) = (f.canvas, f.k);
     c.save();
     c.translate((0.0, ((1.0 - alpha) * RISE).round()));

@@ -128,13 +128,14 @@ impl Recovery {
                 SinkResult::Held
             });
         }
+        let held = started.elapsed();
         tracing::info!(
             "resuming after {:.0}ms (frame {})",
-            started.elapsed().as_secs_f32() * 1000.0,
+            held.as_secs_f32() * 1000.0,
             flags.index,
         );
         self.stats.holding.store(false, Ordering::Relaxed);
-        self.held += started.elapsed();
+        self.held += held;
         self.hold_started = None;
         HoldGate::Resume
     }

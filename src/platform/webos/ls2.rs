@@ -13,7 +13,7 @@
 //! Thread affinity: an `LSHandle` is pumped by the `GMainContext` it is attached to, so a [`Bus`]
 //! is created, used and dropped on one thread ([`Bus`] is `!Send` by construction). Calls are
 //! asynchronous; [`Bus::pump`] dispatches the replies that have arrived.
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -100,17 +100,13 @@ impl Call {
     }
 }
 
-/// Reply bookkeeping shared by every [`Bus`]: the counts the stats overlay and the logs read.
+/// Reply bookkeeping shared by every [`Bus`].
 pub struct Replies {
-    pub ok: AtomicU32,
-    pub failed: AtomicU32,
-    /// The first failing reply since the counters were last read, for one log line per run.
+    /// The first failing reply since the last [`Replies::take_failure`], for one log line per run.
     first_failure: Mutex<Option<String>>,
 }
 
 pub static REPLIES: Replies = Replies {
-    ok: AtomicU32::new(0),
-    failed: AtomicU32::new(0),
     first_failure: Mutex::new(None),
 };
 
@@ -120,6 +116,8 @@ struct CallCtx {
     call: Call,
     /// Latched by the first `106` refusal to this kind of call: see [`on_reply`].
     unavailable: AtomicBool,
+    /// Calls accepted by the hub whose reply has not been dispatched yet.
+    pending: AtomicU32,
 }
 
 impl Replies {
@@ -137,6 +135,7 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
     let Ok(f) = fns() else { return true };
     // SAFETY: `ctx` points into the calling `Bus`'s `calls`, live while its context dispatches.
     let ctx = unsafe { &*ctx.cast::<CallCtx>() };
+    ctx.pending.fetch_sub(1, Ordering::Relaxed);
     // SAFETY: `reply` is the live message the hub delivered for this callback.
     let payload = unsafe { (f.message_payload)(reply) };
     let text = if payload.is_null() {
@@ -145,10 +144,7 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
         // SAFETY: LS2 payloads are NUL-terminated JSON owned by the message for the callback.
         unsafe { CStr::from_ptr(payload) }.to_string_lossy()
     };
-    if text.contains("\"returnValue\":true") {
-        REPLIES.ok.fetch_add(1, Ordering::Relaxed);
-    } else {
-        REPLIES.failed.fetch_add(1, Ordering::Relaxed);
+    if !text.contains("\"returnValue\":true") {
         // An address with no HID write path answers every single report with `106` ("Device with
         // supplied address is not available"). Latch it on this bus — one pad per bus, so another
         // pad's sender keeps going — and treat the refusals after the first as noise.
@@ -223,6 +219,7 @@ impl Bus {
             [Call::SendReport, Call::StopSniff, Call::StartSniff].map(|call| CallCtx {
                 call,
                 unavailable: AtomicBool::new(false),
+                pending: AtomicU32::new(0),
             }),
         );
         Ok(Self {
@@ -241,9 +238,12 @@ impl Bus {
 
     /// Fires one call; the reply is counted by [`on_reply`] when [`pump`](Self::pump) runs.
     /// `Err` is the hub refusing to accept the call at all, not a failing reply.
-    pub fn call(&self, uri: &str, payload: &str, what: Call) -> Result<()> {
-        let uri = CString::new(uri)?;
-        let payload = CString::new(payload)?;
+    pub fn call(&self, uri: &CStr, payload: &CStr, what: Call) -> Result<()> {
+        let ctx = self
+            .calls
+            .iter()
+            .find(|c| c.call == what)
+            .expect("every call has a context");
         let mut err = LsError {
             error_code: 0,
             message: std::ptr::null_mut(),
@@ -259,14 +259,7 @@ impl Bus {
                 uri.as_ptr(),
                 payload.as_ptr(),
                 on_reply,
-                std::ptr::from_ref(
-                    self.calls
-                        .iter()
-                        .find(|c| c.call == what)
-                        .expect("every call has a context"),
-                )
-                .cast_mut()
-                .cast(),
+                std::ptr::from_ref(ctx).cast_mut().cast(),
                 &mut token,
                 &mut err,
             )
@@ -277,6 +270,7 @@ impl Bus {
             unsafe { (self.fns.error_free)(&mut err) };
             bail!("LSCallOneReply failed: {msg}");
         }
+        ctx.pending.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -285,16 +279,20 @@ impl Bus {
         // SAFETY: `context` is live for the life of `self`; non-blocking iteration.
         while unsafe { (self.fns.context_iteration)(self.context, 0) } != 0 {}
     }
+
+    /// Pumps until every accepted call has had its reply dispatched, or `within` runs out.
+    pub fn drain(&self, within: std::time::Duration) {
+        super::poll_until(within, || {
+            self.pump();
+            self.calls.iter().all(|c| c.pending.load(Ordering::Relaxed) == 0)
+        });
+    }
 }
 
 impl Drop for Bus {
     fn drop(&mut self) {
-        // Give in-flight replies a moment so the last report's outcome is counted, then release.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-        while std::time::Instant::now() < deadline {
-            self.pump();
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // Let in-flight replies land so the last report's outcome is counted, then release.
+        self.drain(std::time::Duration::from_millis(100));
         let mut err = LsError {
             error_code: 0,
             message: std::ptr::null_mut(),

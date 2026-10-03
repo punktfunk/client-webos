@@ -125,7 +125,8 @@ fn stream_mode(settings: &store::Settings, native: Mode) -> Mode {
 }
 
 /// Start the connect on its own thread. The caller joins it once `PendingConnect::is_finished`
-/// says so (the console keeps its Connecting card up meanwhile), or right away on a reconnect.
+/// says so (the console keeps its Connecting card up meanwhile; a reconnect polls it in
+/// `stream::wait_for_dial`).
 fn spawn_connect(
     identity: (String, String),
     target: ConnectTarget,
@@ -301,7 +302,7 @@ pub fn run() -> Result<()> {
     // destination as a launch param; otherwise a versioned file under the app's
     // own writable directory (falls back to `/tmp` off-device, e.g. when
     // smoke-testing this binary on a Linux dev box before packaging). `_guard`
-    // owns the background writer thread `non_blocking` spawns — held for the
+    // flushes the background writer thread `non_blocking` spawns — held for the
     // whole process so logging never blocks a caller (in particular the
     // video-pump thread) on a slow disk or a dev machine not draining its
     // telemetry listener fast enough.
@@ -330,6 +331,11 @@ pub fn run() -> Result<()> {
         // Global compositor state: a panic mid-stream would otherwise leave the whole
         // TV without a cursor.
         cursor::restore_on_exit();
+        // `panic = "abort"`: nothing else would get the line above out of the appender's queue.
+        // An unwinding build may survive the panic, and a flush would end its logging.
+        if cfg!(panic = "abort") {
+            crate::logger::flush();
+        }
         default_hook(info);
     }));
 

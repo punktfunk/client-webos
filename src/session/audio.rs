@@ -42,8 +42,11 @@ pub struct AudioStage {
     channels: usize,
     /// Detects packets lost on the wire so they can be concealed rather than skipped.
     gaps: AudioGapTracker,
-    /// Reused across packets: concealment frames first, then the packet itself.
+    /// Reused across packets: concealment frames first, then the packet itself. Only filled when
+    /// there was concealment; a lone packet is fed straight from `pcm`.
     f32: Vec<f32>,
+    /// Samples in `pcm` from the last decode.
+    last: usize,
     /// libopus's own output buffer, one frame at the widest layout. A field rather than a local:
     /// as a local it is a 7.7 KB stack array zeroed on every packet, i.e. 200 pointless memsets a
     /// second on a soft-float `SoC`. libopus overwrites what it uses, so the stale contents of the
@@ -100,6 +103,7 @@ impl AudioStage {
             // One packet plus the concealment burst that can precede it, so steady state never
             // reallocates.
             f32: Vec::with_capacity(SAMPLES_PER_FRAME * MAX_CHANNELS * 2),
+            last: 0,
             pcm: Box::new([0.0; SAMPLES_PER_FRAME * MAX_CHANNELS]),
         })
     }
@@ -120,6 +124,7 @@ impl AudioStage {
             reencoder,
             packet,
             f32,
+            last,
             pcm,
             channels,
             gaps,
@@ -152,16 +157,21 @@ impl AudioStage {
                 .decode_float(input, &mut pcm[..cap(i)], false)
                 .map_err(|e| anyhow::anyhow!("opus decode: {e}"))?;
             let decoded = &pcm[..frames * channels];
-            f32.extend_from_slice(decoded);
+            *last = decoded.len();
             if let Some(encoder) = reencoder.as_mut() {
                 let n = encoder
                     .encode_float(decoded, packet)
                     .map_err(|e| anyhow::anyhow!("opus 5.1 re-encode: {e}"))?;
                 sink.feed(Samples::Opus(&packet[..n]), stamp(i))?;
+            } else if missing > 0 {
+                f32.extend_from_slice(decoded);
             }
         }
         if reencoder.is_some() {
             return Ok(());
+        }
+        if missing == 0 {
+            return sink.feed(Samples::F32(&pcm[..*last]), stamp(0));
         }
         sink.feed(Samples::F32(f32), stamp(0))
     }
@@ -172,12 +182,12 @@ impl AudioStage {
         self.sink.depth_ms()
     }
 
-    /// Peak sample of the last decoded buffer — a diagnostic that separates "the host is sending
+    /// Peak sample of the last decoded frame — a diagnostic that separates "the host is sending
     /// silence" from "the speaker is not working". `None` where stereo Opus is forwarded undecoded.
     pub fn peak(&self) -> Option<f32> {
         self.decoder
             .is_some()
-            .then(|| self.f32.iter().fold(0f32, |m, &s| m.max(s.abs())))
+            .then(|| self.pcm[..self.last].iter().fold(0f32, |m, &s| m.max(s.abs())))
     }
 }
 

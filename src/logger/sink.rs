@@ -1,6 +1,6 @@
 //! The write destination — a rotating log file, or a TCP stream to a dev machine.
 use crate::core::VERSION;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,7 +19,8 @@ const MAX_LOG_ROTATIONS: usize = 3;
 /// Log destination (file or TCP). Non-blocking dispatch prevents blocking video pump.
 pub(super) enum Sink {
     File {
-        file: std::fs::File,
+        /// Buffered: the appender writes once per line and flushes once per batch.
+        file: BufWriter<std::fs::File>,
         written: u64,
         /// Active log path, so a full file can be rotated (renamed) and reopened.
         path: PathBuf,
@@ -58,7 +59,7 @@ impl Write for Sink {
                 file.flush()?;
                 if *written >= MAX_LOG_BYTES {
                     rotate(path);
-                    *file = open_fresh(path)?;
+                    *file = BufWriter::new(open_fresh(path)?);
                     *written = 0;
                 }
                 Ok(())
@@ -127,7 +128,11 @@ fn open_file(app_dir: &Path) -> Result<Sink> {
     }
     prune_other_builds(app_dir, &path);
     let file = open_fresh(&path).with_context(|| format!("open log file {}", path.display()))?;
-    Ok(Sink::File { file, written: 0, path })
+    Ok(Sink::File {
+        file: BufWriter::new(file),
+        written: 0,
+        path,
+    })
 }
 
 /// Create (truncating) a fresh active log at `path`.
@@ -171,11 +176,12 @@ fn is_log_file(path: &Path) -> bool {
     else {
         return false;
     };
-    !version.is_empty()
-        && (suffix.is_empty()
-            || suffix
-                .strip_prefix('.')
-                .is_some_and(|rotation| rotation.parse::<usize>().is_ok()))
+    !version.is_empty() && is_rotation_suffix(suffix)
+}
+
+/// `""` (the active log) or `.<n>` (one of its rotations).
+fn is_rotation_suffix(s: &str) -> bool {
+    s.is_empty() || s.strip_prefix('.').is_some_and(|n| n.parse::<usize>().is_ok())
 }
 
 /// Whether `path` is `active` or one of its rotations.
@@ -186,12 +192,7 @@ fn is_this_build(path: &Path, active: &Path) -> bool {
     ) else {
         return false;
     };
-    name.strip_prefix(active).is_some_and(|rest| {
-        rest.is_empty()
-            || rest
-                .strip_prefix('.')
-                .is_some_and(|rotation| rotation.parse::<usize>().is_ok())
-    })
+    name.strip_prefix(active).is_some_and(is_rotation_suffix)
 }
 
 /// Drops the logs other builds wrote, all but the newest. Every beta build is its own version

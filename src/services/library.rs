@@ -191,7 +191,7 @@ fn walk_pages(
 /// Fetch the host's library, walked by `GET /api/v1/library/page` on one connection; `budget`
 /// bounds each page. A host older than that route refuses it on this lane, so `GET
 /// /api/v1/library` answers whole instead.
-pub(crate) fn fetch_games(
+fn fetch_games(
     addr: &str,
     mgmt_port: u16,
     identity: &(String, String),

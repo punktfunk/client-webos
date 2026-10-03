@@ -108,10 +108,7 @@ impl Stream {
             // the remote pressed it: a pad's echo would move it a second time.
             _ if self.disconnect.is_open() => {
                 if key_admitted {
-                    match self
-                        .disconnect
-                        .handle_event(&event, remote_press, cx.fonts, cx.display.0, cx.display.1)
-                    {
+                    match self.disconnect.handle_event(&event, remote_press) {
                         Some(ConfirmAction::Confirmed) => {
                             tracing::info!("disconnecting to menu");
                             self.client_initiated_disconnect = true;

@@ -47,10 +47,11 @@ impl std::ops::DerefMut for KnownHost {
 }
 
 /// The shared record derives no `PartialEq`; the store's writer compares documents, and the
-/// serialized form is the one comparison that cannot miss a field.
+/// serialized form is the one comparison that cannot miss a field. Bytes, not a `Value` tree: the
+/// record's only map is a `BTreeMap`, so its encoding is deterministic.
 impl PartialEq for KnownHost {
     fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+        serde_json::to_vec(self).ok() == serde_json::to_vec(other).ok()
     }
 }
 
@@ -142,7 +143,7 @@ pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Opti
     None
 }
 
-pub fn unique_profile_name(catalog: &[StreamPreset], wanted: &str) -> String {
+fn unique_profile_name(catalog: &[StreamPreset], wanted: &str) -> String {
     let taken = |name: &str| catalog.iter().any(|p| p.name == name);
     if !taken(wanted) {
         return wanted.to_string();
@@ -449,7 +450,7 @@ impl HdrDisplay {
     /// zero there as "unknown", and a self-emissive panel's real floor is better described by the
     /// smallest luminance the field can express than by no answer at all.
     #[must_use]
-    pub fn min_luminance_units(self) -> u32 {
+    fn min_luminance_units(self) -> u32 {
         ((crate::core::pq::pq_nits(self.black_code) * 10_000.0).round() as u32).max(1)
     }
 

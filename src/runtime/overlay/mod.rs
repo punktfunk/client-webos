@@ -32,7 +32,7 @@ const TOAST_PAD_X: f32 = 18.0;
 const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_SIZE: f64 = 15.0;
 pub(super) const LOG_LINES: usize = 9;
-const NOTIFICATION_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
+const NOTIFICATION_HOLD: Duration = Duration::from_secs(2);
 
 /// One frame's canvas and its size in display units.
 #[derive(Clone, Copy)]
@@ -74,14 +74,15 @@ pub(super) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Ve
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        let candidate = if line.is_empty() {
-            word.to_string()
-        } else {
-            format!("{line} {word}")
-        };
-        if line.is_empty() || measure(&candidate) <= max_w {
-            line = candidate;
-        } else {
+        if line.is_empty() {
+            line.push_str(word);
+            continue;
+        }
+        let kept = line.len();
+        line.push(' ');
+        line.push_str(word);
+        if measure(&line) > max_w {
+            line.truncate(kept);
             lines.push(std::mem::replace(&mut line, word.to_string()));
         }
     }
@@ -120,15 +121,15 @@ pub(super) fn alpha_layer(c: &Canvas, r: Rect, alpha: f32) {
 /// units to the drawable. `draw` paints in display units; the frame is then swapped.
 pub(super) fn frame(
     gl: &mut Option<ConsoleGl>,
-    canvas: &sdl3::render::WindowCanvas,
+    window: &sdl3::video::Window,
     fonts: &Fonts,
     display: (u32, u32),
     clear: Color4f,
     draw: impl FnOnce(&Frame<'_>),
 ) -> Result<()> {
     // Never vsync: every caller here draws over live video, on the thread forwarding input.
-    let gl = super::console_flow::bring_up(gl, canvas, false)?;
-    let (dw, dh) = canvas.window().size_in_pixels();
+    let gl = super::console_flow::bring_up(gl, window, false)?;
+    let (dw, dh) = window.size_in_pixels();
     {
         let surface = gl.surface(dw, dh)?;
         let c = surface.canvas();
@@ -138,7 +139,7 @@ pub(super) fn frame(
         draw(&Frame::new(c, fonts, display.0, display.1));
     }
     gl.flush();
-    canvas.window().gl_swap_window();
+    window.gl_swap_window();
     Ok(())
 }
 
@@ -162,9 +163,9 @@ pub(super) fn drawn(result: Result<()>, warned: &mut bool) -> bool {
 pub(super) const TRANSPARENT: Color4f = Color4f::new(0.0, 0.0, 0.0, 0.0);
 
 /// Two swaps of nothing, so both buffers of the window are wiped.
-pub(super) fn wipe(gl: &mut Option<ConsoleGl>, canvas: &sdl3::render::WindowCanvas, fonts: &Fonts) -> Result<()> {
+pub(super) fn wipe(gl: &mut Option<ConsoleGl>, window: &sdl3::video::Window, fonts: &Fonts) -> Result<()> {
     for _ in 0..2 {
-        frame(gl, canvas, fonts, (1, 1), TRANSPARENT, |_| {})?;
+        frame(gl, window, fonts, (1, 1), TRANSPARENT, |_| {})?;
     }
     Ok(())
 }
@@ -239,22 +240,43 @@ fn log_tone(line: &str) -> Color4f {
     }
 }
 
-pub(super) fn log(f: &Frame<'_>, lines: &[String]) {
+/// The log tail wrapped for one frame width, kept until the lines or the width change: a fade
+/// redraws it at 30 Hz, and wrapping measures every word.
+#[derive(Default)]
+pub(super) struct LogRows {
+    lines: Vec<String>,
+    w: f32,
+    rows: Vec<(f32, String, Color4f)>,
+}
+
+impl LogRows {
+    fn update(&mut self, f: &Frame<'_>, lines: Vec<String>) {
+        if self.w == f.w && self.lines == lines {
+            return;
+        }
+        let k = f.k;
+        let size = LOG_LINE * f64::from(k);
+        let wrap_w = f.w - 2.0 * LOG_PAD * k - LOG_INDENT * k;
+        self.rows.clear();
+        for line in &lines {
+            let tone = log_tone(line);
+            let wrapped = wrap(f.fonts, line, W::Regular, size, f64::from(wrap_w));
+            self.rows.extend(wrapped.into_iter().enumerate().map(|(i, text)| {
+                let x = if i == 0 { 0.0 } else { LOG_INDENT * k };
+                (x, text, tone)
+            }));
+        }
+        self.lines = lines;
+        self.w = f.w;
+    }
+}
+
+pub(super) fn log(f: &Frame<'_>, cache: &mut LogRows, lines: Vec<String>) {
+    cache.update(f, lines);
+    let rows = &cache.rows;
     let k = f.k;
     let size = LOG_LINE * f64::from(k);
     let stride = line_h(size) as f32;
-    let wrap_w = f.w - 2.0 * LOG_PAD * k - LOG_INDENT * k;
-    let rows: Vec<(f32, String, Color4f)> = lines
-        .iter()
-        .flat_map(|line| {
-            let tone = log_tone(line);
-            let wrapped = wrap(f.fonts, line, W::Regular, size, f64::from(wrap_w));
-            wrapped.into_iter().enumerate().map(move |(i, text)| {
-                let x = if i == 0 { 0.0 } else { LOG_INDENT * k };
-                (x, text, tone)
-            })
-        })
-        .collect();
     let h = stride * rows.len().max(1) as f32 + 2.0 * LOG_PAD * k;
     let strip = Rect::from_xywh(0.0, f.h - h, f.w, h);
     let c = f.canvas;
@@ -332,6 +354,9 @@ pub(super) struct ConfirmDialog {
     hover_close: bool,
     last_draw: Option<Instant>,
     last_visual: Option<(usize, bool, bool, bool)>,
+    /// Laid out on open: the subtitle and the display never change, and wrapping measures every
+    /// word, which pointer motion would otherwise redo at ~100 Hz. Kept through the close fade.
+    layout: Option<dialog::Layout>,
 }
 
 impl ConfirmDialog {
@@ -347,6 +372,7 @@ impl ConfirmDialog {
             hover_close: false,
             last_draw: None,
             last_visual: None,
+            layout: None,
         }
     }
 
@@ -354,7 +380,11 @@ impl ConfirmDialog {
         self.focus.is_some()
     }
 
-    pub(super) fn open(&mut self, focus: usize) {
+    /// Opens on a `w`×`h` display with `focus` on.
+    pub(super) fn open(&mut self, focus: usize, fonts: &Fonts, (w, h): (u32, u32)) {
+        if self.layout.is_none() {
+            self.layout = Some(dialog::layout(fonts, w as f32, h as f32, scale(h), self.subtitle));
+        }
         self.last_visual = None;
         self.last_draw = None;
         self.focus = Some(focus);
@@ -418,19 +448,22 @@ impl ConfirmDialog {
         &mut self,
         event: &sdl3::event::Event,
         remote: Option<crate::platform::webos::input::RemoteKey>,
-        fonts: &Fonts,
-        w: u32,
-        h: u32,
     ) -> Option<ConfirmAction> {
         use sdl3::event::Event;
         let focus = self.focus?;
-        let l = dialog::layout(fonts, w as f32, h as f32, scale(h), self.subtitle);
+        // `(on the close mark, the button under the pointer)` for pointer events.
+        let hit = match (event, &self.layout) {
+            (Event::MouseMotion { x, y, .. } | Event::MouseButtonDown { x, y, .. }, Some(l)) => {
+                (l.on_close(*x, *y), l.button_at(*x, *y))
+            }
+            _ => (false, None),
+        };
         match *event {
-            Event::MouseMotion { x, y, .. } => {
-                let hover_close = l.on_close(x, y);
+            Event::MouseMotion { .. } => {
+                let hover_close = hit.0;
                 let hover_changed = self.hover_close != hover_close;
                 self.hover_close = hover_close;
-                return match l.button_at(x, y) {
+                return match hit.1 {
                     Some(i) if i != focus => {
                         self.set_focus(i);
                         Some(ConfirmAction::Navigated)
@@ -441,15 +474,13 @@ impl ConfirmDialog {
             }
             Event::MouseButtonDown {
                 mouse_btn: sdl3::mouse::MouseButton::Left,
-                x,
-                y,
                 ..
             } => {
-                if l.on_close(x, y) {
+                if hit.0 {
                     self.dismiss();
                     return Some(ConfirmAction::Dismissed);
                 }
-                let i = l.button_at(x, y)?;
+                let i = hit.1?;
                 self.press.arm();
                 return Some(if i == 0 {
                     ConfirmAction::Confirmed
@@ -497,7 +528,7 @@ impl ConfirmDialog {
 
     /// The dialog at its fade's alpha, risen with it.
     pub(super) fn draw(&self, f: &Frame<'_>) {
-        let Some((focus, alpha, closing)) = self.frame() else {
+        let (Some((focus, alpha, closing)), Some(l)) = (self.frame(), &self.layout) else {
             return;
         };
         let motion = Motion {
@@ -505,15 +536,7 @@ impl ConfirmDialog {
             press: self.press,
             hover_close: self.hover_close && !closing,
         };
-        dialog::draw(
-            f,
-            self.title,
-            self.subtitle,
-            [self.label, "Cancel"],
-            focus,
-            &motion,
-            alpha,
-        );
+        dialog::draw(f, l, self.title, [self.label, "Cancel"], focus, &motion, alpha);
     }
 }
 
@@ -557,7 +580,7 @@ mod dialog_tests {
     fn close_hover_requests_redraw_only_when_changed() {
         let fonts = theme::build_fonts().unwrap();
         let mut dialog = ConfirmDialog::new("Stop?", "Close the stream", "Stop");
-        dialog.focus = Some(0);
+        dialog.open(0, &fonts, (1920, 1080));
         let l = dialog::layout(&fonts, 1920.0, 1080.0, scale(1080), "Close the stream");
         let motion = |x, y| sdl3::event::Event::MouseMotion {
             timestamp: 0,
@@ -570,12 +593,10 @@ mod dialog_tests {
             yrel: 0.0,
         };
         let enter = motion(l.close.center_x(), l.close.center_y());
-        assert!(dialog.handle_event(&enter, None, &fonts, 1920, 1080).is_some());
+        assert!(dialog.handle_event(&enter, None).is_some());
         assert!(dialog.hover_close);
-        assert!(dialog.handle_event(&enter, None, &fonts, 1920, 1080).is_none());
-        assert!(dialog
-            .handle_event(&motion(0.0, 0.0), None, &fonts, 1920, 1080)
-            .is_some());
+        assert!(dialog.handle_event(&enter, None).is_none());
+        assert!(dialog.handle_event(&motion(0.0, 0.0), None).is_some());
         assert!(!dialog.hover_close);
     }
 
