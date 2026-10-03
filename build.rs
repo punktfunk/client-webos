@@ -45,26 +45,18 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
 }
 
-/// The pinned shell (pf-console-ui) as `0.42.0 (db9011b)`, off `Cargo.lock`: its own `VERSION` is
-/// crate-private, and a git pin can sit on many commits of one version.
+/// The pinned shell's (pf-console-ui) version, off `Cargo.lock`: its own `VERSION` is
+/// crate-private.
 fn core_version(manifest_dir: &str) -> String {
     let lock = std::fs::read_to_string(format!("{manifest_dir}/Cargo.lock")).unwrap_or_default();
-    let Some(block) = lock
-        .split("[[package]]")
+    lock.split("[[package]]")
         .find(|b| b.contains("\nname = \"pf-console-ui\"\n"))
-    else {
-        return "unknown".into();
-    };
-    let field = |key: &str| {
-        block
-            .lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix(" = \"")?.strip_suffix('"'))
-            .unwrap_or_default()
-    };
-    match field("source").rsplit_once('#') {
-        Some((_, rev)) => format!("{} ({})", field("version"), &rev[..rev.len().min(7)]),
-        None => field("version").to_string(),
-    }
+        .and_then(|b| {
+            b.lines()
+                .find_map(|l| l.strip_prefix("version = \"")?.strip_suffix('"'))
+        })
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn generate_third_party_notices(manifest_dir: &str) {
