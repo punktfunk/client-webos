@@ -65,7 +65,7 @@ the NDL plane.
 - `libNDL_directmedia.so.1` is the real device library; the NDK sysroot ships a link-time stub.
 - PTS = milliseconds since `NDL_DirectMediaLoad`, not wall-clock.
 - Audio is decoded client-side via Opus unless offload is on — see *NDL's audio plane*.
-- **`core::caps` has three readers that must agree**: `session::connect` (truth), `ui::settings` (offer), `Settings::clamp_to_caps`. Backend changes affect all three.
+- **`core::caps` has readers that must agree**: `session::connect` (truth), `Settings::clamp_to_caps` (the stored document on load, and every launch's settings), and the shell's `ConsoleOptions` (what codecs it offers — `console_flow::run`). Backend changes affect all of them.
 - **Decouple decode dimensions from punch-through rect** — else a 1080p stream on a 4K panel
   punches only the top-left quarter.
 - **Loss recovery required** — no periodic IDRs in the stream. `session::pump::video_pump` calls

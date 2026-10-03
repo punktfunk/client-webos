@@ -9,3 +9,6 @@ tmp/
 # Local machine-specific defaults for Task (e.g. TV_HOST for `task deploy`) —
 # see .env.example.
 .env
+
+# CI lints into its own target dir (`CARGO_TARGET_DIR=target-clippy`, see .github/workflows/build.yml).
+target-clippy/

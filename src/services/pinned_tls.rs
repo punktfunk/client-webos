@@ -43,13 +43,12 @@ impl<In: Transport> Connector<In> for PinnedTlsConnector {
             return Ok(Some(Either::A(transport)));
         }
 
-        let name: rustls::pki_types::ServerName<'_> = details
-            .uri
-            .authority()
-            .expect("uri authority for tls")
-            .host()
-            .try_into()
-            .map_err(|_| ureq::Error::Tls("invalid DNS name"))?;
+        let host = details.uri.authority().expect("uri authority for tls").host();
+        // An IPv6 literal comes back bracketed (`[2001:db8::5]`), which `ServerName` rejects;
+        // ureq's own connector strips them the same way (`host_bare`).
+        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        let name: rustls::pki_types::ServerName<'_> =
+            host.try_into().map_err(|_| ureq::Error::Tls("invalid DNS name"))?;
         let conn = rustls::ClientConnection::new(self.config.clone(), name.to_owned())?;
         let stream = rustls::StreamOwned {
             conn,

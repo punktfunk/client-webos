@@ -17,17 +17,17 @@
 //! the compositor pointer is hidden. Capture off (desktop/absolute): a pointer-only node is left
 //! with the compositor so the TV cursor stays the one you aim — only keyboards are taken.
 //!
-//! **Access.** Unlike `/dev/hidraw*` (jail-blocked, see `dualsense.rs`), evdev nodes are
-//! reachable: `root:compositor 0660`, and the app's uid carries gid 505 in its supplementary
-//! groups — verified on-device, non-rooted, webOS 10.3.
+//! **Access.** Unlike a Bluetooth pad's `/dev/hidraw*` (none in the jail, see `dualsense.rs`),
+//! evdev nodes are reachable: `root:compositor 0660`, and the app's uid carries gid 505 in its
+//! supplementary groups — verified on-device, non-rooted, webOS 10.3.
 //!
 //! **Grabbed while active.** `EVIOCGRAB` is scoped to [`HidInput::set_active`], not held for the
-//! reader's whole life: `cursor::COMPOSITOR_CURSOR_CONTROL` is verified off on webOS 26 (see
-//! `cursor.rs`), so an ungrabbed node leaves the compositor drawing its own pointer from the same
-//! evdev reports we forward. Scoping it to "caller wants it" rather than the reader's whole life
-//! bounds a wedged thread's blast radius to "no HID input" instead of "no mouse input at all,
-//! TV-wide" — the kernel releases the grab the moment our fd closes (including on panic), and the
-//! surface-manager's own fd stays open throughout, just starved of events while ours holds it.
+//! reader's whole life. The grab is what keeps the compositor quiet (see `cursor.rs`): an
+//! ungrabbed node leaves it drawing its own pointer from the same evdev reports we forward.
+//! Scoping it to "caller wants it" rather than the reader's whole life bounds a wedged thread's
+//! blast radius to "no HID input" instead of "no mouse input at all, TV-wide" — the kernel
+//! releases the grab the moment our fd closes (including on panic), and the surface-manager's own
+//! fd stays open throughout, just starved of events while ours holds it.
 //! The Magic Remote never matches the mouse/keyboard filter: its keys reach the app through SDL.
 //! A scan still opens its own node, ungrabbed, as a [`RemoteNode`] for the caller to read, since
 //! SDL's keys name no device. [`HidInput::keyboard_busy`] drops SDL's echo of a HID keyboard.
@@ -53,6 +53,7 @@ mod pad;
 
 use pad::Pad;
 
+use super::ioctl;
 use super::keyboard;
 use super::mouse;
 
@@ -106,29 +107,39 @@ struct InputEventRaw {
     value: i32,
 }
 
-/// `_IOC(dir, 'E', nr, len)` — the evdev ioctls aren't in the `libc` crate.
-const fn eioc(dir: u32, nr: u32, len: u32) -> libc::c_ulong {
-    ((dir << 30) | (len << 16) | (b'E' as u32) << 8 | nr) as libc::c_ulong
+/// Events one `read` takes. A whole number of them, so a full buffer always means more may be
+/// queued: a byte count that isn't a multiple (1024 against a 64-bit preview's 24-byte events)
+/// made every full read look short and ended the drain early.
+const READ_EVENTS: usize = 64;
+
+/// One `read`'s worth of raw events, in bytes.
+const READ_BYTES: usize = READ_EVENTS * std::mem::size_of::<InputEventRaw>();
+
+/// The events in one `read`'s bytes — evdev only ever hands out whole ones.
+fn events(bytes: &[u8]) -> impl Iterator<Item = InputEventRaw> + '_ {
+    bytes.chunks_exact(std::mem::size_of::<InputEventRaw>()).map(|chunk| {
+        // SAFETY: `InputEventRaw` is plain `repr(C)` integers with no padding invariants, and the
+        // chunk is exactly its size; read unaligned because a byte buffer carries no alignment
+        // guarantee.
+        unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() }
+    })
 }
 
-/// `_IOC(_IOC_READ, 'E', nr, len)`.
+/// `_IOC(_IOC_READ, 'E', nr, len)` — the evdev ioctls aren't in the `libc` crate.
 const fn eviocg(nr: u32, len: u32) -> libc::c_ulong {
-    const IOC_READ: u32 = 2;
-    eioc(IOC_READ, nr, len)
+    ioctl::ioc(ioctl::READ, b'E', nr, len)
 }
 
 /// `EVIOCGRAB` = `_IOW('E', 0x90, int)`. The kernel reads the argument by value (`1` grabs, `0`
 /// releases), not as a pointer, despite the `_IOW` direction.
 const fn eviocgrab() -> libc::c_ulong {
-    const IOC_WRITE: u32 = 1;
-    eioc(IOC_WRITE, 0x90, 4)
+    ioctl::ioc(ioctl::WRITE, b'E', 0x90, 4)
 }
 
 /// `EVIOCSREP` = `_IOW('E', 0x03, unsigned int[2])` — `[REP_DELAY, REP_PERIOD]` in ms, what the
 /// kernel generates `value == 2` autorepeat from.
 const fn eviocsrep() -> libc::c_ulong {
-    const IOC_WRITE: u32 = 1;
-    eioc(IOC_WRITE, 0x03, 8)
+    ioctl::ioc(ioctl::WRITE, b'E', 0x03, 8)
 }
 
 /// Autorepeat delay/period for every keyboard node we own, in ms. The kernel's 250/33 default is
@@ -321,7 +332,7 @@ struct Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // SAFETY: `fd` came from `open` in `open_mouse` and is owned solely by this struct.
+        // SAFETY: `fd` came from `open` in `open_hid` and is owned solely by this struct.
         unsafe { libc::close(self.fd) };
     }
 }
@@ -335,31 +346,35 @@ enum Probe {
     Unopenable,
 }
 
-/// Opens every node this reader wants that isn't already in `seen`, appending the paths it takes.
+/// A node this reader has settled, by path AND inode. The kernel hands out the lowest free
+/// `eventN` again, so a path alone would leave a keyboard plugged in where a skipped pad used to
+/// be unprobed for the rest of the stream; devtmpfs gives every new node a fresh inode.
+type Settled = (PathBuf, u64);
+
+/// Opens every node this reader wants that isn't already in `seen`, appending the nodes it takes.
 fn scan(
-    seen: &mut Vec<PathBuf>,
+    seen: &mut Vec<Settled>,
     shared: &Shared,
     remote_gone: &std::sync::mpsc::Sender<PathBuf>,
     next_source: &mut u32,
 ) -> Vec<Device> {
+    use std::os::unix::fs::DirEntryExt;
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         tracing::warn!("/dev/input unreadable — no HID input support");
         return Vec::new();
     };
-    let mut paths: Vec<PathBuf> = entries
+    let listed: Vec<Settled> = entries
         .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("event"))
-        })
-        .filter(|p| !seen.contains(p))
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("event")))
+        .map(|e| (e.path(), e.ino()))
         .collect();
+    // A settled node that is gone, or was recreated for another device, settles nothing now.
+    seen.retain(|node| listed.contains(node));
+    let mut nodes: Vec<Settled> = listed.into_iter().filter(|node| !seen.contains(node)).collect();
     // Stable order so log lines and device indices don't shuffle between scans.
-    paths.sort();
+    nodes.sort();
     let mut devices = Vec::new();
-    for path in paths {
+    for (path, ino) in nodes {
         if shared.stop.load(Ordering::Relaxed) {
             break;
         }
@@ -371,11 +386,11 @@ fn scan(
                 };
                 dev.source = *next_source;
                 *next_source = next;
-                seen.push(path);
+                seen.push((path, ino));
                 devices.push(dev);
             }
             Probe::Remote(fd) => {
-                seen.push(path.clone());
+                seen.push((path.clone(), ino));
                 let node = RemoteNode {
                     fd,
                     path,
@@ -385,8 +400,8 @@ fn scan(
                     remotes.push(node);
                 }
             }
-            // Opened and isn't ours — settled, no rescan will change that.
-            Probe::Skip => seen.push(path),
+            // Opened and isn't ours — settled until the node goes away.
+            Probe::Skip => seen.push((path, ino)),
             // Not marked seen: an unopenable node (`ENXIO`) looks like a not-yet-plugged
             // dongle, so the next rescan retries it.
             Probe::Unopenable => {}
@@ -405,7 +420,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         return Probe::Skip;
     };
     // SAFETY: NUL-terminated path, standard flags; failure is reported as -1, not UB.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     // Normal case, not a diagnostic: ~30 event nodes on this TV have no device (`ENXIO`) or
     // belong to groups we're not in.
     if fd < 0 {
@@ -565,8 +580,7 @@ impl RemoteNode {
     /// Reads every pending event, handing each key press to `pressed`. `false` once the node is
     /// gone.
     pub fn drain(&mut self, mut pressed: impl FnMut(u16)) -> bool {
-        let size = std::mem::size_of::<InputEventRaw>();
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; READ_BYTES];
         loop {
             // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -578,9 +592,7 @@ impl RemoteNode {
                 return false;
             }
             let n = n as usize;
-            for chunk in buf[..n].chunks_exact(size) {
-                // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
-                let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+            for ev in events(&buf[..n]) {
                 if ev.kind == EV_KEY && ev.value == 1 {
                     pressed(ev.code);
                 }
@@ -666,7 +678,7 @@ fn fd_uniq(fd: RawFd) -> Option<String> {
 pub fn node_uniq(path: &str) -> Option<String> {
     let c_path = std::ffi::CString::new(path).ok()?;
     // SAFETY: `c_path` is NUL-terminated and outlives the call.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     if fd < 0 {
         return None;
     }
@@ -779,13 +791,6 @@ fn scan_loop(
     let mut next_source = 1;
     let mut pending = None;
     while !shared.stop.load(Ordering::Relaxed) {
-        if let Some(found) = pending.take() {
-            match added.try_send(found) {
-                Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Full(found)) => pending = Some(found),
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-            }
-        }
         let due = last_scan.is_none_or(|at| at.elapsed() >= RESCAN_INTERVAL);
         if pending.is_none() && due {
             let first = last_scan.is_none();
@@ -803,11 +808,26 @@ fn scan_loop(
                 }
             }
         }
-        // Removals interrupt the scan interval.
-        let idle = last_scan.map_or(RESCAN_INTERVAL, |at| RESCAN_INTERVAL.saturating_sub(at.elapsed()));
+        // Handed over in the same pass as the scan that found them: before, they waited out the
+        // rest of the interval below first, so every stream start adopted its keyboard and mouse
+        // ~2 s late — ungrabbed, with SDL's pointer, meanwhile.
+        if let Some(found) = pending.take() {
+            match added.try_send(found) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(found)) => pending = Some(found),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+            }
+        }
+        // Removals interrupt the scan interval. A hand-over the reader has no room for yet is
+        // retried at the reader's own cadence rather than after the whole interval.
+        let idle = if pending.is_some() {
+            Duration::from_millis(POLL_TIMEOUT_MS as u64)
+        } else {
+            last_scan.map_or(RESCAN_INTERVAL, |at| RESCAN_INTERVAL.saturating_sub(at.elapsed()))
+        };
         match removed.recv_timeout(idle) {
             Ok(path) => {
-                seen.retain(|p| *p != path);
+                seen.retain(|(p, _)| *p != path);
                 // Freed node worth re-probing; reset mtime.
                 dir_mtime = None;
             }
@@ -848,8 +868,7 @@ fn pollfds(devices: &[Device]) -> Vec<libc::pollfd> {
 /// reports the kernel already queued, so summing costs no latency and beats a datagram per event
 /// at 1kHz (the host's own injector coalesces the same way).
 fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) {
-    let size = std::mem::size_of::<InputEventRaw>();
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; READ_BYTES];
     loop {
         // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
         let n = unsafe { libc::read(dev.fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -859,9 +878,9 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
         let n = n as usize;
         if let Some(pad) = dev.pad.as_mut() {
             let uniq = dev.uniq.as_deref();
-            pad.read(&buf[..n], size, &|rich| sink(HidReport::Rich(rich, uniq)));
+            pad.read(&buf[..n], &|rich| sink(HidReport::Rich(rich, uniq)));
         } else {
-            decode_hid(dev, &buf[..n], size, sink, keys);
+            decode_hid(dev, &buf[..n], sink, keys);
         }
         if n < buf.len() {
             break;
@@ -875,12 +894,8 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
 }
 
 /// Decodes one read burst off a mouse/keyboard node — see [`read_device`] for the drain.
-fn decode_hid(dev: &mut Device, buf: &[u8], size: usize, sink: &impl Fn(HidReport), keys: &KeyActivity) {
-    for chunk in buf.chunks_exact(size) {
-        // SAFETY: `InputEventRaw` is plain `repr(C)` integers with no padding
-        // invariants, and the chunk is exactly its size; read unaligned because the
-        // buffer offset carries no alignment guarantee.
-        let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+fn decode_hid(dev: &mut Device, buf: &[u8], sink: &impl Fn(HidReport), keys: &KeyActivity) {
+    for ev in events(buf) {
         match ev.kind {
             EV_REL if dev.mouse => match ev.code {
                 REL_X | REL_Y => {

@@ -212,7 +212,7 @@ impl Pads {
         self.slots.iter().map(move |s| pf_client_core::menu_nav::PadInfo {
             name: s.pad.name().unwrap_or_default(),
             key: s.index.to_string(),
-            pref: crate::core::settings::gamepad_pref(s.host_kind(setting)),
+            pref: s.host_kind(setting).to_core(),
             steam_virtual: false,
             battery: None,
             detail: format!("Player {}", s.index + 1),

@@ -123,19 +123,11 @@ fn run(stop: &AtomicBool) {
 /// nodes, which share its address. `I: Bus=0005` is Bluetooth — a wired pad publishes its MAC in
 /// `U: Uniq=` too, so the address alone would claim a link that is not there.
 pub fn bluetooth_pads(devices: &str) -> Vec<String> {
+    use super::proc_input;
     let mut out = Vec::new();
-    for block in devices.split("\n\n") {
-        let bluetooth = block.lines().any(|l| l.trim_start().starts_with("I: Bus=0005"));
-        let joystick = block
-            .lines()
-            .filter_map(|l| l.trim_start().strip_prefix("H: Handlers="))
-            .any(|h| h.split_whitespace().any(|n| n.starts_with("js")));
-        let address = block
-            .lines()
-            .find_map(|l| l.trim_start().strip_prefix("U: Uniq="))
-            .map(|u| u.trim().to_ascii_lowercase())
-            .filter(|u| !u.is_empty());
-        if let (true, true, Some(address)) = (bluetooth, joystick, address) {
+    for record in proc_input::records(devices) {
+        let joystick = proc_input::handlers(record).any(|h| h.starts_with("js"));
+        if let (true, true, Some(address)) = (proc_input::is_bluetooth(record), joystick, proc_input::uniq(record)) {
             if !out.contains(&address) {
                 out.push(address);
             }

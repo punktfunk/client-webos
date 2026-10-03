@@ -10,8 +10,8 @@ use punktfunk_core::hud::{HudCorner, HudLine, Role};
 use skia_safe::{Canvas, Color4f, RRect, Rect};
 
 use crate::console::ConsoleGl;
-use crate::core::event::MenuEvent;
 use crate::platform::webos::input::RemoteKey;
+use pf_client_core::menu_nav::{MenuDir, MenuEvent};
 
 mod dialog;
 pub(super) mod fade;
@@ -140,6 +140,22 @@ pub(super) fn frame(
     gl.flush();
     canvas.window().gl_swap_window();
     Ok(())
+}
+
+/// Whether a cosmetic frame drew, warning once per streak. webOS composites this app's
+/// punch-through plane only while it holds the SAM foreground, so a TV panel over the video —
+/// the settings one the remote opens — fails every GL call on this surface until it closes. That
+/// has to freeze the overlay and nothing else: the stream and calibration loops' `Err` leaves
+/// `run_inner` and ends the process.
+pub(super) fn drawn(result: Result<()>, warned: &mut bool) -> bool {
+    let Err(e) = result else {
+        *warned = false;
+        return true;
+    };
+    if !std::mem::replace(warned, true) {
+        tracing::warn!("overlay frame skipped — this surface is not ours to draw on: {e:#}");
+    }
+    false
 }
 
 /// Fully transparent: what the stream clears to so the video plane shows through.
@@ -460,7 +476,7 @@ impl ConfirmDialog {
             }
         };
         match nav {
-            Some(MenuEvent::Left | MenuEvent::Right) => {
+            Some(MenuEvent::Move(MenuDir::Left | MenuDir::Right)) => {
                 self.set_focus(1 - focus);
                 Some(ConfirmAction::Navigated)
             }

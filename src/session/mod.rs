@@ -7,8 +7,8 @@
 //!
 //! Audio takes one of two routes (`core::model::AudioRoutePref`) and always on a thread of its
 //! own: `audio`'s stage decodes (or forwards) into whichever `AudioSink` the route selected — the
-//! SDL device, or NDL's Opus plane. Neither shares the main loop, which carries the UI's software
-//! rasterizer.
+//! SDL device, or NDL's Opus plane. Neither shares the main loop, which draws the UI and the
+//! stream overlays (Skia on a GL context).
 //!
 //! The module is split by phase: `connect` runs the handshake, `pipeline` builds the decode path
 //! it settled on, `pump` keeps it fed, and `probe` holds the two handshake-only connections

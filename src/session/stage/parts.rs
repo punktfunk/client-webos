@@ -14,11 +14,11 @@ pub(super) enum PartStep {
 
 /// Slice-progressive reassembly bookkeeping (`punktfunk_core::session::FramePart`).
 ///
-/// On every NDL v2 session, AU prefixes arrive while the rest is still on the wire and the decoder
-/// gets a frame's first bytes without waiting for its last datagram — a real slice of a frame
-/// period at high bitrate, and pure latency: none of that wait is decode work. On a backend that
-/// can't take them (`Negotiated::clamp`) every delivery carries `part: None` and this is a
-/// pass-through.
+/// On a backend that takes them (`VideoSinkCaps::partial_au`), AU prefixes arrive while the rest is
+/// still on the wire and the decoder gets a frame's first bytes without waiting for its last
+/// datagram — a real slice of a frame period at high bitrate, and pure latency: none of that wait
+/// is decode work. No NDL generation takes them (both report `partial_au: false`, and `connect`
+/// keeps `frame_parts` off), so every delivery carries `part: None` and this is a pass-through.
 ///
 /// The contract enforced here is core's: parts arrive in order with no gaps, BUT the pre-decode
 /// hand-off may drop entries (memory pressure, a jump-to-live clear), so an `offset` that isn't the

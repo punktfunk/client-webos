@@ -153,9 +153,6 @@ impl Recovery {
             flags.index,
             ms(base_ns),
         );
-        if !self.take_keyframe_slot() {
-            return false;
-        }
         // A frame refused because the pipeline hasn't finished loading is NOT a decode error, and
         // gets neither loss response.
         //
@@ -168,12 +165,18 @@ impl Recovery {
         // the only caller of the feed-anyway escape, so the hold outlives its own cause — release
         // then needs the host's reanchor, evaluated only when a frame arrives, and a static desktop
         // sends none. Request a keyframe and let the next frame retry.
+        //
+        // A real decode error freezes the picture whether or not the throttle lets a request out:
+        // the throttle spaces REQUESTS, never the hold. The resume keyframe lands inside the
+        // window of the request the hold itself made, so gating the hold on the slot left a
+        // refused resume frame un-held — and fed the P-frames after it to a decoder that never
+        // got their reference. At most once per hold: holding skips every feed until a reanchor.
         if e.downcast_ref::<NotReady>().is_none() {
             if caps.flush {
                 let _ = sink.flush();
             }
             self.begin_hold();
         }
-        true
+        self.take_keyframe_slot()
     }
 }

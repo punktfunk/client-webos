@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_client_core::console::{OverlayAction, PointerButton, PointerInput, SessionPhase};
-use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuNav, MenuSample, PadInfo};
+use pf_client_core::menu_nav::{MenuEvent, MenuNav, MenuSample, PadInfo};
 use pf_console_ui::{Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, InputSource, Key, Platform, Viewport};
 
 use super::*;
@@ -110,8 +110,14 @@ pub(super) fn run(
     let mut last_pref: Option<Option<punktfunk_core::config::GamepadPref>> = None;
     let mut menu_out: Vec<MenuEvent> = Vec::new();
     let mut last_input = Instant::now();
-    let mut home_held = false;
-    let mut exit_held = false;
+    // Seeded from live key state, as the stream loop does: these are rising-edge polls, and the
+    // console is often entered BY a held Back — the EXIT gesture that left HDR calibration or
+    // cancelled a reconnect. Seeded `false`, its still-down key read as a fresh press on the
+    // first tick and quit the app.
+    let mut home_held =
+        crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_HOME_SCANCODE);
+    let mut exit_held =
+        crate::platform::webos::input::webos_scancode_down(crate::platform::webos::input::WEBOS_EXIT_SCANCODE);
     // The one resolver for the remote's own keys in this loop — see `RemoteKeys`.
     let mut remote_keys = crate::platform::webos::input::RemoteKeys::default();
     // A launch the shell committed: the connect runs while the shell keeps drawing its
@@ -168,7 +174,7 @@ pub(super) fn run(
                     RemoteKey::Blue if !console.editing() => {
                         if crate::core::caps::video_caps().hdr {
                             tracing::info!("console: opening HDR calibration");
-                            break 'ui UiOutcome::Calibrate;
+                            break 'ui UiOutcome::Calibrate(exit_plan(&service, identity));
                         }
                         handles
                             .console
@@ -433,7 +439,7 @@ pub(super) fn run(
             } else {
                 stored_kind
             };
-            crate::core::settings::gamepad_pref(kind)
+            kind.to_core()
         });
         // Rebuilt only when the legend it prints changes: every field but `pref` is fixed for
         // the life of the handle, and building it allocated four strings a frame.
@@ -498,8 +504,8 @@ fn art_snapshot() -> ArtSnapshot {
     }
 }
 
-/// Bring up (or reuse) the shell's GL context and make it current. Split out so the caller can
-/// answer a failure by handing the screen back rather than by failing the app.
+/// Bring up (or reuse) the shell's GL context and make it current — for the console and for
+/// every overlay frame (`overlay::frame`), which share the one context.
 /// `vsync` blocks the swap on the panel: true for a menu, whose loop has nothing else to do,
 /// false over live video — see [`ConsoleGl::set_swap_interval`].
 pub(super) fn bring_up<'a>(
@@ -674,21 +680,17 @@ fn pointer_button(button: sdl3::mouse::MouseButton) -> Option<PointerButton> {
     }
 }
 
-/// A remote or keyboard key as a menu move. The Magic Remote's own Back is NOT here: it has no `Keycode` rust-sdl3 can name, so the arm
-/// above matches it — with the colour keys — on the key event's `raw` evdev code instead.
+/// A remote or keyboard key as a menu move: the stream overlays' keys (`input::menu_event_for_key`)
+/// plus the shell's page jumps. OK never gets here — [`is_ok`] takes it first. The Magic Remote's
+/// own Back is NOT here either: it has no `Keycode` rust-sdl3 can name, so the arm above matches
+/// it — with the colour keys — on the key event's `raw` evdev code instead.
 fn menu_event(k: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     use sdl3::keyboard::Keycode as K;
-    Some(match k {
-        K::Up => MenuEvent::Move(MenuDir::Up),
-        K::Down => MenuEvent::Move(MenuDir::Down),
-        K::Left => MenuEvent::Move(MenuDir::Left),
-        K::Right => MenuEvent::Move(MenuDir::Right),
-        K::Backspace | K::Escape | K::AcBack => MenuEvent::Back,
-        K::Delete => MenuEvent::Secondary,
-        K::PageUp => MenuEvent::JumpBack,
-        K::PageDown => MenuEvent::JumpForward,
-        _ => return None,
-    })
+    match k {
+        K::PageUp => Some(MenuEvent::JumpBack),
+        K::PageDown => Some(MenuEvent::JumpForward),
+        _ => crate::platform::webos::input::menu_event_for_key(k),
+    }
 }
 
 /// The remote's OK and a keyboard's Enter: [`Console::ok`] takes both edges, never `menu_event`.

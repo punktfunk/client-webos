@@ -71,7 +71,8 @@ struct VideoPump {
     hud: Arc<punktfunk_core::hud::Stats>,
     /// Whether to drain host HDR metadata (false for SDR or non-HEVC).
     is_hdr: bool,
-    /// True when real audio rides the NDL plane; false when plane is silent metronome only.
+    /// True when real audio rides the NDL plane; false when the plane is left on its prime, or there
+    /// is none.
     audio_rides_plane: bool,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
@@ -112,7 +113,9 @@ impl VideoPump {
             drop_credit_expiry: None,
             heartbeat: Tick::new(HEARTBEAT),
             video_log: Tick::new(VIDEO_LOG_INTERVAL),
-            last_dropped: 0,
+            // The same reading as `last_dropped_seen`: the first window covers the pump's own
+            // run, not every drop the host made while NDL was still loading.
+            last_dropped: last_dropped_seen,
             last_holds: 0,
             last_held: Duration::ZERO,
         }
@@ -463,10 +466,20 @@ fn audio_drain(client: &NativeClient, stop: &AtomicBool, what: &str, mut play: i
 pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &AtomicBool) {
     let what = stage.sink_name();
     let mut packets: u32 = 0;
+    // Consecutive refused packets. Logged once per run rather than per packet: a decoder that is
+    // gone for good (`ndl::fatal`) refuses every one, 200 a second, until the video pump notices.
+    let mut failing: u32 = 0;
     audio_drain(client, stop, what, |packet| {
         if let Err(e) = stage.play(packet.seq, packet.pts_ns, &packet.data) {
-            tracing::warn!("audio error (seq {}): {e:#}", packet.seq);
+            if failing == 0 {
+                tracing::warn!("audio error (seq {}): {e:#}", packet.seq);
+            }
+            failing = failing.saturating_add(1);
             return;
+        }
+        if failing > 0 {
+            tracing::warn!("audio: playing again after {failing} refused packet(s)");
+            failing = 0;
         }
         packets = packets.wrapping_add(1);
         // ~15s, matching the video heartbeat (packets are 5ms each).
@@ -482,7 +495,8 @@ pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &A
     });
 }
 
-/// Spawns the audio thread for a session whose sink lives outside `connect` (SDL device).
+/// Spawns the audio thread feeding `stage`'s sink: the SDL device on the software route, the NDL
+/// plane on offload (`MediaPipeline::build`).
 pub fn spawn_audio_feed(
     client: Arc<NativeClient>,
     mut stage: AudioStage,

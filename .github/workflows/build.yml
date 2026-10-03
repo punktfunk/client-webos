@@ -3,15 +3,20 @@ name: Build
 on:
   push:
     branches: [main]
+    # `*` stops at `/`, so the root globs match root files only: nested build inputs (the
+    # toolchain pin, the cross target's codegen flags, these workflows) are listed by directory.
     paths: &build_inputs
       - '*.rs'
       - '*.toml'
       - '*.lock'
       - '*.yml'
+      - '.cargo/**'
+      - '.github/workflows/**'
       - 'assets/**'
       - 'packaging/**'
       - 'scripts/**'
       - 'src/**'
+      - 'taskfiles/**'
   pull_request:
     paths: *build_inputs
   release:

@@ -1,10 +1,8 @@
 //! Sends the session log to a paired host from the console's host menu. Blocking; the caller
 //! runs it on a worker.
+use crate::logger::MAX_LOG_BYTES;
 use crate::services::library::{self, LibraryError};
 use std::path::Path;
-
-/// The tail of the log that travels; the file itself rotates at this size too.
-const MAX_LOG_BYTES: u64 = 960 * 1024;
 
 /// Host endpoint and credentials resolved before starting the worker.
 /// Deliberately omits `Debug` because `identity` contains private key material.

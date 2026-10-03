@@ -5,8 +5,8 @@
 //! The compositor layer is normally kept quiet by `evdev`'s `EVIOCGRAB` — starved of reports,
 //! it stops drawing. But starving only stops *future* draws: an arrow already on screen when the
 //! stream starts stays painted until something retracts it, which is why the hide is also
-//! requested outright on each [`Cursor::apply`] and again once the grab is actually in place
-//! ([`Cursor::reassert_hidden`]).
+//! requested outright on each [`Cursor::apply`] — including the one that runs once the grab is
+//! actually in place ([`Cursor::disable_sdl_relative`]).
 //!
 //! Hiding is not enough on its own: the compositor's invisible branch "let cursor be updated by
 //! upcoming event" only marks the pointer hidden and waits for the next pointer event to repaint.
@@ -23,16 +23,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::thread::ThreadId;
-use std::time::{Duration, Instant};
 
 use sdl3::mouse::MouseUtil;
 use sdl3::video::Window;
 
 use super::sdl_webos;
-
-/// Debounce between compositor hide requests, so a caller pairing [`Cursor::reassert_hidden`]
-/// with a state change that already ran [`Cursor::apply`] doesn't duplicate the request.
-const REASSERT_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Global: shared with the panic hook, which has no [`Cursor`] to reach for.
 static COMPOSITOR_HIDDEN: AtomicBool = AtomicBool::new(false);
@@ -42,7 +37,6 @@ static OWNER_THREAD: OnceLock<ThreadId> = OnceLock::new();
 /// The local pointer's visibility on every layer, plus capture state. Drive from the SDL video thread.
 pub struct Cursor {
     mouse: MouseUtil,
-    last_assert: Instant,
     captured: bool,
     sdl_relative: bool,
     /// Whether the last [`set_compositor_visible`] was actually honoured — see [`Self::flush`].
@@ -53,7 +47,6 @@ impl Cursor {
     pub fn new(mouse: MouseUtil) -> Self {
         Self {
             mouse,
-            last_assert: Instant::now(),
             captured: false,
             sdl_relative: true,
             compositor_layer: false,
@@ -88,7 +81,6 @@ impl Cursor {
             .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
         self.compositor_layer = set_compositor_visible(!self.captured);
         COMPOSITOR_HIDDEN.store(self.captured, Ordering::Relaxed);
-        self.last_assert = Instant::now();
     }
 
     /// Nudges the compositor into acting on the last visibility change by warping its pointer —
@@ -127,18 +119,6 @@ impl Cursor {
         self.mouse.warp_mouse_in_window(window, x, y);
         self.mouse
             .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
-    }
-
-    /// Asks the compositor once more to drop its pointer. For the point where the evdev grab has
-    /// actually landed — [`apply`](Self::apply) runs before `evdev`'s background scan finds a
-    /// node, so any motion in that window can repaint the arrow it just retracted. No-op while
-    /// uncaptured.
-    pub fn reassert_hidden(&mut self) {
-        if !self.captured || self.last_assert.elapsed() < REASSERT_INTERVAL {
-            return;
-        }
-        set_compositor_visible(false);
-        self.last_assert = Instant::now();
     }
 }
 
