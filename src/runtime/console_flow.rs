@@ -49,6 +49,11 @@ pub(super) fn run(
 
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
+        version: Some(format!(
+            "{} \u{b7} core {}",
+            crate::core::VERSION,
+            env!("PF_CORE_VERSION")
+        )),
         deck: false,
         tv: true,
         // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
