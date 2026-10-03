@@ -182,7 +182,7 @@ impl NdlVideo {
                     pts_ms += PRIME_PACKET_MS;
                 }
             }
-            super::super::poll_until(PRIME_RETRY, || LOAD_COMPLETED.fired());
+            crate::platform::webos::poll_until(PRIME_RETRY, || LOAD_COMPLETED.fired());
         }
         tracing::info!(
             "NDL audio prime: LOADCOMPLETED after {:?} ({pts_ms}ms of silence)",

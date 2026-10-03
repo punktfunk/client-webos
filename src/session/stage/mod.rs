@@ -81,7 +81,7 @@ pub struct SinkConfig {
     pub report_decode_latency: bool,
 }
 
-/// Sampling cadence for the backlog diagnostic: one FFI call under the feed lock.
+/// Sampling cadence for the backlog diagnostic: one FFI call each.
 const BACKLOG_SAMPLE: Duration = Duration::from_millis(500);
 
 /// Everything between "an access unit arrived" and "the decoder has been fed", on any backend.
@@ -113,9 +113,7 @@ pub struct VideoStage {
     parts_fed: u64,
     /// When the backlog depth was last sampled — see [`Self::sample_backlog`].
     backlog_sampled: Option<Instant>,
-    /// The depth that sampling last saw, so the heartbeat's diagnostic can read a figure the
-    /// control path already paid for instead of taking NDL's lock again — see
-    /// [`Self::backlog_depth`].
+    /// The depth that sampling last saw, read by the heartbeat — see [`Self::backlog_depth`].
     last_backlog: Option<u32>,
     /// Completed access units fed this session. A plain counter, mirrored into the overlay's cell
     /// by the pump — nothing else writes it.
@@ -167,12 +165,6 @@ impl VideoStage {
         self.au_base_ns = None;
     }
 
-    /// This frame's stamp in the sink's own clock domain.
-    ///
-    /// A sink with a clock has no PTS clock of its own (NDL counts from its load),
-    /// so the host's capture PTS is mapped onto it (`session::timeline::Pacing`) — which is also what keeps
-    /// video and any audio plane in ONE timeline. A sink without one presents in feed order and
-    /// the stamp is discarded at the feed, so the host PTS passes through untouched.
     /// This AU's stamp: computed on the piece that opens it and repeated for the rest — see
     /// [`Self::au_base_ns`]. `partial` is whether this piece leaves the AU open.
     fn au_stamp_ns(&mut self, frame_pts_ns: u64, partial: bool) -> u64 {
@@ -184,6 +176,12 @@ impl VideoStage {
         base
     }
 
+    /// This frame's stamp in the sink's own clock domain.
+    ///
+    /// A sink with a clock has no PTS clock of its own (NDL counts from its load),
+    /// so the host's capture PTS is mapped onto it (`session::timeline::Pacing`) — which is also what keeps
+    /// video and any audio plane in ONE timeline. A sink without one presents in feed order and
+    /// the stamp is discarded at the feed, so the host PTS passes through untouched.
     fn pts_base_ns(&mut self, frame_pts_ns: u64) -> u64 {
         match self.sink.clock() {
             Some(clock) => {
@@ -410,7 +408,7 @@ mod tests {
         fn lead_ms(&self) -> i64 {
             0
         }
-        fn run_keepalive(&self, _stop: &AtomicBool, _yields_to_real: bool) {}
+        fn run_keepalive(&self, _stop: &AtomicBool, _route: &'static str) {}
     }
 
     /// Test decoder. Takes pieces, accepts/refuses per test config, reports depth, records stamps.
@@ -421,7 +419,6 @@ mod tests {
         broken: Arc<AtomicBool>,
         clock: Arc<FakeClock>,
         plane: Option<Arc<dyn AudioPlane>>,
-        fed: Mutex<Vec<u64>>,
     }
 
     impl Default for FakeSink {
@@ -432,7 +429,6 @@ mod tests {
                 broken: Arc::new(AtomicBool::new(false)),
                 clock: Arc::new(FakeClock::default()),
                 plane: None,
-                fed: Mutex::new(Vec::new()),
             }
         }
     }
@@ -449,14 +445,13 @@ mod tests {
                 flush: false,
             }
         }
-        fn feed(&self, _au: &[u8], pts_ns: u64) -> anyhow::Result<()> {
+        fn feed(&self, _au: &[u8], _pts_ns: u64) -> anyhow::Result<()> {
             if self.refuse {
                 return Err(NotReady.into());
             }
             if self.broken.load(Ordering::Relaxed) {
                 anyhow::bail!("decode error");
             }
-            self.fed.lock().expect("fed").push(pts_ns);
             Ok(())
         }
         fn queue_depth(&self) -> Option<u32> {
@@ -515,10 +510,6 @@ mod tests {
         let clock = Arc::clone(&sink.clock);
         // Recorder outlives the boxed sink; kept as Arc before sink transfer.
         let fed = Arc::new(Mutex::new(Vec::new()));
-        let sink = FakeSink {
-            fed: Mutex::new(Vec::new()),
-            ..sink
-        };
         let recorder = Arc::clone(&fed);
         let sink = RecordingSink { inner: sink, recorder };
         let stage = VideoStage::new(

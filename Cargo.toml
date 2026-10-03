@@ -36,7 +36,8 @@ tracing-appender = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mDNS LAN discovery; direct dep (not via pf-client-core — see services/discovery.rs docs).
-mdns-sd = "0.21"
+# No `async`: discovery only polls `try_recv`.
+mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 # mTLS game library fetch (services::library).
 # Use `rustls-no-provider` (not `rustls`) to defer crypto backend choice to rustls config below.
 ureq = { version = "3", features = ["rustls-no-provider", "rustls-webpki-roots"], default-features = false }
@@ -58,6 +59,8 @@ sdl3 = { version = "0.20", default-features = false }
 sdl3-sys = { version = "0.7", default-features = false }
 opus = "0.3"
 libc = "0.2"
+# Inflates the embedded third-party notices; already in the tree via png.
+miniz_oxide = "0.8"
 # Keep default features/textlayout for the prebuilt Skia archive.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
 
@@ -67,9 +70,10 @@ vendored-sdl3 = ["sdl3-sys/build-from-source"]
 
 [build-dependencies]
 serde_json = "1"
+miniz_oxide = "0.8"
 
 [profile.release]
-# Fat LTO inlines core hot paths; Docker defaults to thin/16.
+# Fat LTO inlines core hot paths; cargo's defaults are thin-local LTO and 16 CGUs.
 lto = "fat"
 codegen-units = 1
 # No catch_unwind; panic = crash either way. Abort saves binary size + landing pads.

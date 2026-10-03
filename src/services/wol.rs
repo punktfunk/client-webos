@@ -3,7 +3,7 @@
 use std::net::Ipv4Addr;
 
 /// Send magic packet to parseable MACs. Returns true if at least one sent.
-pub fn wake(macs: &[String], last_ip: Option<Ipv4Addr>) -> bool {
+fn wake(macs: &[String], last_ip: Option<Ipv4Addr>) -> bool {
     let parsed: Vec<[u8; 6]> = macs.iter().filter_map(|s| punktfunk_core::wol::parse_mac(s)).collect();
     if parsed.is_empty() {
         return false;

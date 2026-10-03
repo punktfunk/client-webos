@@ -58,7 +58,7 @@ the NDL plane.
   not the render thread.
 - **No panel-size correction.** The kit's design box is `height / 800` and its screens are laid out
   to fill it; a correction shortens the box and the screens run off the bottom instead of reflowing.
-- ⚠ **Swap interval is vsync in the menu, immediate over streams.** Menu loop needs blocking sleep; stream loop must not (same thread forwards input). Vsync adds ~16ms per UI action over stream. Pushed after `make_current` — interval is per SURFACE, shared by SDL renderer.
+- ⚠ **Swap interval is vsync in the menu, immediate over streams.** Menu loop needs blocking sleep; stream loop must not (same thread forwards input). Vsync adds ~16ms per UI action over stream. Pushed on change only: the window has no SDL renderer, so the console's context is its only one.
 
 ## Video decode (NDL DirectMedia)
 
@@ -201,7 +201,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 
 | Route | Label | Path | Layouts |
 | --- | --- | --- | --- |
-| `Software` (default) | Software (SDL) | libopus here → SDL device, NDL's clock plane on its metronome | up to 7.1 |
+| `Software` (default) | Software (SDL) | libopus here → SDL device, NDL's clock plane on its load prime | up to 7.1 |
 | `NdlOpus` | Offload (NDL) | Opus decoded by the TV; 5.1 re-encoded into NDL's layout first | 2, 5.1 |
 
 **Why software default:** NDL paces picture against fed audio plane; network-fed plane inherits arrival jitter (the stutter silent clock plane cured). Offload shorter, selectable for comparison; overlay names which ran (`Opus SW`/`HW`).
@@ -254,11 +254,11 @@ What matters:
 
 ⚠ **NDL paces picture only when load HAS audio plane PRIMED.** Video-only ignores PTS, presents at feed cadence vs 120Hz panel — "smooth 1080p, random above" stutter. CX: frames ~60ms ahead still `render_buffer_length` 0-1, stuttered; same+audio plane smooth.
 
-**Plane doesn't need feeding** (CX, 2026-09-16). 136s stale plane — idle, no host frames — picture paced normally, margins better than metronome. Load prime matters (aurora: one Opus frame at `LoadMedia`, nothing after). One set; `ndl_plane_feed=continuous` restores metronome.
+**Plane doesn't need feeding** (CX, 2026-09-16). 136s stale plane — idle, no host frames — picture paced normally, margins better than metronome. Load prime matters (aurora: one Opus frame at `LoadMedia`, nothing after). The metronome and its launch param are retired.
 
 **Every V2 load asks for stereo audio plane;** what rides it is separate:
 
-- **Software decode** (default) — `platform::webos::audio` decodes real audio→SDL; plane carries load prime only. `NdlVideo::run_clock_plane` watches (unconfirmed-plane check) unless launch param restores metronome.
+- **Software decode** (default) — `platform::webos::audio` decodes real audio→SDL; plane carries load prime only. `NdlVideo::run_clock_plane` watches (unconfirmed-plane check).
 - **Hardware Opus decode** (Audio processing→Offload, opt-in) — pump feeds real stream on video timeline; no SDL device opened.
 
 `run_clock_plane` runs both (`session::pipeline::spawn_plane_threads`). Metronome retired, only job is unconfirmed-plane check. Dead-capture filler gone: starved plane doesn't freeze picture.
@@ -280,7 +280,7 @@ Byte-exact with `mariotaku/ss4s` `ndl/webos5`: `sample_rate` in kHz (`48.0` not 
 
 ⚠ **`LOADCOMPLETED` not same thing every set, can't test plane before frame fed** (#188). 2025 QNED (webOS 10) reports it 26ms after first AU reaches decoder, never before: video-only misses 2s timeout, confirms when `ensure_loaded` gives up and feeds. CX ~40ms with no frame. Old code judged plane inside wait (pumps don't spawn until `session::connect` returns), QNED sessions read healthy plane as refused, fell back video-only, unpaced. That's #188 delay.
 
-Plane **asked for, kept confirmed or not.** `AUDIO_PRIME_BUDGET` (500ms) buys fast CX confirmation only; unconfirmed load taken, metronome feeds (ingest-gated sets eventually callback). `run_clock_plane` **not gated on `LOADCOMPLETED`** — prime's continuation; gating leaves unfed from prime-end to first frame. QNED seconds, covers ~100ms ingest NDL standing cushion.
+Plane **asked for, kept confirmed or not.** `AUDIO_PRIME_BUDGET` (500ms) buys fast CX confirmation only; unconfirmed load taken, prime keeps feeding until the callback (ingest-gated sets eventually send it). `run_clock_plane` **not gated on `LOADCOMPLETED`** — prime's continuation; gating leaves unfed from prime-end to first frame. QNED seconds, covers ~100ms ingest NDL standing cushion.
 
 ⚠ **No mid-session verdict, no in-session re-load.** One written for #188 reverted: couldn't be right (plane question resolution-independent, NDL `VideoInfo` no framerate; #188 4K120-HDR-only on set where 4K60/1440p120 fine). Re-apply HDR to new pipeline = mode-drop (fallback could break it). Rejected configs fail at load+fallback there — only fallback exists.
 
@@ -294,7 +294,7 @@ Load blocks `session::connect` between handshake and first `next_frame`. Anythin
 
 ⚠ **Prime stamps and player clock share origin — `load_instant` is load CALL**, where NDL PTS starts. Used to stamp after wait, domains differed by D, every consumer corrected — offload real lead `PLANE_LEAD_MS − D` ≈ 0 on CX. One origin removes all. `last_real_feed_ms` seeded at construction, not 0.
 
-⚠ **Metronome cushion `METRONOME_LEAD_MS` (80ms), not `PLANE_LEAD_MS` (40ms); one domain.** 80ms is depth 4K120 5.1 confirmed on (CX `plane_lead` 120 only vs lagging clock). Pinned there, not from TV load time. Under 80 = stutter risk; over = cheap (no lip sync). Knob for high-refresh stutter: walk UP vs `plane_lead`. Offload *fill* targets `PLANE_LEAD_MS` plus Smoothness extra (`set_plane_extra_lead_ms`), must match `play_audio` or real packets floor onto ceiling.
+⚠ **Retired: metronome cushion `METRONOME_LEAD_MS` (80ms).** The metronome and its constant are gone, and `PLANE_LEAD_MS` is 0 (aurora parity; see `ndl/v2/plane.rs`). Offload *fill* targets `PLANE_LEAD_MS` plus Smoothness extra (`set_plane_extra_lead_ms`), must match `play_audio` or real packets floor onto ceiling.
 
 ⚠ **Prime completes load.** Audio-enabled load doesn't report `LOADCOMPLETED` until plane received packet — but pumps don't spawn until `session::connect` returns. Deadlock = black picture, working sound, no error. `NdlVideo::prime_audio` feeds empty bursts through load window; CX turns "never" to `LOADCOMPLETED` in ~40ms. Prime's highest stamp seeds `last_audio_pts_ms`, first real packets floored not rewound.
 
@@ -335,7 +335,7 @@ Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone.
 - **Re-anchor triggers:** freeze-until-reanchor hold, via `reset_timeline`. Source interval snapshotted at build; if mid-session mode change becomes path, fix snapshot.
 - **Stamp sequence clamped monotonic per run** (`last_base_ns`): cushion shrinks between frames, NDL mutes on rewind. Only invariant whose break costs audio.
 - `late_stamps` (frames stamped behind player clock, judder) reported as `pacing:` heartbeat/`Pace` overlay.
-- **A/V offset = `plane_lead − cushion`** (`av=` heartbeat, `av ±Nms` overlay). Video pump holds both; both timestamp NDL's `elapsed_ns` (legal). Audio fixed `PLANE_LEAD_MS` ahead, picture mapped cushion ahead. Positive = sound behind. ⚠ Only where real audio (software plane = silent metronome, fiction). ⚠ Stamp domain: NDL decode+panel unobservable, bias picture later, true offset smaller. Trend/sign, never calibration. ⚠ Smoothness doesn't move it: same budget handed to plane (`set_plane_extra_lead_ms`), both shift, stays `PLANE_LEAD_MS − cushion`. Unmatched walks through zero (Smooth 2/60Hz = 33ms vs 40ms lead); sound ahead is more audible.
+- **A/V offset = `plane_lead − cushion`** (`av=` heartbeat, `av ±Nms` overlay). Video pump holds both; both timestamp NDL's `elapsed_ns` (legal). Audio fixed `PLANE_LEAD_MS` ahead, picture mapped cushion ahead. Positive = sound behind. ⚠ Only where real audio (software route: the plane carries only the prime, figure is fiction). ⚠ Stamp domain: NDL decode+panel unobservable, bias picture later, true offset smaller. Trend/sign, never calibration. ⚠ Smoothness doesn't move it: same budget handed to plane (`set_plane_extra_lead_ms`), both shift, stays `PLANE_LEAD_MS − cushion`. Unmatched, deeper settings walk sound ahead of picture, the more audible direction.
 - ⚠ **No diagnostic takes NDL FFI lock.** `render_buffer_length` behind same guard as `video_play`; query stalls next feed. Backpressure path samples depth every `BACKLOG_SAMPLE` (500ms); `backlog=` reads that sample, not own query. Figure up to one interval old, stale during hold (sampling suspended) — `holding` says so. Other per-frame (`feed_us`, `late_submit`, `min_slack`) gated on `timed`; only ungated clock read is pacing input.
 - ⚠ **Live counters on overlay, not log.** Periodic dump buries events (holds, refusals, slow feeds). `pacing:`/`video:` at TRACE (below usual `debug`). Overlay has all: cushion/jitter/late/slack, av stamp, plane_lead, backlog. Raise to TRACE offline only.
 - **`cushion` only figure moving with presentation setting.** `jitter` = measured residual (independent), `late` = cumulative from start. Watching either shows nothing (inert-looking setting).
@@ -344,7 +344,7 @@ Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone.
 
 **Slice-progressive feed stays off** (`frame_parts` never requested, `partial_au` false). Core's `FramePart` contract is only for decoders with a `PARTIAL_FRAME` capability, and a broken AU must flush — NDL has neither: it takes raw Annex-B and finds boundaries by start code (no partial-frame flag, v1 can't even repeat a timestamp across pieces), and mid-stream flush kills the audio plane permanently. `VIDEO_CAP_MULTI_SLICE` is not advertised, so the host sends single-slice pictures. `session::stage::parts` still implements the contract for a future sink that can honour it; the `partial_au` cap is what gates it.
 
-⚠ **Real audio on plane must carry lead or PICTURE stutters.** Plane queue depth paces video; offload = real packets only, wire-fed ≈ player clock, depth ≈ 0, renderer edge-underrun, stutter on jitter. Fixed by `PLANE_LEAD_MS` (40ms) added to every stamp in `play_audio`; clock plane targets same, neither pushes ceiling. NDL no depth arg; stamp-future only way. Cost: lip sync `PLANE_LEAD_MS` behind. Walk down vs `lead` overlay audio line/`plane_lead=` heartbeat (only observable places).
+⚠ **Superseded: a plane lead never paced the picture** (CX, 2026-09-16). A 40ms `PLANE_LEAD_MS` on every `play_audio` stamp was the old fix for offload stutter; at lead 0 the plane sat at 0 to −4ms depth with pacing unchanged and A/V roughly aligned. Now 0. Its one real job is offload jitter slack: if offload audio drops out on a lossy link, raise it first. Observable via the `lead` overlay audio line and `plane_lead=` heartbeat.
 
 - Unknowns: NDL plane depth (not `render_buffer_length`, no query), offload vs software where offload works. Both named overlay (`Opus SW`/`HW`) and log for reporting.
 - Not tried: **phase-locked capture** (core has protocol — `report_phase`+`CLIENT_CAP_PHASE_LOCK` — host aligns capture to panel grid, reduces latency not buffer, needs vblank anchor; NDL submit-only), **adaptive `PLANE_LEAD_MS`** offload.

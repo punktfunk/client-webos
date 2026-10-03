@@ -254,8 +254,12 @@ fn spawn_plane_threads(
     // Feed the plane on offload; software route's SDL device is managed elsewhere.
     let sink: Option<Arc<dyn AudioSink>> =
         (route != AudioRoutePref::Software).then(|| ndl.clone() as Arc<dyn AudioSink>);
-    let clock_thread = crate::platform::webos::ndl::spawn_clock_plane(ndl, stop.clone(), route.on_ndl_plane())
-        .context("spawn clock plane thread")?;
+    let clock_thread = crate::platform::webos::ndl::spawn_clock_plane(
+        ndl,
+        stop.clone(),
+        if route.on_ndl_plane() { "offload" } else { "software" },
+    )
+    .context("spawn clock plane thread")?;
     let Some(sink) = sink else {
         return Ok((None, Some(clock_thread)));
     };

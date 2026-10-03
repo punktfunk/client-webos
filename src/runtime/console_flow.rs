@@ -22,15 +22,15 @@ pub(super) use crate::console::ConsoleGl;
 /// otherwise spin this loop at whatever the GPU can manage.
 const TICK_BUDGET: Duration = Duration::from_millis(16);
 
-/// No input for this long and the shell is being looked at, not used: one extra frame period
-/// between swaps. Android's console does the same, for the same reason — an idle carousel
-/// should not keep a TV's panel at full rate. Any input restores it on the next frame.
-const IDLE_AFTER: Duration = Duration::from_secs(60);
+/// Once the shell reports itself idle (no input it saw for a minute), it is being looked at, not
+/// used: one extra frame period between swaps. Android's console does the same, for the same
+/// reason — an idle carousel should not keep a TV's panel at full rate. Any input restores it on
+/// the next frame.
 const IDLE_FRAME_STEP: Duration = Duration::from_millis(16);
 
 /// Run the shell until it commits a launch or asks to leave.
 pub(super) fn run(
-    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    window: &sdl3::video::Window,
     gl: &mut Option<ConsoleGl>,
     events: &mut sdl3::EventPump,
     game_controller: &sdl3::GamepadSubsystem,
@@ -45,7 +45,7 @@ pub(super) fn run(
     let handles = ConsoleHandles::new();
     let mut service = Service::new(handles.clone(), store.clone(), identity.clone());
 
-    let console_gl = bring_up(gl, canvas, true).context("console: GL host")?;
+    let console_gl = bring_up(gl, window, true).context("console: GL host")?;
 
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
@@ -83,7 +83,7 @@ pub(super) fn run(
     // behind the splash: one flush for the whole tour allocates every frame's textures at once.
     {
         let warm = Instant::now();
-        let (w, h) = canvas.window().size_in_pixels();
+        let (w, h) = window.size_in_pixels();
         if let Ok(surface) = console_gl.surface(w, h) {
             console.warm_up(surface.canvas(), &Viewport::plain(w, h), |canvas| {
                 if let Some(mut gpu) = canvas.direct_context() {
@@ -114,7 +114,6 @@ pub(super) fn run(
     // `Option` could not tell the two apart and left a removed pad's legend standing.
     let mut last_pref: Option<Option<punktfunk_core::config::GamepadPref>> = None;
     let mut menu_out: Vec<MenuEvent> = Vec::new();
-    let mut last_input = Instant::now();
     // Seeded from live key state, as the stream loop does: these are rising-edge polls, and the
     // console is often entered BY a held Back — the EXIT gesture that left HDR calibration or
     // cancelled a reconnect. Seeded `false`, its still-down key read as a fresh press on the
@@ -152,7 +151,7 @@ pub(super) fn run(
         // webOS is documented to hand back a drawable that is not the window it was asked for
         // (handoff trap 10), while SDL reports pointer events in WINDOW coordinates. The shell
         // hit-tests in surface pixels, so the two have to be reconciled before it sees them.
-        let scale = pointer_scale(canvas);
+        let scale = pointer_scale(window);
 
         for event in events.poll_iter() {
             use sdl3::event::Event;
@@ -169,7 +168,6 @@ pub(super) fn run(
             // and is left to arms that cannot match a keycode-less key anyway.
             if let Some(key) = remote {
                 use crate::platform::webos::input::RemoteKey;
-                last_input = Instant::now();
                 let ev = match key {
                     RemoteKey::Back => MenuEvent::Back,
                     // Green and Red make the shell's Secondary/Tertiary REACHABLE from a
@@ -224,7 +222,6 @@ pub(super) fn run(
                     keymod,
                     ..
                 } => {
-                    last_input = Instant::now();
                     let shift = keymod.intersects(sdl3::keyboard::Mod::LSHIFTMOD | sdl3::keyboard::Mod::RSHIFTMOD);
                     // OK acts on release; held, it opens the focused card's menu. In a field it
                     // presses the on-screen key: as a keyboard Enter it would close the field.
@@ -250,27 +247,22 @@ pub(super) fn run(
                         }
                     }
                     if let Some(ev) = menu_event(k) {
-                        if let Some(_pulse) = console.menu(ev, InputSource::Keys) {
-                            // Nothing to feel: the remote has no haptics, and the pad's own
-                            // rumble is the stream's lane (`session::pad_audio`).
-                        }
+                        // The haptic pulse is dropped: the remote has none, and the pad's own
+                        // rumble is the stream's lane (`session::pad_audio`).
+                        let _ = console.menu(ev, InputSource::Keys);
                     }
                 }
                 Event::KeyUp { keycode: Some(k), .. } if is_ok(k) => {
-                    last_input = Instant::now();
                     console.ok(false, InputSource::Keys);
                 }
                 Event::TextInput { text, .. } => {
-                    last_input = Instant::now();
                     console.text(&text);
                 }
                 Event::MouseMotion { x, y, .. } => {
-                    last_input = Instant::now();
                     let (x, y) = scale.at(x, y);
                     console.pointer(PointerInput::Move { x, y });
                 }
                 Event::MouseButtonDown { x, y, mouse_btn, .. } => {
-                    last_input = Instant::now();
                     if let Some(button) = pointer_button(mouse_btn) {
                         let (x, y) = scale.at(x, y);
                         console.pointer(PointerInput::Down {
@@ -284,7 +276,6 @@ pub(super) fn run(
                     }
                 }
                 Event::MouseButtonUp { x, y, mouse_btn, .. } => {
-                    last_input = Instant::now();
                     if let Some(button) = pointer_button(mouse_btn) {
                         let (x, y) = scale.at(x, y);
                         console.pointer(PointerInput::Up { x, y, button });
@@ -296,7 +287,6 @@ pub(super) fn run(
                     mouse_y,
                     ..
                 } => {
-                    last_input = Instant::now();
                     let (x, y) = scale.at(mouse_x, mouse_y);
                     console.pointer(PointerInput::Wheel { x, y, dy });
                 }
@@ -312,11 +302,6 @@ pub(super) fn run(
         }
         menu_out.clear();
         nav.poll(&sample, Instant::now(), &mut menu_out);
-        // What the synthesizer produced IS the pad's input — including the repeats a held
-        // direction generates, which a raw sample comparison would read as no movement.
-        if !menu_out.is_empty() {
-            last_input = Instant::now();
-        }
         for ev in menu_out.drain(..) {
             console.menu(ev, InputSource::Pad);
         }
@@ -390,7 +375,7 @@ pub(super) fn run(
                 // SDL owns the clipboard and it lives on this thread, which is why this is an
                 // action rather than a bus command.
                 OverlayAction::CopyText(text) => {
-                    if let Err(e) = canvas.window().subsystem().clipboard().set_clipboard_text(&text) {
+                    if let Err(e) = window.subsystem().clipboard().set_clipboard_text(&text) {
                         tracing::warn!("console: clipboard: {e}");
                     }
                 }
@@ -457,11 +442,11 @@ pub(super) fn run(
 
         // Draw.
         let mut idled = Duration::ZERO;
-        if last_input.elapsed() >= IDLE_AFTER {
+        if console.idle() {
             std::thread::sleep(IDLE_FRAME_STEP);
             idled = IDLE_FRAME_STEP;
         }
-        let (w, h) = canvas.window().size_in_pixels();
+        let (w, h) = window.size_in_pixels();
         // Read in place: a whole-document `snapshot` clone per frame allocates every known host.
         let stored_kind = store.with(|s| s.settings.gamepad_type());
         // 🛑 `None` unless a real pad is open, not the stored preference: this picks the GLYPH
@@ -509,7 +494,7 @@ pub(super) fn run(
         if let Some(report) = perf.frame(cpu, art_snapshot()) {
             tracing::info!("{}", report.line());
         }
-        canvas.window().gl_swap_window();
+        window.gl_swap_window();
 
         let elapsed = frame_start.elapsed();
         if elapsed < TICK_BUDGET {
@@ -549,19 +534,17 @@ fn art_snapshot() -> ArtSnapshot {
 /// false over live video — see [`ConsoleGl::set_swap_interval`].
 pub(super) fn bring_up<'a>(
     gl: &'a mut Option<ConsoleGl>,
-    canvas: &sdl3::render::Canvas<sdl3::video::Window>,
+    window: &sdl3::video::Window,
     vsync: bool,
 ) -> Result<&'a mut ConsoleGl> {
     if gl.is_none() {
         // The first entry of the process pays for the context and the shader warm-up; every
         // later one reuses both (see `ConsoleGl::ctx`).
-        *gl = Some(ConsoleGl::new(canvas.window(), canvas.window().subsystem())?);
+        *gl = Some(ConsoleGl::new(window, window.subsystem())?);
     }
     let gl = gl.as_mut().expect("just built");
-    // The stream overlays may have left the context current on another surface state.
-    gl.make_current(canvas.window())?;
-    // After `make_current`, since the interval belongs to the shared window surface.
-    gl.set_swap_interval(canvas.window().subsystem(), vsync);
+    gl.make_current(window)?;
+    gl.set_swap_interval(window.subsystem(), vsync);
     Ok(gl)
 }
 
@@ -723,9 +706,9 @@ impl PointerScale {
     }
 }
 
-fn pointer_scale(canvas: &sdl3::render::Canvas<sdl3::video::Window>) -> PointerScale {
-    let (win_w, win_h) = canvas.window().size();
-    let (draw_w, draw_h) = canvas.window().size_in_pixels();
+fn pointer_scale(window: &sdl3::video::Window) -> PointerScale {
+    let (win_w, win_h) = window.size();
+    let (draw_w, draw_h) = window.size_in_pixels();
     PointerScale {
         x: draw_w as f32 / win_w.max(1) as f32,
         y: draw_h as f32 / win_h.max(1) as f32,

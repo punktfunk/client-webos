@@ -44,7 +44,7 @@ struct App {
     fonts: pf_console_ui::theme::Fonts,
     identity: (String, String),
     events: sdl3::EventPump,
-    canvas: sdl3::render::WindowCanvas,
+    window: sdl3::video::Window,
     sdl_audio: sdl3::AudioSubsystem,
     game_controller: sdl3::GamepadSubsystem,
     _video: sdl3::VideoSubsystem,
@@ -52,7 +52,7 @@ struct App {
 }
 
 impl App {
-    /// SDL, the window and its renderer, and the client identity.
+    /// SDL, the window, and the client identity.
     fn bring_up() -> Result<Self> {
         // Stops webOS's launcher intercepting Back/Guide as its own shortcut (see `gamepad.rs`'s
         // BTN_GUIDE mapping). Must be set before window creation — these hints only latch there.
@@ -100,8 +100,8 @@ impl App {
             display_mode.refresh_rate
         );
 
-        // The stream clears to alpha 0 for NDL's punch-through plane, and the GLES2 renderer's EGL
-        // config carries no alpha channel by default — without this every transparent clear composites
+        // The stream clears to alpha 0 for NDL's punch-through plane, and the window's EGL config
+        // carries no alpha channel by default — without this every transparent clear composites
         // as opaque black. `.opengl()` below is what makes the attribute apply.
         video.gl_attr().set_alpha_size(8);
         // Skia clips paths against the stencil buffer, and the EGL config is chosen at window
@@ -116,12 +116,9 @@ impl App {
             .fullscreen()
             .build()
             .map_err(|e| anyhow::anyhow!("create window: {e}"))?;
-        // Named, so a GLES2 renderer that won't come up is a hard error rather than a silent fall back
-        // to SDL's software path (~25-45ms/frame on this SoC). The fork builds no Vulkan and webOS has
-        // no desktop GL, so GLES2 is the only accelerated renderer there is.
-        let canvas = sdl3::render::create_renderer(window, Some(c"opengles2"))
-            .map_err(|e| anyhow::anyhow!("create canvas: {e}"))?;
-        tracing::info!("window + canvas created (renderer: {})", canvas.renderer_name);
+        // No SDL renderer: everything on screen is Skia on the console's GL context
+        // (`console::gl`), which is the window's only one.
+        tracing::info!("window created");
 
         let events = sdl.event_pump().map_err(|e| anyhow::anyhow!("event pump: {e}"))?;
         crate::platform::webos::input::mute_unused_events();
@@ -136,7 +133,7 @@ impl App {
             fonts,
             identity,
             events,
-            canvas,
+            window,
             sdl_audio,
             game_controller,
             _video: video,
@@ -225,7 +222,7 @@ impl App {
         let text = format!("Connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
         let frame = overlay::frame(
             &mut self.console_gl,
-            &self.canvas,
+            &self.window,
             &self.fonts,
             self.display,
             overlay::TRANSPARENT,
@@ -296,7 +293,7 @@ pub(super) fn run_inner() -> Result<()> {
     // below it, which is the only reason this is a `break`-with-value rather than a `return`.
     let exit_plan = loop {
         let ui = console_flow::run(
-            &mut app.canvas,
+            &app.window,
             &mut app.console_gl,
             &mut app.events,
             &app.game_controller,
@@ -317,7 +314,7 @@ pub(super) fn run_inner() -> Result<()> {
             UiOutcome::Quit(plan) => break plan,
             UiOutcome::Calibrate(plan) => {
                 match calibration::run(
-                    &app.canvas,
+                    &app.window,
                     &mut app.console_gl,
                     &mut app.events,
                     &app.fonts,
@@ -357,7 +354,7 @@ struct Ended {
 
 /// What a stream borrows from the [`App`] for its length, plus the session itself.
 struct Cx<'a> {
-    canvas: &'a sdl3::render::WindowCanvas,
+    window: &'a sdl3::video::Window,
     gl: &'a mut Option<console_flow::ConsoleGl>,
     fonts: &'a pf_console_ui::theme::Fonts,
     display: (u32, u32),
@@ -423,6 +420,8 @@ struct Stream {
     /// The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
     ring: pf_console_ui::Ring,
     ring_was_open: bool,
+    /// When the dial's facts were last pushed; `None` owes a push on the next tick.
+    ring_facts_at: Option<std::time::Instant>,
     /// The disconnect dialog takes the pads too — see [`Stream::tick_dialog_shortcuts`].
     dialog_was_open: bool,
     /// The dial asked for the next stats tier.

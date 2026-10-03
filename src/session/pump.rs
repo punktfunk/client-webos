@@ -163,7 +163,7 @@ impl VideoPump {
             pts_ns: frame.pts_ns,
             index: frame.frame_index,
             part: frame.part,
-            reanchor: frame.flags & u32::from(FLAG_SOF) != 0 || frame.flags & USER_FLAG_RECOVERY_ANCHOR != 0,
+            reanchor: frame.flags & (u32::from(FLAG_SOF) | USER_FLAG_RECOVERY_ANCHOR) != 0,
             loss: self.note_loss(frame),
         };
         // Diagnostic only — see `VideoStage::sample_backlog`. Nothing steers on the reading.
@@ -279,9 +279,9 @@ impl VideoPump {
         publish(&self.stats.av_offset_ms, av_offset);
         // ⚠ **These are the OVERLAY's figures, and the overlay is where they belong** — everything
         // here is live on the stats overlay. Two lines are at DEBUG anyway, because the pacing
-        // baseline has to be capturable off a normal deploy and is read as one window.
-        // The per-frame video dump, which is
-        // what actually buries the events worth reading, stays at TRACE.
+        // baseline has to be capturable off a normal deploy and is read as one window. The
+        // per-frame video dump, which is what actually buries the events worth reading, stays at
+        // TRACE.
         if tracing_stats {
             // Neither counter measures on-glass cadence; final submission includes AU tail and FFI waits.
             tracing::debug!(

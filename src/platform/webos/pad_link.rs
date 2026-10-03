@@ -9,6 +9,7 @@
 //!
 //! Every Bluetooth pad, whatever it is: the batching is the link's, not the controller's. A wired pad
 //! is not on `bluetooth2` and is never listed ([`bluetooth_pads`]).
+use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -20,8 +21,8 @@ use super::ls2;
 /// allows — see `evdev::pad`. Taken by the keeper thread.
 pub static SNIFF_SUSPECT: AtomicBool = AtomicBool::new(false);
 
-const STOP_SNIFF_URI: &str = "luna://com.webos.service.bluetooth2/device/internal/stopSniff";
-const START_SNIFF_URI: &str = "luna://com.webos.service.bluetooth2/device/internal/startSniff";
+const STOP_SNIFF_URI: &CStr = c"luna://com.webos.service.bluetooth2/device/internal/stopSniff";
+const START_SNIFF_URI: &CStr = c"luna://com.webos.service.bluetooth2/device/internal/startSniff";
 
 /// Bounds a slip on a pad with no motion node, which nothing else can see. A call replies in 1–3 ms.
 const REASSERT: Duration = Duration::from_millis(250);
@@ -31,6 +32,8 @@ const SUSPECT_FLOOR: Duration = Duration::from_millis(200);
 const RESCAN: Duration = Duration::from_secs(2);
 /// How long a sniff-sized gap can wait for the thread to notice it.
 const TICK: Duration = Duration::from_millis(20);
+/// Wake-up while no Bluetooth pad is attached: only the rescan and the stop flag matter then.
+const IDLE_TICK: Duration = Duration::from_millis(250);
 
 /// The keeper thread; stops, gives the links back to the TV's policy and joins on drop.
 pub struct PadLink {
@@ -62,20 +65,18 @@ impl Drop for PadLink {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
             let _ = thread.join();
         }
     }
 }
 
 fn run(stop: &AtomicBool) {
-    let bus = match ls2::Bus::open() {
-        Ok(bus) => bus,
-        Err(e) => {
-            tracing::info!("pad link: no Luna bus ({e:#}); Bluetooth pads keep the TV's sniff policy");
-            return;
-        }
-    };
+    // Opened on the first Bluetooth pad: most sessions have none and need no registration.
+    let mut bus: Option<ls2::Bus> = None;
     let mut pads: Vec<String> = Vec::new();
+    // One `stopSniff` payload per pad, rebuilt only when the set changes.
+    let mut stop_payloads: Vec<CString> = Vec::new();
     let mut scanned: Option<Instant> = None;
     let mut asserted: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
@@ -88,32 +89,49 @@ fn run(stop: &AtomicBool) {
             if found != pads {
                 tracing::info!("pad link: holding {found:?} out of Bluetooth sniff");
                 asserted = None;
+                stop_payloads = found
+                    .iter()
+                    .filter_map(|address| CString::new(format!("{{\"address\":\"{address}\"}}")).ok())
+                    .collect();
                 pads = found;
             }
+            if bus.is_none() && !pads.is_empty() {
+                match ls2::Bus::open() {
+                    Ok(opened) => bus = Some(opened),
+                    Err(e) => {
+                        tracing::info!("pad link: no Luna bus ({e:#}); Bluetooth pads keep the TV's sniff policy");
+                        return;
+                    }
+                }
+            }
         }
+        let Some(bus) = &bus else {
+            // Parked, not slept: `Drop` unparks, so teardown never waits out the tick.
+            std::thread::park_timeout(IDLE_TICK);
+            continue;
+        };
         let suspect =
             SNIFF_SUSPECT.load(Ordering::Relaxed) && asserted.is_none_or(|t| now.duration_since(t) >= SUSPECT_FLOOR);
         if !pads.is_empty() && (suspect || asserted.is_none_or(|t| now.duration_since(t) >= REASSERT)) {
             SNIFF_SUSPECT.store(false, Ordering::Relaxed);
             asserted = Some(now);
-            for address in &pads {
-                let _ = bus.call(
-                    STOP_SNIFF_URI,
-                    &format!("{{\"address\":\"{address}\"}}"),
-                    ls2::Call::StopSniff,
-                );
+            for payload in &stop_payloads {
+                let _ = bus.call(STOP_SNIFF_URI, payload, ls2::Call::StopSniff);
             }
         }
         bus.pump();
-        std::thread::sleep(TICK);
+        std::thread::park_timeout(if pads.is_empty() { IDLE_TICK } else { TICK });
     }
+    let Some(bus) = bus else { return };
     // `startSniff` wants HCI Sniff Mode's own parameters, not the address alone (a bare address is
     // refused with a schema error). Slots are 0.625 ms: 96–124 is the TV's own ~77 ms policy, which
     // the pad still drives the menus under.
     for address in &pads {
         let payload =
             format!("{{\"address\":\"{address}\",\"minInterval\":96,\"maxInterval\":124,\"attempt\":4,\"timeout\":1}}");
-        let _ = bus.call(START_SNIFF_URI, &payload, ls2::Call::StartSniff);
+        if let Ok(payload) = CString::new(payload) {
+            let _ = bus.call(START_SNIFF_URI, &payload, ls2::Call::StartSniff);
+        }
     }
 }
 

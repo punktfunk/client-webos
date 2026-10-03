@@ -271,7 +271,7 @@ pub(super) enum Exit {
 
 /// Runs the calibration screen until it is saved, cancelled, or the app is asked to close.
 pub(super) fn run(
-    canvas: &sdl3::render::WindowCanvas,
+    window: &sdl3::video::Window,
     gl: &mut Option<console_flow::ConsoleGl>,
     events: &mut sdl3::EventPump,
     fonts: &pf_console_ui::theme::Fonts,
@@ -291,6 +291,10 @@ pub(super) fn run(
     let mut exit_held = true;
     // One line per streak of undrawable frames — see `overlay::drawn`.
     let mut overlay_warned = false;
+    // Nothing on the card animates: it is drawn when what it shows changes, once per buffer of
+    // the swap chain, and again after a frame that could not draw.
+    let mut shown = None;
+    let mut frames_owed = 0u8;
     let exit = 'screen: loop {
         let started = Instant::now();
         if QUIT_REQUESTED.load(Ordering::Relaxed) {
@@ -345,10 +349,19 @@ pub(super) fn run(
         } else {
             Color4f::new(0.0, 0.0, 0.0, 1.0)
         };
+        let state = (cal.step, cal.display, cal.presenting(), cal.stalled());
+        if shown != Some(state) {
+            shown = Some(state);
+            frames_owed = 2;
+        }
         // A TV panel over the pattern (picture settings, the natural thing to open here) fails
         // every GL call on this surface until it closes: the card freezes, the screen stays.
-        let frame = overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal));
-        overlay::drawn(frame, &mut overlay_warned);
+        if frames_owed > 0 {
+            let frame = overlay::frame(gl, window, fonts, display, clear, |f| draw(f, &cal));
+            if overlay::drawn(frame, &mut overlay_warned) {
+                frames_owed -= 1;
+            }
+        }
         let elapsed = started.elapsed();
         if elapsed < TICK {
             std::thread::sleep(TICK - elapsed);
@@ -358,7 +371,7 @@ pub(super) fn run(
     drop(cal);
     // The console redraws the whole surface on its first frame, so a wipe that could not draw
     // here costs nothing.
-    overlay::drawn(overlay::wipe(gl, canvas, fonts), &mut overlay_warned);
+    overlay::drawn(overlay::wipe(gl, window, fonts), &mut overlay_warned);
     Ok(exit)
 }
 

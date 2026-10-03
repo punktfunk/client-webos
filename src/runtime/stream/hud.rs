@@ -54,6 +54,7 @@ pub(super) struct Hud {
     last: Option<Instant>,
     /// One line per streak of undrawable frames — see `overlay::drawn`.
     warned: bool,
+    log_rows: overlay::LogRows,
     ring_drawn: u64,
     ring_drawn_at: Instant,
 }
@@ -93,6 +94,7 @@ impl Hud {
             was_active,
             last: None,
             warned,
+            log_rows: overlay::LogRows::default(),
             ring_drawn: 0,
             ring_drawn_at: Instant::now(),
         }
@@ -149,7 +151,7 @@ impl Hud {
 
     /// Clears the window, so a frame that is done does not stick over the video.
     pub(super) fn wipe(&mut self, cx: &mut Cx<'_>) -> bool {
-        let wipe = overlay::wipe(cx.gl, cx.canvas, cx.fonts);
+        let wipe = overlay::wipe(cx.gl, cx.window, cx.fonts);
         self.drawn(wipe)
     }
 
@@ -159,12 +161,8 @@ impl Hud {
     pub(super) fn draw(&mut self, cx: &mut Cx<'_>, ring: &mut pf_console_ui::Ring, dialog_shown: bool) {
         // `log_overlay_lines()` deferred to the throttled block below, not called every
         // ~2ms tick — it locks the same mutex log writes contend on ~500x/s.
-        let notif_frame = if dialog_shown {
-            None
-        } else {
-            self.notif.frame().map(|(t, a)| (t.to_string(), a))
-        };
-        let notif_active = notif_frame.is_some();
+        // Only the alpha here: the text is borrowed inside the draw, past the redraw gate.
+        let notif_active = !dialog_shown && self.notif.frame().is_some();
         let hint_frame = self
             .exit_hint_at
             .filter(|_| !dialog_shown)
@@ -213,15 +211,17 @@ impl Hud {
         let log_lines = log_overlay_lines();
         let pad = !cx.pads.is_empty();
         let (lines, tier, corner, scale) = (&self.lines, self.tier, self.corner, self.scale);
-        let frame = overlay::frame(cx.gl, cx.canvas, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
+        let log_rows = &mut self.log_rows;
+        let notif_frame = if notif_active { self.notif.frame() } else { None };
+        let frame = overlay::frame(cx.gl, cx.window, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
             if let Some(alpha) = stats_alpha {
                 overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
             }
-            if let Some(lines) = &log_lines {
-                overlay::log(f, lines);
+            if let Some(lines) = log_lines {
+                overlay::log(f, log_rows, lines);
             }
-            if let Some((text, alpha)) = &notif_frame {
-                overlay::toast(f, text, *alpha);
+            if let Some((text, alpha)) = notif_frame {
+                overlay::toast(f, text, alpha);
             }
             if let Some(alpha) = hint_frame {
                 overlay::exit_hint(f, exit_hint_text(pad), alpha);

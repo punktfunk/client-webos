@@ -37,6 +37,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 
 use super::device::{self, NdlGeneration};
+// Polled, not blocked on: every wait here is for a callback on NDL's own thread.
+use super::poll_until;
 
 #[cfg(test)]
 pub use v2::OPUS_51_SILENCE;
@@ -102,8 +104,6 @@ pub const AUDIO_PROVE_BUDGET: Duration = LOAD_COMPLETE_TIMEOUT;
 /// stale `LOADCOMPLETED` satisfying the retry's wait — and feeding an unloaded decoder is what
 /// turns a launch black.
 const CALLBACK_SETTLE: Duration = Duration::from_millis(400);
-
-const POLL: Duration = Duration::from_millis(2);
 
 /// A process-global NDL event, counted rather than flagged: a late event still increments, so it
 /// stays attributable to the load it came from — a sticky bool cannot tell "this load completed"
@@ -285,19 +285,6 @@ fn lock_ffi() -> MutexGuard<'static, ()> {
     FFI_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Sleeps in [`POLL`] steps until `done` or `limit` elapses; `true` if `done` won. Polled, not
-/// blocked on: every wait here is for a callback on NDL's own thread.
-fn poll_until(limit: Duration, done: impl Fn() -> bool) -> bool {
-    let start = Instant::now();
-    while !done() {
-        if start.elapsed() >= limit {
-            return false;
-        }
-        std::thread::sleep(POLL);
-    }
-    true
-}
-
 fn unload_count() -> u64 {
     UNLOAD_COMPLETED.count()
 }
@@ -472,12 +459,12 @@ pub fn log_audio_output() {
 pub fn spawn_clock_plane(
     plane: std::sync::Arc<dyn crate::core::media::AudioPlane>,
     stop: std::sync::Arc<AtomicBool>,
-    yields_to_real: bool,
+    route: &'static str,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("punktfunk-webos-clock".into())
         .spawn(move || {
-            plane.run_keepalive(&stop, yields_to_real);
+            plane.run_keepalive(&stop, route);
         })
 }
 
