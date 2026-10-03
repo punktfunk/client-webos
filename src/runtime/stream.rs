@@ -21,6 +21,34 @@ const TAP_PRESS: Duration = Duration::from_millis(50);
 /// `PROBE_WARMUP_CAP`), and until it lands the plane is black.
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(6);
 
+/// The first frame is on the plane, or it is late enough that a black plane beats a stale
+/// menu: a host that never sends must not hold the reveal forever.
+///
+/// `presented` is the signal because NDL's own `PLAYING` lands during `load()`, before anything
+/// is fed, and some sets report `LOADCOMPLETED` only once a frame has been.
+pub(super) fn first_frame_ready(since: Instant) -> bool {
+    crate::platform::webos::ndl::presented() || since.elapsed() >= FIRST_FRAME_WAIT
+}
+
+/// Blocks on [`first_frame_ready`] for a reconnect. The launch never comes here: the shell
+/// keeps animating through that wait instead.
+fn wait_first_frame() {
+    let started = Instant::now();
+    while !first_frame_ready(started) {
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    log_reveal(started.elapsed());
+}
+
+/// `presented` and `playing` at the moment the video plane is uncovered.
+pub(super) fn log_reveal(waited: Duration) {
+    tracing::info!(
+        "NDL reveal after {waited:?} (presented={} playing={})",
+        crate::platform::webos::ndl::presented(),
+        crate::platform::webos::ndl::playing(),
+    );
+}
+
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
 /// costs the connect budget (`budget::PROBE`) per attempt, with the toast up the whole time.
@@ -226,7 +254,7 @@ pub(super) fn run_inner() -> Result<()> {
         // A `let ... else` can't bind out of its own else arm, and the quit case is exactly
         // where the value is.
         let ConnectOutcome {
-            handle: connect_thread,
+            connected: first_dial,
             target,
             settings,
             gamepad_auto,
@@ -244,34 +272,38 @@ pub(super) fn run_inner() -> Result<()> {
         tracing::debug!("settings: {settings:?}");
 
         // One pass per dial: the launch, then each reconnect of a lost link (`RECONNECT_ATTEMPTS`).
-        let mut connect_thread = connect_thread;
+        // The launch was joined by the shell, which also waited out its first frame.
+        let mut first_dial = Some(first_dial);
+        let mut connect_thread: Option<crate::runtime::PendingConnect> = None;
         let mut reconnects: u8 = 0;
         let outcome = 'session: loop {
-            // A reconnect dial can be given up on from the remote; the first dial was waited
-            // out by the shell, which read the remote itself.
-            let gave_up = if reconnects > 0 {
-                wait_for_dial(&connect_thread, &mut events)
-            } else {
-                DialWait::Done
-            };
-            if gave_up != DialWait::Done {
-                tracing::info!("reconnect given up: {gave_up:?}");
-                drop(connect_thread);
-                if gave_up == DialWait::Quit {
-                    break 'session StreamOutcome::Quit;
+            let dialled = match connect_thread.take() {
+                None => first_dial.take().expect("only the launch has no thread"),
+                Some(handle) => {
+                    let gave_up = wait_for_dial(&handle, &mut events);
+                    if gave_up != DialWait::Done {
+                        tracing::info!("reconnect given up: {gave_up:?}");
+                        drop(handle);
+                        if gave_up == DialWait::Quit {
+                            break 'session StreamOutcome::Quit;
+                        }
+                        menu_notice = Some("Connection lost".to_string());
+                        break 'session StreamOutcome::ReturnToMenu;
+                    }
+                    let connected = handle.join().expect("connect thread panicked");
+                    if connected.is_ok() {
+                        // No menu is up to keep drawing: the toast holds until the first frame.
+                        wait_first_frame();
+                    }
+                    connected
                 }
-                menu_notice = Some("Connection lost".to_string());
-                break 'session StreamOutcome::ReturnToMenu;
-            }
-            // Joined BEFORE the window is cleared transparent, so the finished launch zoom stays
-            // on screen across the handshake and NDL load instead of a black punch-through hole,
-            // and a failed connect never uncovers the plane at all.
-            let connected = match connect_thread.join().expect("connect thread panicked") {
+            };
+            let connected = match dialled {
                 Ok(c) => c,
                 Err(e) if reconnects > 0 && reconnects < RECONNECT_ATTEMPTS => {
                     tracing::warn!("reconnect failed: {e:#}");
                     reconnects += 1;
-                    connect_thread = redial(
+                    connect_thread = Some(redial(
                         reconnects,
                         &mut console_gl,
                         &canvas,
@@ -279,7 +311,7 @@ pub(super) fn run_inner() -> Result<()> {
                         display,
                         &identity,
                         (&target, &settings),
-                    )?;
+                    )?);
                     continue 'session;
                 }
                 Err(e) => {
@@ -292,23 +324,6 @@ pub(super) fn run_inner() -> Result<()> {
             };
             tracing::info!("session connected, entering event loop");
             let session_started = Instant::now();
-            // `connect` returns with the load issued and the pump feeding; the reveal then waits for
-            // a frame to actually reach NDL, so the menu is swapped straight for live video. NDL's own
-            // `PLAYING` is NOT that signal — it lands during `load()`, before anything is fed, and
-            // `LOADCOMPLETED` is not one either: some sets report it only once a frame has been fed.
-            // Bounded — a host that never sends must not leave a stale menu frame up.
-            let reveal_wait = Instant::now();
-            let deadline = Instant::now() + FIRST_FRAME_WAIT;
-            while !crate::platform::webos::ndl::presented() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(4));
-            }
-            tracing::info!(
-                "NDL reveal after {:?} (presented={} playing={})",
-                reveal_wait.elapsed(),
-                crate::platform::webos::ndl::presented(),
-                crate::platform::webos::ndl::playing(),
-            );
-
             // `hide()` unmaps the surface entirely, silently breaking the Magic Remote's pointer
             // forwarding since Wayland has nowhere left to route motion. aurora-tv never hides its
             // window either — stays mapped, cleared fully transparent so the video shows through.
@@ -1188,7 +1203,7 @@ pub(super) fn run_inner() -> Result<()> {
             }
             reconnects += 1;
             menu_notice = None;
-            connect_thread = redial(
+            connect_thread = Some(redial(
                 reconnects,
                 &mut console_gl,
                 &canvas,
@@ -1196,7 +1211,7 @@ pub(super) fn run_inner() -> Result<()> {
                 display,
                 &identity,
                 (&target, &settings),
-            )?;
+            )?);
         };
         match outcome {
             StreamOutcome::Quit => break 'menu exit_plan,
