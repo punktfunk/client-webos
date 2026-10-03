@@ -1,5 +1,5 @@
-//! NDL's audio plane: the Opus feed the picture is paced against, and the silent metronome that
-//! keeps it fed.
+//! NDL's audio plane: the Opus feed the picture is paced against, and the clock plane that
+//! carries its load prime until NDL confirms the load.
 //!
 //! A fed audio plane is what makes NDL pace the picture at all (docs/NOTES.md § "NDL's audio
 //! plane"), so this is video machinery that happens to carry sound.
@@ -99,8 +99,8 @@ pub(super) const PLANE_CONFIRM_GRACE: Duration = Duration::from_millis(750);
 ///
 /// **Every accepted V2 load asks for a plane** — NDL only paces the picture against a fed audio
 /// plane (docs/NOTES.md § "NDL's audio plane"). The offload route puts the session's Opus on it;
-/// every other session runs [`NdlVideo::run_clock_plane`]'s metronome instead, whose silence
-/// [`silence`] shapes to the same channel count.
+/// every other session leaves it on the load's prime ([`NdlVideo::run_clock_plane`] carries that
+/// until confirmation), whose silence [`silence`] shapes to the same channel count.
 pub(super) fn plane_config(channels: u8) -> ffi::AudioUnion {
     ffi::AudioOpusInfo {
         kind: 3, // NDL_AUDIO_TYPE_OPUS
@@ -163,9 +163,10 @@ impl NdlVideo {
         let target_ms = now_ms + PLANE_LEAD_MS + self.extra_lead_ms();
         {
             let _ffi = lock_ffi();
-            // Floor only: `target_ms` is already ahead of anything the clock plane can have fed,
-            // so this bites solely on a packet arriving out of order or inside the same
-            // millisecond as its predecessor.
+            // Floor only. It bites on a packet arriving out of order or inside the same
+            // millisecond as its predecessor — and, [`PLANE_LEAD_MS`] being below the prime's
+            // lead, on the first packets after the handover, until the clock passes the prime's
+            // last ceiling.
             let pts_ms = self
                 .last_audio_pts_ms
                 .fetch_max(target_ms, Ordering::Relaxed)
@@ -289,7 +290,7 @@ impl NdlVideo {
         self.last_audio_pts_ms.load(Ordering::Relaxed) - (self.elapsed_ns() / 1_000_000) as i64
     }
     /// Whether the REAL stream may ride the plane: this load asked for one AND NDL has confirmed
-    /// it. The silent metronome does not ask this — see [`Self::run_clock_plane`].
+    /// it. The prime's carry does not ask this — see [`Self::run_clock_plane`].
     ///
     /// Both halves matter. The callback latch alone is not enough: a video-only load confirms
     /// normally and has no audio arm, and feeding that is a silent session. [`Self::feed_unblocked`]

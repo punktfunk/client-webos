@@ -2,8 +2,7 @@
 //! https://<host>:<mgmt_port>/api/v1/library`, mTLS-authenticated by this device's
 //! paired identity (no bearer token — the host authorizes by client certificate).
 //! A trimmed port of `pf-client-core::library` (same wire shape, same mTLS pinning
-//! verifier) rather than a dependency on that crate — see `session.rs`'s module docs
-//! for why this client doesn't pull in `pf-client-core` at all.
+//! verifier).
 use std::sync::Arc;
 
 use ureq::unversioned::resolver::DefaultResolver;
@@ -80,7 +79,7 @@ pub(crate) fn base_url(addr: &str, mgmt_port: u16) -> String {
 }
 
 /// Builds mTLS `ureq::Agent` reusable across requests (avoids repeated TLS handshakes).
-/// Exposed for art.rs to build once outside its per-game loop.
+/// Exposed for `console::model` to build once outside its per-game art loop.
 pub fn agent(identity: &(String, String), pin: Option<[u8; 32]>) -> Result<ureq::Agent, LibraryError> {
     agent_within(identity, pin, crate::services::budget::REQUEST)
 }
@@ -223,6 +222,8 @@ pub struct GamesLoaded {
     pub host: String,
     pub port: u16,
     pub mgmt_port: u16,
+    /// The pin the list was fetched under, so the covers that follow it are held to the same one.
+    pub fingerprint: Option<[u8; 32]>,
     pub result: Result<Vec<GameEntry>, LibraryError>,
 }
 
@@ -245,6 +246,7 @@ pub fn load_games_async(
                 host,
                 port,
                 mgmt_port,
+                fingerprint,
                 result,
             });
         })
@@ -252,14 +254,14 @@ pub fn load_games_async(
     rx
 }
 
-/// Fetches one piece of cover art's raw bytes (JPEG/PNG, undecoded) from a
-/// host-relative `art_path` (one of `GameEntry::art`'s fields), reusing an
-/// already-built `agent` (see `fetch_games`) to avoid a fresh mTLS handshake per
-/// cover. Decoding happens in `art.rs`, off this module's REST concern.
 /// Content types this build can decode. CDNs ignoring this header (Steam) send WebP, caught
 /// from the header before body downloads. `q=0.1` on wildcard keeps hosts that ignore headers working.
 const ART_ACCEPT: &str = "image/jpeg,image/png,image/*;q=0.1";
 
+/// Fetches one piece of cover art's raw bytes (JPEG/PNG, undecoded) from a
+/// host-relative `art_path` (one of `GameEntry::art`'s fields), reusing an
+/// already-built `agent` (see `fetch_games`) to avoid a fresh mTLS handshake per
+/// cover. Decoding happens in `art.rs`, off this module's REST concern.
 pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str) -> Result<Vec<u8>, LibraryError> {
     // Some hosts hand back a full external URL (e.g. a SteamGridDB CDN link) instead
     // of a host-relative path — that can't go through the pinned agent (wrong CA,
@@ -320,14 +322,16 @@ pub(crate) fn classify(e: ureq::Error) -> LibraryError {
     match e {
         ureq::Error::StatusCode(401 | 403) => LibraryError::NotPaired,
         ureq::Error::StatusCode(code) => LibraryError::Http(code),
-        // The one rejection our own `PinVerify` (below) actually raises on a mismatch —
-        // matched on the typed `rustls::Error` ureq 3.x's `Error::Rustls` now carries,
-        // instead of the string-matching `Transport(t)` message-sniffing ureq 2.x forced.
-        ureq::Error::Rustls(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::ApplicationVerificationFailure,
-        )) => LibraryError::PinMismatch,
-        // TLS runs on an open socket, so the host is up whatever the handshake decided.
-        ureq::Error::Rustls(e) => LibraryError::Tls(e.to_string()),
+        ureq::Error::Rustls(e) => classify_tls(&e),
+        // Where a handshake failure actually arrives on the pinned lane: `PinnedTlsTransport`'s
+        // handshake runs lazily inside its first write or read (`rustls::StreamOwned`), and
+        // rustls hands the error back wrapped in an `io::Error(InvalidData, ..)` — which ureq
+        // files under `Io`, not `Rustls`. Unwrapped here, or a changed host certificate reads as
+        // a host that isn't answering and gets offered a Retry.
+        ureq::Error::Io(io) => match io.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()) {
+            Some(tls) => classify_tls(tls),
+            None => LibraryError::Unreachable(ureq::Error::Io(io).to_string()),
+        },
         ureq::Error::Tls(what) => LibraryError::Tls(what.to_string()),
         // Connect carries its own (shorter) budget, so it is what expires when nothing is
         // listening; any later timeout means the connection came up and the host went quiet.
@@ -338,6 +342,18 @@ pub(crate) fn classify(e: ureq::Error) -> LibraryError {
         // Malformed HTTP is still a reply.
         ureq::Error::Protocol(e) => LibraryError::BadReply(e.to_string()),
         other => LibraryError::Unreachable(other.to_string()),
+    }
+}
+
+/// A rustls failure, however ureq delivered it. TLS runs on an open socket, so the host is up
+/// whatever the handshake decided.
+fn classify_tls(e: &rustls::Error) -> LibraryError {
+    match e {
+        // The one rejection our own `PinVerify` (below) raises on a mismatch.
+        rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure) => {
+            LibraryError::PinMismatch
+        }
+        other => LibraryError::Tls(other.to_string()),
     }
 }
 
@@ -448,6 +464,26 @@ mod tests {
         })
         .expect("the walk ends");
         assert_eq!((calls, games.len()), (2, 2));
+    }
+
+    /// A pin mismatch is told apart from an unreachable host however ureq delivers it — typed,
+    /// or wrapped in the `io::Error` the pinned transport's lazy handshake actually produces.
+    #[test]
+    fn a_pin_mismatch_is_not_an_unreachable_host() {
+        let mismatch = || rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure);
+        assert!(matches!(
+            classify(ureq::Error::Rustls(mismatch())),
+            LibraryError::PinMismatch
+        ));
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, mismatch());
+        assert!(matches!(classify(ureq::Error::Io(wrapped)), LibraryError::PinMismatch));
+        let other_tls = std::io::Error::new(std::io::ErrorKind::InvalidData, rustls::Error::DecryptError);
+        assert!(matches!(classify(ureq::Error::Io(other_tls)), LibraryError::Tls(_)));
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(matches!(
+            classify(ureq::Error::Io(refused)),
+            LibraryError::Unreachable(_)
+        ));
     }
 
     #[test]

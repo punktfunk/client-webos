@@ -65,8 +65,8 @@ impl<S> Filter<S> for CaptureFilter {
 
     /// Keep the hint bounded to the current level. An unbounded filter lowers
     /// tracing's global static max-level, forcing extra per-event callsite checks
-    /// (down to `trace!`) instead of a cached `never`. `handle.modify` in
-    /// `level::set_level_override` refreshes interest when this changes.
+    /// (down to `trace!`) instead of a cached `never`. The level is fixed at startup, so the
+    /// hint never changes.
     fn max_level_hint(&self) -> Option<LevelFilter> {
         Some(level::ordinal_to_filter(level::current_ordinal()))
     }

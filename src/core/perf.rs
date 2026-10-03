@@ -9,10 +9,10 @@
 //! needing a shell on the TV. They are emitted on a timer and once on the way out — a handful
 //! of lines per session rather than a stream.
 //!
-//! Ungated on purpose, and holding every decision this makes: the console module is armv7-only,
-//! and `task test` builds the host target, so anything asserted behind that gate would compile
-//! and never run. The caller passes the art counters in rather than this module reading them,
-//! which is what keeps the shell's types out of here.
+//! Ungated on purpose, and holding every decision this makes: the console module is Linux-only,
+//! so anything asserted behind that gate never runs in a macOS `task test`. The caller passes
+//! the art counters in rather than this module reading them, which is what keeps the shell's
+//! types out of here.
 
 use std::time::{Duration, Instant};
 

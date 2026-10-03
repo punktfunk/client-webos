@@ -1,19 +1,19 @@
 //! The settings document, in punktfunk's shared shape.
 //!
 //! `settings.json` persists [`pf_client_core::trust::Settings`] — the same struct the desktop
-//! shells, the session binary and the Android client write. This module is the only place that
-//! knows how this client's in-memory [`Settings`] maps onto it, so there is ONE stored schema
-//! and two presentations of it: the existing webOS UI, and the shared gamepad shell, which
-//! speaks `trust::Settings` natively and therefore needs no conversion at all.
+//! shells, the session binary and the Android client write, and this client's in-memory
+//! [`Settings`] is that struct too: ONE stored schema, presented by the shared gamepad shell,
+//! which speaks `trust::Settings` natively and therefore needs no conversion at all. What lives
+//! here is the rest — host records, row keys, the profile catalog and the launch merge.
 //!
 //! Anything punktfunk has no field for rides in `trust::Settings::extra`, a `#[serde(flatten)]`
 //! map that every writer round-trips untouched. That is what keeps a TV-only row — HDR
-//! calibration, the LG game-mode toggle, the log level — from either being dropped by another
-//! client or forced into the shared struct. Android's platform rows use the same mechanism.
+//! calibration, the audio route — from either being dropped by another client or forced into the
+//! shared struct. Android's platform rows use the same mechanism.
 //!
 //! ⚠ Two in-memory views of one file can drift within a session. The shell re-reads through
-//! `SettingsStore::load` before every mutation, and the flip must reload the other side when it
-//! switches; nothing here can enforce that.
+//! `SettingsStore::load` before every mutation, and the menu reloads the document on every entry;
+//! nothing here can enforce that.
 
 use pf_client_core::trust;
 
@@ -50,9 +50,8 @@ pub fn known_host_key(h: &crate::core::model::KnownHost) -> String {
 
 /// The record a shell row key addresses, or `None` if it names no host this client knows.
 ///
-/// A pinned-profile card's key is `<host key>\0<profile id>`. This client mints none (it has
-/// no profile catalog — see `store::console::ConsoleStore::profiles`), but the key is the
-/// shell's shape, not ours, so the suffix is trimmed rather than trusted to be absent.
+/// A pinned-profile card's key is `<host key>\0<profile id>` (`console::model` mints one per pin
+/// from `Persisted::profiles`). The card addresses its host, so the suffix is trimmed.
 pub fn find_known(hosts: &[crate::core::model::KnownHost], key: &str) -> Option<usize> {
     let key = key.split('\0').next().unwrap_or(key);
     hosts.iter().position(|h| known_host_key(h) == key)

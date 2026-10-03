@@ -1,5 +1,5 @@
-//! webOS NDL `DirectMedia` video. Video only; audio goes through SDL
-//! (`platform::webos::audio`).
+//! webOS NDL `DirectMedia` video, plus v2's Opus audio plane (the offload route's `AudioSink`);
+//! software-decoded audio goes through SDL (`platform::webos::audio`).
 //!
 //! Two generations of the same C API, in the same device library, chosen by
 //! `device::ndl_generation()` from the detected `sdkVersion`:
@@ -93,8 +93,8 @@ pub const AUDIO_PRIME_BUDGET: Duration = Duration::from_millis(500);
 /// asked for the offload route. Longer than [`AUDIO_PRIME_BUDGET`] on purpose: an unconfirmed
 /// plane costs that session the route outright (`AudioPlane::accepts_stream`), and the route is
 /// picked once, before a frame has been fed, so an answer arriving later cannot be used. Every
-/// other session takes the short budget and loses nothing by it — the metronome rides an
-/// unconfirmed plane happily, and that is what paces the picture.
+/// other session takes the short budget and loses nothing by it — the clock plane carries the
+/// prime through an unconfirmed load, and that is what paces the picture.
 pub const AUDIO_PROVE_BUDGET: Duration = LOAD_COMPLETE_TIMEOUT;
 
 /// Grace for a rejected load's callbacks to land before the video-only retry arms. The callback
@@ -150,9 +150,9 @@ impl EventSeq {
 
 static LOAD_COMPLETED: EventSeq = EventSeq::new();
 static UNLOAD_COMPLETED: EventSeq = EventSeq::new();
-/// NDL's own present-pipeline signal (docs/NDL-FRAMERATE-INVESTIGATION.md). Measured on a G5:
-/// it lands during `load()`, BEFORE any frame is fed, so it says nothing about there being a
-/// picture — kept for the log line only, never as a reveal gate (see [`FRAME_FED`]).
+/// NDL's own present-pipeline signal. Measured on a G5: it lands during `load()`, BEFORE any
+/// frame is fed, so it says nothing about there being a picture — kept for the log line only,
+/// never as a reveal gate (see [`FRAME_FED`]).
 static PLAYING: EventSeq = EventSeq::new();
 /// Bumped by the first feed NDL accepts for the armed load. This, not `PLAYING`, is what makes
 /// uncovering the punch-through plane safe: before it there is provably nothing on the plane,
@@ -327,11 +327,11 @@ fn wait_load_completed() -> bool {
     false
 }
 
-/// Count of video/audio pump threads leaked past `SHUTDOWN_JOIN_TIMEOUT` (see
-/// `session::join`), not yet confirmed exited. A leaked thread may still be
-/// inside an `NDL_Direct*` call and still holds a live decode session with its own
-/// unsynchronized `ffi` mutex — a second load on top of that races it instead of starting
-/// clean, reproducing as an undecodable stream rather than a clean failure.
+/// Count of NDL-touching threads leaked past `SHUTDOWN_JOIN_TIMEOUT` (see
+/// `services::join`), not yet confirmed exited. A leaked thread may still be
+/// inside an `NDL_Direct*` call and still holds a live decode session — a second load on top
+/// of that races it instead of starting clean, reproducing as an undecodable stream rather than
+/// a clean failure.
 ///
 /// No way to force this: an OS thread can't be safely cancelled mid-FFI-call, and racing the
 /// unload against it is the exact hazard this guards against. So every `load()` refuses while
@@ -428,10 +428,13 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 fn ensure_init(app_id: &str, api2: bool) -> Result<()> {
     // The last session may still be unloading behind the menu.
     await_teardown();
+    // Resolved before the flag flips: a library that fails to resolve must not leave `INIT_DONE`
+    // set with nothing initialised (every later call would answer `Ok`), and `quit` relies on a
+    // set flag meaning the table resolved.
+    let fns = ffi::common()?;
     if INIT_DONE.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    let fns = ffi::common()?;
     let c_app_id = CString::new(app_id).unwrap_or_default();
     if let Err(e) = fns.init(&c_app_id, api2) {
         INIT_DONE.store(false, Ordering::SeqCst);
@@ -460,11 +463,12 @@ pub fn log_audio_output() {
     tracing::info!("NDL audio output: {:?}", ffi::multichannel_pcm_status());
 }
 
-/// Spawns the metronome that keeps the audio plane fed.
+/// Spawns the clock plane, which carries the load's prime until `LOADCOMPLETED` (see
+/// `NdlVideo::run_clock_plane`).
 ///
 /// NDL paces the *picture* off a fed audio plane — without one it ignores presentation times and
-/// the picture stalls (docs/NOTES.md § "NDL's audio plane"). Spawned for a stream whose audio
-/// decodes in software, and for the HDR calibration feed.
+/// the picture stalls (docs/NOTES.md § "NDL's audio plane"). Spawned for every stream whose load
+/// got a plane, and for the HDR calibration feed.
 pub fn spawn_clock_plane(
     plane: std::sync::Arc<dyn crate::core::media::AudioPlane>,
     stop: std::sync::Arc<AtomicBool>,

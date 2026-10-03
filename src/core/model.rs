@@ -54,8 +54,10 @@ impl PartialEq for KnownHost {
     }
 }
 
-/// 0.33.0), which need the pairing's Host power grant. Defaults to [`Self::None`]: a client
-/// that quietly powered a machine down would be worse than one that never offered to.
+/// What to do to a host when the app exits: nothing, or one of the host's power actions
+/// (`services::power`, host-side from `punktfunk-core` 0.33.0), which need the pairing's Host
+/// power grant. Defaults to [`Self::None`]: a client that quietly powered a machine down would be
+/// worse than one that never offered to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitAction {
@@ -287,7 +289,9 @@ pub enum GamepadType {
 }
 
 impl GamepadType {
-    /// The wire preference sent in the handshake, which becomes the session-default pad kind.
+    /// The wire preference sent in the handshake, which becomes the session-default pad kind —
+    /// and the name the shared settings document stores, and what the console shell picks its
+    /// button-glyph legend by.
     pub fn to_core(self) -> punktfunk_core::config::GamepadPref {
         use punktfunk_core::config::GamepadPref as P;
         match self {
@@ -298,6 +302,22 @@ impl GamepadType {
             Self::DualSenseEdge => P::DualSenseEdge,
             Self::SwitchPro => P::SwitchPro,
         }
+    }
+
+    /// The inverse of [`Self::to_core`]. `None` for a kind this client has no row for (a Steam
+    /// Deck's pad, say), so the caller keeps its default rather than showing a control it
+    /// cannot honour.
+    pub fn from_core(pref: punktfunk_core::config::GamepadPref) -> Option<Self> {
+        use punktfunk_core::config::GamepadPref as P;
+        Some(match pref {
+            P::Auto => Self::Auto,
+            P::XboxOne => Self::XboxOne,
+            P::DualShock4 => Self::DualShock4,
+            P::DualSense => Self::DualSense,
+            P::DualSenseEdge => Self::DualSenseEdge,
+            P::SwitchPro => Self::SwitchPro,
+            _ => return None,
+        })
     }
 
     /// Whether a host pad of this kind can emit `DualSense` HID feedback (adaptive triggers,
@@ -418,6 +438,13 @@ pub struct HdrDisplay {
 }
 
 impl HdrDisplay {
+    /// An LG CX's volume: what a TV advertises until HDR calibration has measured its own.
+    pub const DEFAULT: Self = Self {
+        peak_nits: 800,
+        frame_avg_nits: 150,
+        black_code: 68,
+    };
+
     /// The black floor in the 0.0001 cd/m² units the wire carries, never zero: ST.2086 reads a
     /// zero there as "unknown", and a self-emissive panel's real floor is better described by the
     /// smallest luminance the field can express than by no answer at all.
@@ -434,7 +461,8 @@ impl HdrDisplay {
     /// so the game renders to this volume rather than to a placeholder someone else has to undo.
     /// One tone map, at the source — which is what `HGiG` asks for.
     ///
-    /// The defaults are an LG CX's.
+    /// The primaries are fixed (P3-D65); only the luminances are this panel's — an LG CX's
+    /// until calibrated ([`Self::DEFAULT`]).
     #[must_use]
     pub fn hdr_meta(self) -> punktfunk_core::quic::HdrMeta {
         punktfunk_core::quic::HdrMeta {
@@ -460,10 +488,13 @@ impl HdrDisplay {
 ///
 /// `PartialEq` is load-bearing: `services::store::StateWriter` skips writing an unchanged
 /// snapshot.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Default` is spelled out rather than derived: a fresh install starts from this TV's document
+/// ([`crate::core::settings::default_document`]), not the bare shared one, and `#[serde(default)]`
+/// fills a missing field from it too — one source of defaults for both paths.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Persisted {
-    #[serde(default = "crate::core::settings::default_document")]
     pub settings: pf_client_core::trust::Settings,
     pub known_hosts: Vec<KnownHost>,
     /// The host the user last had active — so relaunching lands back on its library.
@@ -483,6 +514,18 @@ pub struct Persisted {
     /// fill this: opening a game's settings and changing a row creates the profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<StreamPreset>,
+}
+
+impl Default for Persisted {
+    fn default() -> Self {
+        Self {
+            settings: crate::core::settings::default_document(),
+            known_hosts: Vec::new(),
+            selected_host: None,
+            version: None,
+            profiles: Vec::new(),
+        }
+    }
 }
 
 /// Cover-art paths for a title (host-relative, fetched via mTLS). Covers prefer

@@ -287,8 +287,7 @@ fn char_scancode(c: char) -> Option<(Scancode, bool)> {
 /// US-QWERTY `char` -> `(vk_code, needs_shift)`, off the same `vk_code` table a real scancode
 /// forwards through — one VK table, not a second one hand-copied by `char` instead of
 /// `Scancode`. Only the printable set an on-screen keyboard commits as text; Enter/Backspace/
-/// arrows etc. arrive as ordinary scancode `KeyDown`/`KeyUp` (see the module doc on
-/// `runtime::input::text_input_screen`), not through this path.
+/// arrows etc. arrive as ordinary scancode `KeyDown`/`KeyUp`, not through this path.
 fn char_vk(c: char) -> Option<(u32, bool)> {
     match c {
         // ASCII and VK agree on A-Z by construction (both are `0x41..=0x5A`), so this skips

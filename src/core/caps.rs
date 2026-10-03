@@ -1,7 +1,7 @@
 //! What the active video backend can present — one fact, read by everything that must agree
 //! about it: `session::connect` (what's advertised — authoritative, the codec is negotiated
-//! before any decoder opens), the shell's settings (what's offerable), `Settings::clamp_to_caps`
-//! (normalising a document written on a more capable TV).
+//! before any decoder opens) and `Settings::clamp_to_caps` (normalising a document written on a
+//! more capable TV, and every launch's settings).
 //!
 //! In `core`, not `platform`, because `services` can't depend on `platform::webos`. Hence
 //! the install-once global: the platform layer publishes at startup, every layer reads. **Unset

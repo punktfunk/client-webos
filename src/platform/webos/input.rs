@@ -1,6 +1,7 @@
-//! Raw SDL3 keyboard/gamepad input mapped to debounced `MenuEvent`s.
+//! Raw SDL3 keyboard/gamepad input mapped to the shared shell's `MenuEvent`s, plus the remote's
+//! own keys SDL3 cannot name.
 
-use crate::core::event::MenuEvent;
+use pf_client_core::menu_nav::{MenuDir, MenuEvent};
 
 /// Turns off unused event families.
 ///
@@ -57,10 +58,10 @@ pub fn wait_for_event(timeout: std::time::Duration) {
 pub fn menu_event_for_key(keycode: sdl3::keyboard::Keycode) -> Option<MenuEvent> {
     use sdl3::keyboard::Keycode;
     Some(match keycode {
-        Keycode::Up => MenuEvent::Up,
-        Keycode::Down => MenuEvent::Down,
-        Keycode::Left => MenuEvent::Left,
-        Keycode::Right => MenuEvent::Right,
+        Keycode::Up => MenuEvent::Move(MenuDir::Up),
+        Keycode::Down => MenuEvent::Move(MenuDir::Down),
+        Keycode::Left => MenuEvent::Move(MenuDir::Left),
+        Keycode::Right => MenuEvent::Move(MenuDir::Right),
         Keycode::Return | Keycode::Return2 | Keycode::KpEnter => MenuEvent::Confirm,
         // Map Backspace/Escape/AcBack so Back works with any remote variant.
         Keycode::Backspace | Keycode::Escape | Keycode::AcBack => MenuEvent::Back,
@@ -73,10 +74,10 @@ pub fn menu_event_for_button(which: sdl3::joystick::JoystickId, button: sdl3::ga
     use sdl3::gamepad::Button;
     let [a, b, _, y] = face_by_label(which);
     Some(match button {
-        Button::DPadUp => MenuEvent::Up,
-        Button::DPadDown => MenuEvent::Down,
-        Button::DPadLeft => MenuEvent::Left,
-        Button::DPadRight => MenuEvent::Right,
+        Button::DPadUp => MenuEvent::Move(MenuDir::Up),
+        Button::DPadDown => MenuEvent::Move(MenuDir::Down),
+        Button::DPadLeft => MenuEvent::Move(MenuDir::Left),
+        Button::DPadRight => MenuEvent::Move(MenuDir::Right),
         // WHY: Magic Remote's Back doesn't arrive as B; Back is low-risk guess.
         Button::Back => MenuEvent::Back,
         _ if button == a => MenuEvent::Confirm,

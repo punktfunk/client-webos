@@ -35,8 +35,8 @@ fn cache_dir(host: &str, port: u16) -> PathBuf {
 /// upsert), a reset or torn `settings.json`, a migration — rather than each needing its own call
 /// at its own site. [`prune_cache`] bounds a host's directory; nothing else bounds their number.
 ///
-/// The filesystem work runs on its own thread: the caller is either the startup path or a
-/// keypress, and unlinking a stale host's quota is up to ~190 files.
+/// The filesystem work runs on its own thread: the caller is the menu's bring-up or a keypress
+/// (`console::model::Service`), and unlinking a stale host's quota is up to ~190 files.
 pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
     let keep: HashSet<String> = known.iter().map(|h| host_key(&h.addr, h.port)).collect();
     std::thread::Builder::new()
@@ -66,13 +66,21 @@ pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
 pub(crate) fn cached_cover(host: &str, port: u16, game_id: &str) -> Option<Vec<u8>> {
     let path = cache_dir(host, port).join(cache_name(game_id));
     let bytes = std::fs::read(&path).ok().filter(|b| !b.is_empty())?;
-    // An entry written by a build that cached full-size covers costs ~99 ms to decode, every
-    // visit, forever. Shrink it the first time it is read and this visit is the last one.
-    let Some(shrunk) = shrink_cover(&bytes) else {
-        return Some(bytes);
-    };
-    write_cover(&path, &shrunk);
-    Some(shrunk)
+    match shrink_cover(&bytes) {
+        Shrink::Keep => Some(bytes),
+        // An entry written by a build that cached full-size covers costs ~99 ms to decode, every
+        // visit, forever. Shrink it the first time it is read and this visit is the last one.
+        Shrink::Shrunk(shrunk) => {
+            write_cover(&path, &shrunk);
+            Some(shrunk)
+        }
+        // Kept by a build that cached whatever came back. Served, it would be a miss that never
+        // refetches; dropped, the next fetch can replace it.
+        Shrink::Undecodable => {
+            let _ = std::fs::remove_file(&path);
+            None
+        }
+    }
 }
 
 /// The size a cached cover is kept at. No client draws one larger than a library tile, which is
@@ -83,15 +91,24 @@ const COVER_MAX_H: u32 = 720;
 /// Re-encode quality. A cover is photographic and is seen from a couch.
 const COVER_QUALITY: u8 = 85;
 
-/// A cover re-encoded small, as JPEG. `None` when the bytes will not decode or are already
-/// within the cap in both axes AND already JPEG — nothing to gain then.
+/// What [`shrink_cover`] makes of a cover's bytes.
+enum Shrink {
+    /// Already within the cap in both axes AND already JPEG — nothing to gain, and re-encoding
+    /// would only lose a generation.
+    Keep,
+    /// Re-encoded small, as JPEG.
+    Shrunk(Vec<u8>),
+    /// Not an image this build decodes (`image`'s JPEG and PNG): nothing worth caching.
+    Undecodable,
+}
+
+/// A cover re-encoded small, as JPEG.
 ///
 /// Only task that actually removes work: a full-size PNG costs ~99 ms to decode here,
 /// re-decoded on every library visit. Sixty of them = six seconds, three-core CPU.
 /// Re-encoded once at draw size, the same cover decodes in a fraction — and as JPEG,
 /// the shell's scaled-decode path takes it (PNG never allowed).
-fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
-    // Already a small JPEG: nothing to gain, and re-encoding would only lose a generation.
+fn shrink_cover(bytes: &[u8]) -> Shrink {
     let small = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()
@@ -99,9 +116,11 @@ fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
         .and_then(|r| r.into_dimensions().ok())
         .is_some_and(|(w, h)| w <= COVER_MAX_W && h <= COVER_MAX_H);
     if small {
-        return None;
+        return Shrink::Keep;
     }
-    let img = image::load_from_memory(bytes).ok()?;
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return Shrink::Undecodable;
+    };
     let img = if img.width() > COVER_MAX_W || img.height() > COVER_MAX_H {
         img.resize(COVER_MAX_W, COVER_MAX_H, image::imageops::FilterType::Triangle)
     } else {
@@ -111,8 +130,11 @@ fn shrink_cover(bytes: &[u8]) -> Option<Vec<u8>> {
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut out), COVER_QUALITY);
     // `into_rgb8`, not `to_rgb8`: `img` is owned and dead after this, so the buffer moves
     // instead of being copied.
-    img.into_rgb8().write_with_encoder(encoder).ok()?;
-    Some(out)
+    match img.into_rgb8().write_with_encoder(encoder) {
+        Ok(()) => Shrink::Shrunk(out),
+        // It decoded; only the re-encode failed. The original is still a picture.
+        Err(_) => Shrink::Keep,
+    }
 }
 
 /// Per-host cover cache accounting; scans on `new()` and when the budget is exceeded.
@@ -129,18 +151,24 @@ impl CoverCache {
         Self { dir, total }
     }
 
-    pub(crate) fn store(&mut self, game_id: &str, bytes: &[u8]) {
+    /// Caches a fetched cover and returns the bytes to hand the shell: the normalised ones the
+    /// cache now holds, so a first visit decodes the same small JPEG every later visit does.
+    /// `None` for bytes this build cannot decode — nothing to cache, and nothing worth showing.
+    pub(crate) fn store(&mut self, game_id: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let bytes = match shrink_cover(&bytes) {
+            Shrink::Keep => bytes,
+            Shrink::Shrunk(shrunk) => shrunk,
+            Shrink::Undecodable => return None,
+        };
         let path = self.dir.join(cache_name(game_id));
         let old_len = path.metadata().map_or(0, |meta| meta.len());
-        let shrunk = shrink_cover(bytes);
-        let bytes = shrunk.as_deref().unwrap_or(bytes);
-        if !write_cover(&path, bytes) {
-            return;
+        if write_cover(&path, &bytes) {
+            self.total = self.total.saturating_sub(old_len).saturating_add(bytes.len() as u64);
+            if self.total > CACHE_BUDGET {
+                self.total = prune_cache(&self.dir);
+            }
         }
-        self.total = self.total.saturating_sub(old_len).saturating_add(bytes.len() as u64);
-        if self.total > CACHE_BUDGET {
-            self.total = prune_cache(&self.dir);
-        }
+        Some(bytes)
     }
 }
 

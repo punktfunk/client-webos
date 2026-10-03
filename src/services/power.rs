@@ -122,10 +122,10 @@ pub fn invoke(
     }
 }
 
-/// Everything one exit action needs, captured while `App` is still alive.
+/// Everything one exit action needs, captured while the console's `Service` is still alive.
 ///
 /// Carried rather than looked up at exit time because the two paths that quit the process are
-/// on opposite sides of the menu: one still holds `App`, and the other (a Quit out of the
+/// on opposite sides of the menu: one still holds the `Service`, and the other (a Quit out of the
 /// stream) never returns to the menu at all.
 #[derive(Clone)]
 pub struct ExitPlan {

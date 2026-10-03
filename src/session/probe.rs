@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use punktfunk_core::client::{NativeClient, ProbeOutcome};
 use punktfunk_core::config::Mode;
-use punktfunk_core::quic;
+use punktfunk_core::{quic, PunktfunkError};
 
 /// Opens a handshake-only session: no video backend loads, no pump thread spawns, nothing is
 /// presented. Both callers below share it so the decisions that are the same either way — the
@@ -182,9 +182,18 @@ pub fn run_speed_probe(
     let warmup = Instant::now();
     let mut warmed = false;
     while warmup.elapsed() < PROBE_WARMUP_CAP {
-        if client.next_frame(Duration::from_millis(250)).is_ok() {
-            warmed = true;
-            break;
+        match client.next_frame(Duration::from_millis(250)) {
+            Ok(_) => {
+                warmed = true;
+                break;
+            }
+            Err(PunktfunkError::NoFrame) => {}
+            // Anything else (a closed session, say) answers at once and every time: polling on
+            // would spin a core until the cap. `request_probe` below reports the failure.
+            Err(e) => {
+                tracing::warn!("speed test: data plane ended during warmup: {e:#}");
+                break;
+            }
         }
     }
     tracing::info!(
@@ -197,9 +206,14 @@ pub fn run_speed_probe(
         warmup.elapsed().as_millis(),
     );
 
-    client
+    let requested = client
         .request_probe(PROBE_TARGET_KBPS, PROBE_DURATION_MS)
-        .context("request_probe")?;
+        .context("request_probe");
+    if requested.is_err() {
+        // Same deliberate teardown as every other way out of here.
+        client.disconnect_quit();
+    }
+    requested?;
     // Flip the UI from "Connecting…" to "Measuring…" the moment the burst is requested —
     // with the warmup above, the first 250 ms poll is no longer the earliest signal.
     progress(client.probe_result());

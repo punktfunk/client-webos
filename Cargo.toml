@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 tracing-appender = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# mDNS LAN discovery; direct dep (not via pf-client-core — see session.rs docs).
+# mDNS LAN discovery; direct dep (not via pf-client-core — see services/discovery.rs docs).
 mdns-sd = "0.21"
 # mTLS game library fetch (services::library).
 # Use `rustls-no-provider` (not `rustls`) to defer crypto backend choice to rustls config below.

@@ -25,7 +25,8 @@ mod real {
     const PROBE_REPORT_GRACE: Duration = Duration::from_secs(12);
 
     fn parse_pin(hex: &str) -> Result<[u8; 32]> {
-        anyhow::ensure!(hex.len() == 64, "pin must be 64 hex chars");
+        // ASCII first: the byte slicing below would panic mid-character otherwise.
+        anyhow::ensure!(hex.len() == 64 && hex.is_ascii(), "pin must be 64 hex chars");
         let mut pin = [0u8; 32];
         for (i, byte) in pin.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).with_context(|| format!("bad hex at byte {i}"))?;
@@ -52,6 +53,8 @@ mod real {
         let pin = parse_pin(&args[5])?;
         let target_kbps: u32 = args.get(6).map_or(Ok(320_000), |s| s.parse()).context("target_kbps")?;
         let duration_ms: u32 = args.get(7).map_or(Ok(3_000), |s| s.parse()).context("duration_ms")?;
+        // The salvaged throughput divides by it.
+        anyhow::ensure!(duration_ms > 0, "duration_ms must be positive");
 
         let mode = Mode {
             width: 1280,

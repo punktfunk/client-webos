@@ -12,8 +12,8 @@
 //! would resurrect exactly the race its docs describe: the app's next save would carry its own
 //! stale `settings` and silently undo whatever the shell had just written.
 //!
-//! Only one UI is live at a time (that is what the flip means), so this owns the document while
-//! the console is up and [`ConsoleStore::snapshot`] hands it back when the console closes.
+//! This owns the document while the console is up; the menu builds a fresh one, with a fresh
+//! [`StateWriter`], from `store::load` on every entry (`runtime::console_flow::run`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,8 +50,8 @@ impl ConsoleStore {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// The document as the console leaves it — what the other UI adopts when the flip returns,
-    /// so a setting changed in the shell is not stale in the old screens.
+    /// The document as the console has it — what a launch resolves its settings from, so a
+    /// setting changed in the shell is not stale in the stream.
     pub fn snapshot(&self) -> Persisted {
         self.state.lock().expect(POISONED).clone()
     }
@@ -132,7 +132,6 @@ impl SettingsStore for ConsoleStore {
     }
 }
 
-// No tests here on purpose. This module is arm-gated with pf-console-ui, and `task test` builds
-// the HOST target — an armv7 test binary cannot execute on a runner, so anything asserted here
-// would type-check and never run. The conversions it delegates to live in `shared`, which is not
-// gated and is tested there; what is left in this file is a mutex, a clone and a writer call.
+// No tests here on purpose: the conversions it delegates to live in `shared` and are tested
+// there, and what is left in this file is a mutex, a clone and a writer call. (Linux-gated with
+// pf-console-ui, so `task test`'s Linux host would run a test here — gating is not the reason.)

@@ -31,7 +31,8 @@ pub(super) fn telemetry_addr() -> Option<&'static str> {
     launch_params().telemetry.as_deref().filter(|s| !s.is_empty())
 }
 
-/// Launch-time log level from the `TELEMETRY_LEVEL` env var; `None` keeps the default.
+/// Launch-time log level from argv[1]'s `telemetry_level` (`task deploy TELEMETRY_LEVEL=...`);
+/// `None` keeps the default.
 pub(super) fn launch_level() -> Option<Level> {
     match launch_params()
         .telemetry_level

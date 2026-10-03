@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use punktfunk_core::quic::HidOutput;
 
 use super::ls2;
+use super::proc_input;
 use crate::services::feedback::{Mailbox, Pending, Received};
 use crate::session::pad_audio::{Envelope, COIL_REPORT_FRAMES, SPEAKER_IN_SAMPLES};
 
@@ -149,10 +150,8 @@ fn crc32_le(bytes: impl IntoIterator<Item = u8>) -> u32 {
 /// whole audio lane — goes through `bluetooth2`, which a wired pad is not on, so
 /// handing one back would claim the coils for a transport that cannot carry them.
 fn bluetooth_address(block: &str) -> Option<String> {
-    block
-        .lines()
-        .any(|l| l.trim_end().starts_with("I: Bus=0005"))
-        .then(|| uniq_in(block))
+    proc_input::is_bluetooth(block)
+        .then(|| proc_input::uniq(block))
         .flatten()
 }
 
@@ -181,17 +180,15 @@ pub fn link_for(path: Option<&str>, serial: Option<&str>) -> Option<Link> {
     let blocks: Vec<&str> = dualsense_blocks(&devices).collect();
     let event = path.and_then(|p| p.rsplit('/').next());
     let by_handler = event.and_then(|event| {
-        blocks.iter().copied().find(|block| {
-            block
-                .lines()
-                .find_map(|l| l.strip_prefix("H: Handlers="))
-                .is_some_and(|h| h.split_whitespace().any(|t| t == event))
-        })
+        blocks
+            .iter()
+            .copied()
+            .find(|block| proc_input::handlers(block).any(|t| t == event))
     });
     let mac = match by_handler {
-        Some(block) => uniq_in(block)?,
+        Some(block) => proc_input::uniq(block)?,
         None => {
-            let mut macs: Vec<String> = blocks.iter().copied().filter_map(uniq_in).collect();
+            let mut macs: Vec<String> = blocks.iter().copied().filter_map(proc_input::uniq).collect();
             macs.sort_unstable();
             macs.dedup();
             serial_mac.or_else(|| (macs.len() == 1).then(|| macs.swap_remove(0)))?
@@ -203,14 +200,14 @@ pub fn link_for(path: Option<&str>, serial: Option<&str>) -> Option<Link> {
         .iter()
         .copied()
         .filter(|block| bluetooth_address(block).is_none())
-        .filter_map(uniq_in)
+        .filter_map(proc_input::uniq)
         .collect();
     wired_macs.sort_unstable();
     wired_macs.dedup();
     let only_wired = wired_macs == [mac.as_str()];
     let mine: Vec<&str> = blocks
         .into_iter()
-        .filter(|block| uniq_in(block).as_deref() == Some(mac.as_str()))
+        .filter(|block| proc_input::uniq(block).as_deref() == Some(mac.as_str()))
         .collect();
     if let Some(address) = mine.iter().copied().find_map(bluetooth_address) {
         return Some(Link::Bluetooth(address));
@@ -237,15 +234,6 @@ pub fn link_for(path: Option<&str>, serial: Option<&str>) -> Option<Link> {
     Some(Link::Usb(wired.swap_remove(index).0))
 }
 
-/// A record's `U: Uniq=`, lowercased.
-fn uniq_in(block: &str) -> Option<String> {
-    block
-        .lines()
-        .find_map(|l| l.strip_prefix("U: Uniq="))
-        .map(|u| u.trim().to_ascii_lowercase())
-        .filter(|u| !u.is_empty())
-}
-
 /// SDL's HIDAPI `DualSense` serial is the MAC as `aa-bb-cc-dd-ee-ff`; `bluetooth2` wants `aa:bb:…`.
 pub(crate) fn mac_from_serial(serial: &str) -> Option<String> {
     punktfunk_core::wol::parse_mac(serial.trim())?;
@@ -258,11 +246,9 @@ pub(crate) fn mac_from_serial(serial: &str) -> Option<String> {
 /// Matched on the `I:` ids first, and on the name only as a fallback: the kernel takes the input
 /// device's name straight from the HID/Bluetooth product name (`input_dev->name = hdev->name` in
 /// `hid-playstation`), and the pad advertises itself as a plain "Wireless Controller" — so a set
-/// that decorates the name is the lucky case, not the rule. The ids are the pad either way, which
-/// matters most to [`hid_playstation_bound`]: it asks specifically about the pads a *generic*
-/// binding is handling, and those are the ones least likely to be named after themselves.
+/// that decorates the name is the lucky case, not the rule. The ids are the pad either way.
 fn dualsense_blocks<'a>(devices: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-    devices.split("\n\n").filter(|block| {
+    proc_input::records(devices).filter(|block| {
         block.lines().any(|l| {
             (l.starts_with("I: ") && is_dualsense_ids(l))
                 || (l.starts_with("N: Name=") && l.to_ascii_lowercase().contains("dualsense"))
@@ -273,13 +259,15 @@ fn dualsense_blocks<'a>(devices: &'a str) -> impl Iterator<Item = &'a str> + 'a 
 /// Sony's vendor plus a `DualSense`/`Edge` product on a `/proc/bus/input/devices` `I:` line.
 /// The same pair [`super::hidraw`] opens a node by.
 fn is_dualsense_ids(id_line: &str) -> bool {
+    use super::gamepad::{DUALSENSE_EDGE_PID, DUALSENSE_PID, SONY_VID};
     let field = |key: &str| {
         id_line
             .split_whitespace()
             .find_map(|f| f.strip_prefix(key))
             .and_then(|v| u16::from_str_radix(v, 16).ok())
     };
-    field("Vendor=") == Some(0x054c) && field("Product=").is_some_and(|p| p == 0x0ce6 || p == 0x0df2)
+    field("Vendor=") == Some(SONY_VID)
+        && field("Product=").is_some_and(|p| p == DUALSENSE_PID || p == DUALSENSE_EDGE_PID)
 }
 
 /// Owns the pad's feedback state and the thread that ships it.
@@ -1008,10 +996,9 @@ mod tests {
         assert_eq!(address_in(&format!("{USB}\n{BT}")), Some("aa:bb:cc:dd:ee:ff".into()));
     }
 
-    /// The pad a generic binding is handling is the one `hid_playstation_bound` exists to find,
-    /// and it is also the one least likely to be named `DualSense` — the kernel takes that name
-    /// from the product string, which the pad reports as a plain "Wireless Controller". So the
-    /// ids have to be enough on their own.
+    /// A pad is often not named `DualSense` at all — the kernel takes that name from the product
+    /// string, which the pad reports as a plain "Wireless Controller". So the ids have to be
+    /// enough on their own.
     #[test]
     fn a_pad_is_matched_by_its_ids_whatever_it_is_called() {
         const PLAIN: &str =

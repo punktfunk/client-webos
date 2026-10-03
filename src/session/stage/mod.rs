@@ -1,7 +1,7 @@
 //! The single place that talks to the video decoder.
 //!
 //! Everything between "an access unit arrived" and "NDL has been fed" lives here: host-PTS
-//! mapping on the refresh-rate-reconciled frame interval, backlog sampling,
+//! mapping on the negotiated stream's frame interval, backlog sampling,
 //! freeze-until-reanchor, and keyframe-request throttling. The video pump keeps only the
 //! parts that are wire-shaped — pulling frames, and *how* a keyframe is asked for, which it
 //! answers to [`SinkResult::NeedKeyframe`] with `NativeClient::request_keyframe`.
@@ -160,9 +160,8 @@ impl VideoStage {
         self.sink.set_color(meta, color)
     }
 
-    /// Drop everything derived from a mapping that no longer holds: the host anchor and the audio
-    /// plane's copy of it. The two move in lockstep or the planes end up on timelines that
-    /// disagree.
+    /// Drop everything derived from a mapping that no longer holds: the host anchor and the open
+    /// AU's stamp. The audio plane has nothing to reset — it stamps off the player clock on its own.
     fn reset_timeline(&mut self) {
         self.pacing.reset();
         self.au_base_ns = None;
@@ -195,8 +194,7 @@ impl VideoStage {
         }
     }
 
-    /// What the live mapping has to say for itself — see [`PacingHealth`]. The whole point of
-    /// publishing it on both mappings is that `late_stamps` makes them comparable.
+    /// What the live mapping has to say for itself — see [`PacingHealth`].
     pub fn pacing_health(&self) -> PacingHealth {
         self.pacing.health()
     }
@@ -419,6 +417,8 @@ mod tests {
     struct FakeSink {
         depth: Cell<Option<u32>>,
         refuse: bool,
+        /// Fail every feed with a real decode error (not [`NotReady`]) while set.
+        broken: Arc<AtomicBool>,
         clock: Arc<FakeClock>,
         plane: Option<Arc<dyn AudioPlane>>,
         fed: Mutex<Vec<u64>>,
@@ -429,6 +429,7 @@ mod tests {
             Self {
                 depth: Cell::new(None),
                 refuse: false,
+                broken: Arc::new(AtomicBool::new(false)),
                 clock: Arc::new(FakeClock::default()),
                 plane: None,
                 fed: Mutex::new(Vec::new()),
@@ -451,6 +452,9 @@ mod tests {
         fn feed(&self, _au: &[u8], pts_ns: u64) -> anyhow::Result<()> {
             if self.refuse {
                 return Err(NotReady.into());
+            }
+            if self.broken.load(Ordering::Relaxed) {
+                anyhow::bail!("decode error");
             }
             self.fed.lock().expect("fed").push(pts_ns);
             Ok(())
@@ -646,6 +650,38 @@ mod tests {
             SinkResult::Presented { .. }
         ));
         assert!(!s.holding(), "the next AU must not read the resumed one as lost");
+    }
+
+    /// A real decode error freezes the picture even inside the keyframe throttle: the resume
+    /// keyframe lands within the window of the hold's own request, and the P-frames after a
+    /// refused one must not reach a decoder that never got their reference.
+    #[test]
+    fn a_refused_resume_frame_rearms_the_hold() {
+        let broken = Arc::new(AtomicBool::new(false));
+        let mut s = stage_on(FakeSink {
+            broken: Arc::clone(&broken),
+            ..FakeSink::default()
+        });
+        assert!(matches!(
+            s.submit(&frame(1, None, false, true)),
+            SinkResult::NeedKeyframe
+        ));
+        broken.store(true, Ordering::Relaxed);
+        assert!(
+            matches!(s.submit(&frame(2, None, true, false)), SinkResult::Held),
+            "the request slot is still the hold's"
+        );
+        assert!(s.holding(), "a refused resume frame re-arms the hold");
+        broken.store(false, Ordering::Relaxed);
+        assert!(
+            !matches!(s.submit(&frame(3, None, false, false)), SinkResult::Presented { .. }),
+            "a P-frame after the refused keyframe is skipped, not fed"
+        );
+        assert!(matches!(
+            s.submit(&frame(4, None, true, false)),
+            SinkResult::Presented { .. }
+        ));
+        assert!(!s.holding());
     }
 
     /// Only decoded pictures increment `frames`. Held and refused deliveries don't.

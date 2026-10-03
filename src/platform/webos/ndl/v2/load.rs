@@ -68,7 +68,7 @@ impl NdlVideo {
         if let Some(budget) = audio {
             // Request is accepted iff `ret == 0`; not judged until first frame fed (some models
             // don't report LOADCOMPLETED earlier, #188). So unconfirmed loads are normal; the
-            // metronome rides the plane through the wait. Real audio only rides confirmed
+            // clock plane carries the prime through the wait. Real audio only rides confirmed
             // ([`Self::plane_proven`]).
             //
             // Hard `Err` is still answered here: no handle to defer with. Unload before retry
@@ -153,7 +153,7 @@ impl NdlVideo {
     /// wait). Bursts only: dropped silently if plane doesn't exist yet.
     ///
     /// Highest stamp → `last_audio_pts_ms` as floor (rewind would mute; see [`Self::play_audio`]).
-    /// Ceiling locked at [`PRIME_LEAD`] packets above clock, same lead real audio targets.
+    /// Ceiling locked at [`PRIME_LEAD`] packets above clock.
     fn prime_audio(fns: &'static ffi::V2, load_instant: Instant, budget: Duration, silence: &[u8]) -> (i64, bool) {
         let mut pts_ms = 0;
         while !LOAD_COMPLETED.fired() {
@@ -163,7 +163,7 @@ impl NdlVideo {
                 return (pts_ms, false);
             }
             if load_instant.elapsed() >= budget {
-                // INFO: normal on sets reporting callback against video ingest; metronome carries plane from here.
+                // INFO: normal on sets reporting callback against video ingest; clock plane carries prime from here.
                 tracing::info!(
                     "NDL load: no LOADCOMPLETED within {budget:?} of priming {pts_ms}ms of silence \
                      — starting the stream, the clock plane carries the prime until it lands"
@@ -284,7 +284,8 @@ impl NdlVideo {
             *pending = Some(info);
             return Ok(());
         }
-        // Lock released here; racing replay could apply stale value after this newer one.
+        // Lock held through the apply (the guard drops at return), so a racing replay can't apply a
+        // stale value after this newer one.
         *pending = None;
         self.apply_hdr_info(info)
     }

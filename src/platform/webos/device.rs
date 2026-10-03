@@ -28,7 +28,7 @@ use crate::core::caps::VideoCaps;
 /// TV capabilities detected at runtime (best-effort; missing sources fall back safely).
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
-    /// CPU cores (drives off-main-thread work before contention).
+    /// CPU cores. Diagnostics only — read by nothing but [`Self::log`].
     pub cores: usize,
     /// Major webOS release (5, 6, … 10), when it can be determined.
     pub webos_major: Option<u32>,
@@ -227,8 +227,8 @@ fn sdl_webos_panel() -> Panel {
 /// by [`probe_panel`] either way.
 pub fn native_mode() -> punktfunk_core::config::Mode {
     let probed = PANEL_SIZE.get().copied().unwrap_or_else(|| {
-        // Not expected; `run_inner` probes before this runs. Worth a warn because the fallback
-        // silently answers 1080p-or-4K either way — no other signal for a wrong mode.
+        // Not expected; `runtime::stream`'s bring-up probes before this runs. Worth a warn because
+        // the fallback silently answers 1080p-or-4K either way — no other signal for a wrong mode.
         tracing::warn!("native mode asked for before the panel was probed — using Luna's UHD flag");
         None
     });

@@ -39,11 +39,13 @@ pub fn button_bit(button: Button) -> Option<u32> {
     })
 }
 
-/// Sony's USB vendor id, and the `DualSense` Edge's product id. SDL types both Edge and plain
-/// `DualSense` as `PS5` — the ids are what tells them apart, and they are what the kernel's own
-/// `hid-playstation` driver matches on too (see [`crate::platform::webos::dualsense`]).
-const SONY_VID: u16 = 0x054c;
-const DUALSENSE_EDGE_PID: u16 = 0x0df2;
+/// Sony's vendor id, and the two `DualSense` product ids (original, then Edge) — the pair the
+/// kernel's `hid-playstation` driver binds, and what every route to the pad (SDL here, `hidraw`,
+/// evdev, `/proc/bus/input`) identifies it by. SDL types both Edge and plain `DualSense` as `PS5`;
+/// the ids are what tells them apart.
+pub(crate) const SONY_VID: u16 = 0x054c;
+pub(crate) const DUALSENSE_PID: u16 = 0x0ce6;
+pub(crate) const DUALSENSE_EDGE_PID: u16 = 0x0df2;
 
 /// The kind to present for a pad SDL has already identified from its controller database, or
 /// `None` to leave the choice to the host.

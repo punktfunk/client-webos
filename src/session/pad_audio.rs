@@ -54,7 +54,7 @@ pub const COIL_REPORT_FRAMES: usize = 32;
 const COIL_RING_MAX: usize = COIL_REPORT_FRAMES * 6;
 
 /// Fewest milliseconds between two motor writes. Each becomes an output report on the pad's
-/// link, which the coil lane will share once tier A exists — 60 Hz is plenty for a motor.
+/// link, which the coil lane shares (`dualsense`'s coil reports) — 60 Hz is plenty for a motor.
 const APPLY_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Whether Settings asks for any pad-audio lane at all — what the decode thread is started for.
@@ -131,11 +131,16 @@ impl Envelope {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    /// Whether the lane stamped in `last` had a frame within [`HOLD`] (`u64::MAX` = never).
+    fn within_hold(&self, last: &AtomicU64) -> bool {
+        let last = last.load(Ordering::Relaxed);
+        last != u64::MAX && self.now_ms().saturating_sub(last) < HOLD.as_millis() as u64
+    }
+
     /// Whether coil frames are arriving: while true the wire rumble plane must not touch the
     /// motors, or a title's classic rumble (the host still forwards it) fights its own haptics.
     pub fn active(&self) -> bool {
-        let last = self.last_frame_ms.load(Ordering::Relaxed);
-        last != u64::MAX && self.now_ms().saturating_sub(last) < HOLD.as_millis() as u64
+        self.within_hold(&self.last_frame_ms)
     }
 
     /// The motor pair the main loop should write now, if any: `Some((low, high))` for a changed
@@ -187,8 +192,7 @@ impl Envelope {
 
     /// Whether speaker frames are arriving (within the hold window).
     pub fn speaker_active(&self) -> bool {
-        let last = self.last_speaker_ms.load(Ordering::Relaxed);
-        last != u64::MAX && self.now_ms().saturating_sub(last) < HOLD.as_millis() as u64
+        self.within_hold(&self.last_speaker_ms)
     }
 
     /// Stereo samples queued for the speaker lane, so the sender can pre-fill the pad's buffer.
@@ -214,14 +218,7 @@ impl Envelope {
     }
 
     fn push_speaker(&self, pcm: &[f32]) {
-        let mut ring = self.speaker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let overflow = (ring.len() + pcm.len())
-            .saturating_sub(SPEAKER_RING_MAX)
-            .min(ring.len());
-        if overflow > 0 {
-            ring.drain(..overflow);
-        }
-        ring.extend(pcm.iter().copied());
+        push_pcm(&self.speaker, pcm);
         self.last_speaker_ms.store(self.now_ms(), Ordering::Relaxed);
     }
 

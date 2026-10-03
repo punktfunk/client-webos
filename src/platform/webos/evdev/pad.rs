@@ -13,7 +13,8 @@ use std::os::unix::io::RawFd;
 
 use punktfunk_core::quic::RichInput;
 
-use super::{abs_range, abs_resolution, bit, device_vendor, InputEventRaw, ABS_X, EV_ABS, EV_SYN, SYN_REPORT};
+use super::{abs_range, abs_resolution, bit, device_vendor, events, ABS_X, EV_ABS, EV_SYN, SYN_REPORT};
+use crate::platform::webos::gamepad::SONY_VID;
 
 /// A claimed pad node, decoded. Never both at once — they are separate nodes — which is why this
 /// is one enum on [`super::Device`] rather than two `Option`s that must not overlap.
@@ -38,10 +39,10 @@ impl Pad {
 
     /// Decodes one read burst. A pad node shares none of the mouse/keyboard decode — different
     /// axes, different wire plane — so it takes the whole burst on its own path.
-    pub(super) fn read(&mut self, buf: &[u8], size: usize, sink: &impl Fn(RichInput)) {
+    pub(super) fn read(&mut self, buf: &[u8], sink: &impl Fn(RichInput)) {
         match self {
-            Self::Touchpad(pad) => read_touch(pad, buf, size, sink),
-            Self::Motion(sensors) => read_sensors(sensors, buf, size),
+            Self::Touchpad(pad) => read_touch(pad, buf, sink),
+            Self::Motion(sensors) => read_sensors(sensors, buf),
         }
     }
 
@@ -103,10 +104,6 @@ const BTN_TOUCH: u16 = 0x14a;
 /// advertises the same six absolute axes but no buttons at all. See [`is_pad_motion`].
 const BTN_SOUTH: u16 = 0x130;
 
-/// Sony's USB/BT vendor id. `hid-playstation` binds only Sony pads, and it's the split-node
-/// layout that creates the touchpad node this identifies.
-const VENDOR_SONY: u16 = 0x054c;
-
 /// Motion decode state. Sensor readings are levels, not deltas, so a read burst collapses to its
 /// newest sample and an unchanged sample is worth no datagram at all — a resting pad reports at
 /// its full rate forever.
@@ -167,9 +164,10 @@ struct Finger {
 ///
 /// Matched on ids and capability bits, not the device name, which varies by driver and firmware:
 /// `BTN_TOUCH` on an absolute pointer (the pad's own node reports face buttons instead), from a
-/// Sony vendor id. `vendor` is lazy because it costs an ioctl the bit tests don't.
+/// Sony vendor id (`hid-playstation` binds only Sony pads, and its split-node layout is what
+/// creates this node). `vendor` is lazy because it costs an ioctl the bit tests don't.
 fn is_pad_touchpad(absolute_pointer: bool, has_btn_touch: bool, vendor: impl FnOnce() -> u16) -> bool {
-    absolute_pointer && has_btn_touch && vendor() == VENDOR_SONY
+    absolute_pointer && has_btn_touch && vendor() == SONY_VID
 }
 
 /// A `PlayStation` pad's motion sensors, published as a third node beside the pad and its
@@ -181,7 +179,7 @@ fn is_pad_touchpad(absolute_pointer: bool, has_btn_touch: bool, vendor: impl FnO
 /// the touchpad's are the contact — so the buttons (`BTN_SOUTH`, `BTN_TOUCH`) are what part them.
 /// Matching the pad node here would grab the gamepad away from SDL entirely.
 fn is_pad_motion(abs: &[u8; 128], has_buttons: bool, vendor: impl FnOnce() -> u16) -> bool {
-    (ABS_X..=ABS_RZ).all(|c| bit(abs, c)) && !has_buttons && vendor() == VENDOR_SONY
+    (ABS_X..=ABS_RZ).all(|c| bit(abs, c)) && !has_buttons && vendor() == SONY_VID
 }
 
 /// The units the wire carries: the raw `DualSense` report scale the host's *virtual* pad is
@@ -268,10 +266,8 @@ fn normalize(x: i32, y: i32, x_range: (i32, i32), y_range: (i32, i32)) -> Option
 /// events, and sending between them would put half the samples on a stale axis. Only contacts a
 /// report actually touched are sent, so a resting finger costs one burst of decode and no
 /// datagrams at all.
-fn read_touch(pad: &mut Touchpad, buf: &[u8], size: usize, sink: &impl Fn(RichInput)) {
-    for chunk in buf.chunks_exact(size) {
-        // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
-        let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+fn read_touch(pad: &mut Touchpad, buf: &[u8], sink: &impl Fn(RichInput)) {
+    for ev in events(buf) {
         match (ev.kind, ev.code) {
             // A slot the wire can't carry is parked on the last finger, where its coordinates are
             // simply overwritten by a contact that does fit — the pad only ever reports two.
@@ -329,10 +325,8 @@ fn contact(finger_idx: usize, finger: &Finger, x_range: (i32, i32), y_range: (i3
 }
 
 /// Decodes one read burst off a claimed motion node into the newest complete sample.
-fn read_sensors(sensors: &mut Sensors, buf: &[u8], size: usize) {
-    for chunk in buf.chunks_exact(size) {
-        // SAFETY: as `read_device` — exact-size chunk of plain `repr(C)` integers, read unaligned.
-        let ev = unsafe { chunk.as_ptr().cast::<InputEventRaw>().read_unaligned() };
+fn read_sensors(sensors: &mut Sensors, buf: &[u8]) {
+    for ev in events(buf) {
         match (ev.kind, ev.code) {
             // Gyro first, then accelerometer: the wire's order, so no shuffling at send.
             (EV_ABS, ABS_RX..=ABS_RZ) => sensors.axes[(ev.code - ABS_RX) as usize] = ev.value,

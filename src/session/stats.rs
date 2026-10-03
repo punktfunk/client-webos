@@ -13,8 +13,7 @@ pub struct StreamStats {
     pub render_backlog: AtomicI32,
     /// The live mapping's measured jitter (mean absolute deviation of `ready − pts`), in µs, and
     /// the frames it stamped too late to pace — see `session::timeline::PacingHealth`. Published on
-    /// the heartbeat's cadence under both mappings, so a stutter report can be read against them
-    /// whichever one produced it.
+    /// the heartbeat's cadence, so a stutter report can be read against it.
     pub pacing_jitter_us: AtomicU32,
     pub pacing_late: AtomicU64,
     /// Effective presentation cushion in µs: core's adaptive figure plus the Smoothness budget.

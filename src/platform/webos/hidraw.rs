@@ -17,9 +17,9 @@ use std::ffi::CString;
 
 use anyhow::{bail, Result};
 
-/// Sony's vendor id, and the two `DualSense` product ids (original, then Edge).
-const VENDOR_SONY: u16 = 0x054c;
-const PRODUCTS: [u16; 2] = [0x0ce6, 0x0df2];
+use super::gamepad::{DUALSENSE_EDGE_PID, DUALSENSE_PID, SONY_VID};
+use super::ioctl;
+
 /// `BUS_USB` as hidraw reports it. A Bluetooth pad also has a hidraw node, but its reports carry
 /// the `0x31` framing and CRC of the Luna route, so this transport deliberately claims USB only.
 const BUS_USB: u32 = 0x03;
@@ -30,7 +30,7 @@ const MAX_NODES: u8 = 10;
 
 /// `HIDIOCGRAWINFO`: `_IOR('H', 0x03, struct hidraw_devinfo)`, which is `{u32 bus, s16 vendor,
 /// s16 product}` — 8 bytes.
-const HIDIOCGRAWINFO: libc::c_ulong = (2 << 30) | (8 << 16) | ((b'H' as libc::c_ulong) << 8) | 0x03;
+const HIDIOCGRAWINFO: libc::c_ulong = ioctl::ioc(ioctl::READ, b'H', 0x03, 8);
 
 /// `HIDIOCGRAWPHYS(len)`'s number: `_IOC(_IOC_READ, 'H', 0x05, len)`.
 const HIDIOCGRAWPHYS: u8 = 0x05;
@@ -58,7 +58,7 @@ impl Hidraw {
     fn open(path: &str, flags: libc::c_int) -> Option<Self> {
         let c_path = CString::new(path).ok()?;
         // SAFETY: `c_path` is NUL-terminated and outlives the call.
-        let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_NONBLOCK) };
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_NONBLOCK | libc::O_CLOEXEC) };
         (fd >= 0).then(|| Self {
             fd,
             path: path.to_string(),
@@ -109,10 +109,7 @@ impl Hidraw {
     /// One of hidraw's variable-length string queries (`_IOC(_IOC_READ, 'H', nr, len)`), up to its NUL.
     fn string_ioctl(&self, nr: u8) -> Option<String> {
         let mut buf = [0u8; 128];
-        let request = (2 << 30)
-            | ((buf.len() as libc::c_ulong) << 16)
-            | (libc::c_ulong::from(b'H') << 8)
-            | libc::c_ulong::from(nr);
+        let request = ioctl::ioc(ioctl::READ, b'H', u32::from(nr), buf.len() as u32);
         // SAFETY: `buf` is a live local of the length the request encodes.
         let rc = unsafe { libc::ioctl(self.fd, request, buf.as_mut_ptr()) };
         if rc <= 0 {
@@ -129,8 +126,8 @@ impl Hidraw {
         let rc = unsafe { libc::ioctl(self.fd, HIDIOCGRAWINFO, &raw mut info) };
         rc >= 0
             && info.bustype == BUS_USB
-            && info.vendor as u16 == VENDOR_SONY
-            && PRODUCTS.contains(&(info.product as u16))
+            && info.vendor as u16 == SONY_VID
+            && [DUALSENSE_PID, DUALSENSE_EDGE_PID].contains(&(info.product as u16))
     }
 
     /// Writes one output report. `report[0]` is the report id.
