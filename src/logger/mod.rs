@@ -10,6 +10,7 @@ mod ring;
 mod sink;
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use tracing_subscriber::filter::LevelFilter;
@@ -47,9 +48,27 @@ where
     }
 }
 
+/// The appender's writer thread, held here rather than by `run` so [`flush`] can reach it from the
+/// panic hook: with `panic = "abort"` no destructor runs, and the PANIC line would die in the queue.
+static GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
+
+/// Flushes the sink on drop. Hold it for the life of the process.
+pub struct FlushOnDrop;
+
+impl Drop for FlushOnDrop {
+    fn drop(&mut self) {
+        flush();
+    }
+}
+
+/// Drains queued lines to the sink and stops the writer thread. Later events are dropped.
+pub fn flush() {
+    let guard = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    drop(guard);
+}
+
 /// Installs the global subscriber (file/TCP + ring, shared level filter).
-/// Returns `WorkerGuard` — must stay alive for the process lifetime.
-pub fn init_subscriber(app_dir: &Path) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+pub fn init_subscriber(app_dir: &Path) -> Result<FlushOnDrop> {
     let sink = sink::open(app_dir).context("open log sink")?;
     let (writer, guard) = tracing_appender::non_blocking(sink);
     let level = resolved_level();
@@ -65,5 +84,6 @@ pub fn init_subscriber(app_dir: &Path) -> Result<tracing_appender::non_blocking:
         .with(fmt_layer)
         .with(ring::layer())
         .init();
-    Ok(guard)
+    *GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(guard);
+    Ok(FlushOnDrop)
 }

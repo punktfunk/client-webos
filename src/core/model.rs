@@ -47,10 +47,11 @@ impl std::ops::DerefMut for KnownHost {
 }
 
 /// The shared record derives no `PartialEq`; the store's writer compares documents, and the
-/// serialized form is the one comparison that cannot miss a field.
+/// serialized form is the one comparison that cannot miss a field. Bytes, not a `Value` tree: the
+/// record's only map is a `BTreeMap`, so its encoding is deterministic.
 impl PartialEq for KnownHost {
     fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+        serde_json::to_vec(self).ok() == serde_json::to_vec(other).ok()
     }
 }
 
@@ -142,7 +143,7 @@ pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Opti
     None
 }
 
-pub fn unique_profile_name(catalog: &[StreamPreset], wanted: &str) -> String {
+fn unique_profile_name(catalog: &[StreamPreset], wanted: &str) -> String {
     let taken = |name: &str| catalog.iter().any(|p| p.name == name);
     if !taken(wanted) {
         return wanted.to_string();

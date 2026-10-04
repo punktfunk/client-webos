@@ -146,8 +146,8 @@ pub trait AudioPlane: AudioSink {
     fn lead_ms(&self) -> i64;
 
     /// Run plane's thread until `stop`. Carry load prime until load confirms; keep checks off the
-    /// feed path. Blocks; caller provides thread. `yields_to_real`: metronome yields to real stream.
-    fn run_keepalive(&self, stop: &AtomicBool, yields_to_real: bool);
+    /// feed path. Blocks; caller provides thread. `route` labels the log line.
+    fn run_keepalive(&self, stop: &AtomicBool, route: &'static str);
 
     /// Hold extra queue depth (ms) to pace picture against presentation cushion. FIXED per session;
     /// monotonic stamps can't give depth back once taken. No-op if plane has no lead to move.

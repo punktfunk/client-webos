@@ -4,13 +4,17 @@ fn main() {
     println!("cargo:rustc-env=PF_CORE_VERSION={}", core_version(&manifest_dir));
     println!("cargo:rerun-if-changed=Cargo.lock");
 
+    let webos = std::env::var("TARGET").as_deref() == Ok("armv7-unknown-linux-gnueabi");
+    // Generate third-party notices (shown on the shell's licenses screen).
+    if webos {
+        generate_third_party_notices(&manifest_dir);
+    }
+    compress_notices(&manifest_dir, &out_dir);
+
     // Only webOS cross target needs glibc shim; dev box's glibc has getauxval/gettid/sendmmsg.
-    if std::env::var("TARGET").as_deref() != Ok("armv7-unknown-linux-gnueabi") {
+    if !webos {
         return;
     }
-
-    // Generate third-party notices (shown on the shell's licenses screen).
-    generate_third_party_notices(&manifest_dir);
     println!("cargo:rerun-if-changed=assets");
     let cc = std::env::var("CC_armv7_unknown_linux_gnueabi")
         .or_else(|_| std::env::var("CC"))
@@ -43,6 +47,14 @@ fn main() {
 
     // The TV has no libSDL3 at all; it ships in ipk/lib/ and is found by $ORIGIN-relative rpath.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
+}
+
+/// Deflates the notices into `OUT_DIR` for the binary to embed: ~630 KB of text is ~60 KB packed,
+/// and only the licenses screen ever reads it.
+fn compress_notices(manifest_dir: &str, out_dir: &str) {
+    let text = std::fs::read(format!("{manifest_dir}/THIRD-PARTY-NOTICES.txt")).expect("read THIRD-PARTY-NOTICES.txt");
+    let packed = miniz_oxide::deflate::compress_to_vec(&text, 9);
+    std::fs::write(format!("{out_dir}/notices.deflate"), packed).expect("write notices.deflate");
 }
 
 /// The pinned shell's (pf-console-ui) version, off `Cargo.lock`: its own `VERSION` is
@@ -335,12 +347,7 @@ fn find_license_files(pkg_dir: &std::path::Path) -> Vec<(String, String)> {
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
                 let name_lower = name_str.to_lowercase();
-                let is_license = LICENSE_GLOBS.iter().any(|glob| {
-                    name_lower == *glob
-                        || name_lower.starts_with(&format!("{}.", glob))
-                        || name_lower.starts_with(&format!("{}-", glob))
-                        || name_lower.contains(glob)
-                });
+                let is_license = LICENSE_GLOBS.iter().any(|glob| name_lower.contains(glob));
 
                 if is_license && path.is_file() {
                     if let Ok(txt) = std::fs::read_to_string(&path) {

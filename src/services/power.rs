@@ -151,7 +151,7 @@ impl std::fmt::Debug for ExitPlan {
 
 impl ExitPlan {
     /// Sends the action within `budget`. `Ok(())` means accepted (202), not that it ran.
-    pub fn send_within(&self, budget: std::time::Duration) -> Result<(), LibraryError> {
+    fn send_within(&self, budget: std::time::Duration) -> Result<(), LibraryError> {
         let Some(action_id) = self.action.action_id() else {
             return Ok(());
         };

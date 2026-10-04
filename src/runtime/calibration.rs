@@ -261,7 +261,7 @@ impl Calibration {
 
 /// Runs the calibration screen until it is saved, cancelled, or the app is asked to close.
 pub(super) fn run(
-    canvas: &sdl3::render::WindowCanvas,
+    window: &sdl3::video::Window,
     gl: &mut Option<console_flow::ConsoleGl>,
     events: &mut sdl3::EventPump,
     fonts: &pf_console_ui::theme::Fonts,
@@ -343,7 +343,7 @@ pub(super) fn run(
             // A TV panel over the pattern (picture settings, the natural thing to open here)
             // fails every GL call on this surface until it closes: the card freezes, the screen
             // stays, and the frame is retried next tick.
-            let frame = overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal));
+            let frame = overlay::frame(gl, window, fonts, display, clear, |f| draw(f, &cal));
             if overlay::drawn(frame, &mut overlay_warned) {
                 drawn = Some(visual);
             }
@@ -354,7 +354,7 @@ pub(super) fn run(
     drop(cal);
     // The console redraws the whole surface on its first frame, so a wipe that could not draw
     // here costs nothing.
-    overlay::drawn(overlay::wipe(gl, canvas, fonts), &mut overlay_warned);
+    overlay::drawn(overlay::wipe(gl, window, fonts), &mut overlay_warned);
     Ok(exit)
 }
 

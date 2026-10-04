@@ -2,7 +2,7 @@
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 
 /// mDNS service type punktfunk hosts advertise.
-pub const SERVICE_TYPE: &str = "_punktfunk._udp.local.";
+const SERVICE_TYPE: &str = "_punktfunk._udp.local.";
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredHost {

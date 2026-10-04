@@ -70,12 +70,12 @@ impl App {
         // window either — stays mapped, cleared fully transparent so the video shows through.
         // Cosmetic like every overlay frame: a TV panel up at this moment must not end the app.
         // A wipe that could not draw stays owed (`hud::Hud`'s `was_active`).
-        let initial_wipe = overlay::wipe(&mut self.console_gl, &self.canvas, &self.fonts);
+        let initial_wipe = overlay::wipe(&mut self.console_gl, &self.window, &self.fonts);
         // Local pointer hidden unless "Cursor capture" is off — otherwise it and the host's own
         // forwarded-position cursor read as "the pointer doesn't match the mouse".
         let mut cursor = cursor::Cursor::new(self.sdl.mouse());
-        cursor.set_captured(settings.cursor_capture(), self.canvas.window());
-        cursor.flush(self.canvas.window(), &self.events);
+        cursor.set_captured(settings.cursor_capture(), &self.window);
+        cursor.flush(&self.window, &self.events);
 
         // `None` when the session decodes audio somewhere other than here (punktfunk's NDL Opus
         // offload) — a second unfed audio device would still claim a PulseAudio sink.
@@ -104,8 +104,8 @@ impl App {
                         tracing::error!("audio player init failed: {e:#}");
                         connected.disconnect_quit();
                         connected.shutdown_and_quit();
-                        cursor.set_captured(false, self.canvas.window());
-                        cursor.flush(self.canvas.window(), &self.events);
+                        cursor.set_captured(false, &self.window);
+                        cursor.flush(&self.window, &self.events);
                         self.menu_notice = Some(format!("Couldn't start audio: {e:#}"));
                         return Ended {
                             outcome: StreamOutcome::ReturnToMenu,
@@ -187,7 +187,7 @@ impl App {
             remote_keys: RemoteKeys::default(),
             buttons: mouse::RemoteButtons::default(),
             relative_motion: mouse::RelativeMotion::default(),
-            text_input: TextInputController::new(self.canvas.window().subsystem().text_input()),
+            text_input: TextInputController::new(self.window.subsystem().text_input()),
             // Seeded from live key state, not `false`: these are rising-edge polls, and the launch
             // itself is a keypress. A key still down when the stream loop starts (webOS's EXIT
             // gesture in particular — a synthetic press whose key-up may never arrive) would read as
@@ -208,6 +208,7 @@ impl App {
             ),
             ring: pf_console_ui::Ring::new(),
             ring_was_open: false,
+            ring_facts_at: None,
             dialog_was_open: false,
             ring_stats: false,
             hud: hud::Hud::new(settings, &connected, initial_wipe),
@@ -219,7 +220,7 @@ impl App {
 
         let outcome = {
             let mut cx = Cx {
-                canvas: &self.canvas,
+                window: &self.window,
                 gl: &mut self.console_gl,
                 fonts: &self.fonts,
                 display: self.display,
@@ -241,7 +242,7 @@ impl App {
             self.menu_notice = Some(notice);
         }
         connected.release_input();
-        stream.text_input.stop(self.canvas.window());
+        stream.text_input.stop(&self.window);
 
         // Hand the Bluetooth links back to the TV's sniff policy.
         drop(pad_link);
@@ -279,8 +280,8 @@ impl App {
             connected.shutdown_and_quit();
             tracing::info!("session torn down");
         });
-        stream.cursor.set_captured(false, self.canvas.window());
-        stream.cursor.flush(self.canvas.window(), &self.events);
+        stream.cursor.set_captured(false, &self.window);
+        stream.cursor.flush(&self.window, &self.events);
         Ended {
             outcome,
             lost: stream.lost,
@@ -305,8 +306,8 @@ impl Stream {
             self.remote_gate.adopt(hid.take_remote_nodes());
         }
         self.remote_gate.poll(now);
-        let osk = self.text_input.is_shown(cx.canvas.window());
-        self.text_input.release_if_dismissed(osk, cx.canvas.window());
+        let osk = self.text_input.is_shown(cx.window);
+        self.text_input.release_if_dismissed(osk, cx.window);
         for event in events.poll_iter() {
             self.handle_event(cx, event, now, osk)?;
         }
@@ -338,8 +339,8 @@ impl Stream {
             self.hid_device_seen = true;
             // Re-applies the capture — and with it the compositor hide, which only sticks
             // now that the node is grabbed: the one at connect raced the reader's scan.
-            self.cursor.disable_sdl_relative(cx.canvas.window());
-            self.cursor.flush(cx.canvas.window(), events);
+            self.cursor.disable_sdl_relative(cx.window);
+            self.cursor.flush(cx.window, events);
         }
     }
 
@@ -351,6 +352,7 @@ impl Stream {
         let ring_open = self.ring.open();
         if ring_open != self.ring_was_open {
             self.ring_was_open = ring_open;
+            self.ring_facts_at = None;
             if ring_open {
                 self.release_all(cx);
             } else {
@@ -364,7 +366,10 @@ impl Stream {
                 }
             }
         }
-        if ring_open {
+        // Throttled: building them allocates, and this runs every 2 ms tick. A command or a fresh
+        // open clears the stamp, so the dial never shows its own change late.
+        if ring_open && self.ring_facts_at.is_none_or(|at| at.elapsed() >= RING_FACTS_EVERY) {
+            self.ring_facts_at = Some(Instant::now());
             self.ring.set_facts(&ring_facts(
                 cx.settings,
                 cx.connected,
@@ -376,6 +381,7 @@ impl Stream {
         self.ring.tick();
         while let Some(cmd) = self.ring.take_command() {
             tracing::info!(?cmd, "dial");
+            self.ring_facts_at = None;
             self.ring_command(cx, cmd)?;
         }
         // Host actions: this client keeps no action cache, so their slots stay dimmed.
@@ -402,7 +408,7 @@ impl Stream {
             }
             RingCommand::CycleStats => self.ring_stats = true,
             RingCommand::Keyboard => {
-                raise_keyboard(&mut self.text_input, cx.display, cx.canvas.window());
+                raise_keyboard(&mut self.text_input, cx.display, cx.window);
             }
             RingCommand::RequestMode {
                 width,
@@ -462,12 +468,12 @@ impl Stream {
         if !self.disconnect.is_open() && cx.pads.chord_held(EXIT_HOLD) {
             tracing::info!("disconnect shortcut held — opening dialog");
             cx.pads.clear_chords();
-            self.disconnect.open(1);
+            self.disconnect.open(1, cx.fonts, cx.display);
         }
         // EXIT gesture (held Back) opens the dialog; a short tap is Esc (`events`).
         if exit_gesture_fired(&mut self.exit_held) && !self.disconnect.is_open() {
             tracing::info!("EXIT gesture — opening disconnect dialog");
-            self.disconnect.open(1);
+            self.disconnect.open(1, cx.fonts, cx.display);
         }
         // The dialog owns input and the canvas, so the dial gives way to it.
         if self.disconnect.is_open() && self.ring.open() {
@@ -517,7 +523,7 @@ impl Stream {
         // app can hear; Back is the way out and webOS's IME dismisses on it without being
         // told. A toggle here looks symmetric and cannot work.
         if std::mem::take(&mut self.blue_pressed) && !osk {
-            raise_keyboard(&mut self.text_input, cx.display, cx.canvas.window());
+            raise_keyboard(&mut self.text_input, cx.display, cx.window);
         }
         self.hud.note_hold(cx.connected.stats().holding.load(Ordering::Relaxed));
     }
@@ -531,7 +537,7 @@ impl Stream {
         // as its pointer, and holding a grab would only leave a HID device dead meanwhile.
         let want_captured = cx.settings.cursor_capture() && !self.disconnect.is_open();
         if want_captured != self.cursor.is_captured() {
-            self.cursor.set_captured(want_captured, cx.canvas.window());
+            self.cursor.set_captured(want_captured, cx.window);
         }
         if let Some(hid) = &self.hid {
             // Deactivating releases whatever HID held on the host.
@@ -550,7 +556,7 @@ impl Stream {
             // Own pass over the punch-through video: the dialog alone, on a transparent
             // clear (NDL video is on a hardware plane below this surface, so no blur).
             let disconnect = &self.disconnect;
-            let frame = overlay::frame(cx.gl, cx.canvas, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
+            let frame = overlay::frame(cx.gl, cx.window, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
                 disconnect.draw(f);
             });
             self.hud.drawn(frame);
@@ -603,6 +609,10 @@ impl Stream {
         self.remote_keys.reset();
     }
 }
+
+/// How stale the dial's facts may get while it is open: host-side changes (mode, grants) land
+/// within this.
+const RING_FACTS_EVERY: Duration = Duration::from_millis(100);
 
 /// What the dial's slots read this frame. Controller mouse targets pad 0.
 pub(super) fn ring_facts(

@@ -13,7 +13,6 @@ mod writer;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 use crate::core::VERSION;
 
@@ -30,15 +29,14 @@ fn path() -> PathBuf {
     app_dir().join("settings.json")
 }
 
-fn read_document() -> Option<Value> {
-    let text = std::fs::read_to_string(path()).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
 /// Loads the whole persisted document. Absent, unreadable and unparseable all answer with
 /// defaults — a torn file must not take the app down (`services::atomic` is what prevents one).
 pub fn load() -> Persisted {
-    let mut state = read_document().map_or_else(Persisted::default, from_document);
+    // No migration — a document that doesn't deserialize answers with defaults.
+    let mut state = std::fs::read(path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Persisted>(&bytes).ok())
+        .unwrap_or_default();
     stamp_version(&mut state);
     // A document written on a more capable TV can hold HEVC, HDR and 7.1 on a device with none
     // of them — leaving a *set* value whose row the UI hides.
@@ -61,14 +59,8 @@ fn stamp_version(state: &mut Persisted) {
     }
 }
 
-/// The document as stored: its `settings` object is the shared schema verbatim (see [`shared`]).
-/// No migration — a document that doesn't deserialize answers with defaults.
-fn from_document(doc: Value) -> Persisted {
-    serde_json::from_value(doc).unwrap_or_default()
-}
-
+/// Writes the whole document: its `settings` object is the shared schema verbatim (see [`shared`]).
 pub fn save(state: &Persisted) -> Result<()> {
-    let doc = serde_json::to_value(state).context("serialize app state")?;
-    let json = serde_json::to_string_pretty(&doc).context("render app state")?;
+    let json = serde_json::to_string_pretty(state).context("serialize app state")?;
     crate::services::atomic::write(&path(), &json, "settings.json")
 }

@@ -40,6 +40,7 @@ pub(super) fn launch_level() -> Option<Level> {
         .to_ascii_lowercase()
         .as_str()
     {
+        "trace" => Some(Level::TRACE),
         "debug" => Some(Level::DEBUG),
         "info" => Some(Level::INFO),
         "warn" => Some(Level::WARN),

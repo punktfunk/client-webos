@@ -150,10 +150,16 @@ impl Service {
             self.rows_dirty = true;
             self.handle(cmd);
         }
-        if self.last_tick.is_some_and(|t| t.elapsed() < SERVICE_EVERY) {
-            return;
+        // Served commands' edits show this tick, not the next service one.
+        if self.last_tick.is_none_or(|t| t.elapsed() >= SERVICE_EVERY) {
+            self.last_tick = Some(Instant::now());
+            self.service();
         }
-        self.last_tick = Some(Instant::now());
+        self.publish_rows();
+    }
+
+    /// The background's answers, on the service cadence: adverts, sweeps, games, art, pairing.
+    fn service(&mut self) {
         if let Some(discovery) = &mut self.discovery {
             for host in discovery.poll() {
                 self.rows_dirty = true;
@@ -169,6 +175,11 @@ impl Service {
         if self.last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
             self.start_sweep();
         }
+    }
+
+    /// Hands the shell fresh rows when an input changed: the document (its revision, bumped by
+    /// every store edit) or this service's own state (`rows_dirty`).
+    fn publish_rows(&mut self) {
         let revision = self.store.revision();
         if self.rows_dirty || self.rows_revision != Some(revision) {
             self.handles.console.set_hosts(self.rows());
@@ -187,9 +198,10 @@ impl Service {
 
     // ---- the models the shell reads ---------------------------------------------------
 
-    /// The home carousel: saved hosts (most recently used first), each followed by its pinned
-    /// profile cards, then discovered-but-unsaved ones. A pinned card shares its host's live
-    /// state; its key rides the profile id behind a NUL, as the desktop's does.
+    /// The home carousel: saved hosts by name (the record keeps no launch history), each
+    /// followed by its pinned profile cards, then discovered-but-unsaved ones. A pinned card
+    /// shares its host's live state; its key rides the profile id behind a NUL, as the
+    /// desktop's does.
     // Inputs: persisted hosts/profiles, adverts, reachability, rights.
     // Store revision and rows_dirty gate updates; game arrivals affect no row fields.
     fn rows(&self) -> Vec<HostRow> {
@@ -217,7 +229,7 @@ impl Service {
                 (row, pins)
             })
             .collect();
-        hosts.sort_by(|(a, _), (b, _)| b.last_used.cmp(&a.last_used).then_with(|| a.name.cmp(&b.name)));
+        hosts.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
         let mut saved: Vec<HostRow> = hosts
             .into_iter()
             .flat_map(|(row, pins)| std::iter::once(row).chain(pins))
@@ -226,33 +238,7 @@ impl Service {
             .discovered
             .iter()
             .filter(|d| !state.known_hosts.iter().any(|h| same_host(h, d)))
-            .map(|d| HostRow {
-                key: shared::host_key("", &d.addr, d.port),
-                // Nothing saved to point at, so the shell hides "Make default host".
-                id: None,
-                name: d.name.clone(),
-                addr: d.addr.clone(),
-                port: d.port,
-                // The advert's: it is what Request access pins while the host decides.
-                fp_hex: d.fp_hex.clone(),
-                paired: false,
-                saved: false,
-                // It is answering mDNS right now, which is the whole of what "online" claims.
-                online: true,
-                mgmt_port: d.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
-                can_wake: false,
-                clipboard_sync: false,
-                last_used: None,
-                os: d.os.clone(),
-                // Unpaired: there is nothing it would let this TV do to it.
-                actions: Vec::new(),
-                pin: None,
-                bound_preset: None,
-                game_presets: Default::default(),
-                // Needs `/api/v1/status`, which this client does not ask — the same reason
-                // `LibraryGame::running` is false here. Empty renders as no line.
-                running: String::new(),
-            })
+            .map(discovered_row)
             .collect();
         extra.sort_by(|a, b| a.name.cmp(&b.name));
         saved.extend(extra);
@@ -362,11 +348,21 @@ impl Service {
             ConsoleCmd::UnpairHost { key } => self.unpair_host(&key),
             ConsoleCmd::SavePreset { id, name, overrides } => self.save_preset(id, name, overrides),
             ConsoleCmd::DeletePreset { id } => self.delete_preset(&id),
-            // The notices `build.rs` writes beside the crate, compiled in: the ipk ships no copy.
-            ConsoleCmd::LoadLicenses => self.handles.console.set_licenses(vec![pf_console_ui::LicenseSection {
-                heading: "Third-party software".into(),
-                text: include_str!("../../THIRD-PARTY-NOTICES.txt").into(),
-            }]),
+            // The notices `build.rs` writes beside the crate, compiled in deflated: the ipk ships
+            // no copy.
+            ConsoleCmd::LoadLicenses => {
+                const NOTICES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/notices.deflate"));
+                let text = miniz_oxide::inflate::decompress_to_vec(NOTICES).map_or_else(
+                    |e| format!("notices unavailable: {e:?}"),
+                    |bytes| {
+                        String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+                    },
+                );
+                self.handles.console.set_licenses(vec![pf_console_ui::LicenseSection {
+                    heading: "Third-party software".into(),
+                    text,
+                }]);
+            }
             // Bind (or clear) one title's profile — the shell's "Profile" row on a
             // cover. The host half of the key is what addresses the record; the catalog itself
             // is only ever written by the per-game screen, so an id naming nothing is refused
@@ -409,7 +405,7 @@ impl Service {
     /// hold: the record must never name a profile nothing resolves, and the shell can only
     /// offer ids it was handed, so one that misses means the two went out of step.
     fn bind_game_preset(&self, key: &str, game: &str, profile_id: Option<&str>) {
-        let changed = self.store.edit(|state| {
+        self.store.edit(|state| {
             if let Some(id) = profile_id {
                 if !state.profiles.iter().any(|p| p.id == id) {
                     tracing::warn!(%id, "console: bind to a profile this document does not hold");
@@ -427,26 +423,17 @@ impl Service {
             host.bind_game_preset(game, profile_id);
             true
         });
-        if changed {
-            self.handles.console.set_hosts(self.rows());
-        }
     }
 
     /// The host's default binding, through the shared edit; the carousel re-reads on a change.
     fn bind_host_profile(&self, key: &str, profile_id: Option<String>) {
-        if self
-            .store
-            .edit(|state| shared::bind_host_profile(state, key, profile_id))
-        {
-            self.handles.console.set_hosts(self.rows());
-        }
+        self.store
+            .edit(|state| shared::bind_host_profile(state, key, profile_id));
     }
 
     /// A pinned card on or off, through the shared edit; the carousel re-reads on a change.
     fn set_pin(&self, key: &str, profile_id: String, pin: bool) {
-        if self.store.edit(|state| shared::set_pin(state, key, profile_id, pin)) {
-            self.handles.console.set_hosts(self.rows());
-        }
+        self.store.edit(|state| shared::set_pin(state, key, profile_id, pin));
     }
 
     /// Remember the delivery profile a network check offered (`0` clears it); the next connect
@@ -465,7 +452,7 @@ impl Service {
     /// Drop the pinned certificate and keep the record: the next connect asks for a PIN
     /// again, and the row's key changes with its fingerprint.
     fn unpair_host(&self, key: &str) {
-        let changed = self.store.edit(|state| {
+        self.store.edit(|state| {
             let Some(i) = shared::find_known(&state.known_hosts, key) else {
                 tracing::warn!(%key, "console: unpair for an unknown host");
                 return false;
@@ -475,9 +462,6 @@ impl Service {
             host.paired = false;
             true
         });
-        if changed {
-            self.handles.console.set_hosts(self.rows());
-        }
     }
 
     /// Create or replace one profile in the document; the shell reads its catalog from there.
@@ -498,14 +482,11 @@ impl Service {
             }
             true
         });
-        self.handles.console.set_hosts(self.rows());
     }
 
     /// Drop one profile through the shared edit; the carousel re-reads on a change.
     fn delete_preset(&self, id: &str) {
-        if self.store.edit(|state| shared::delete_profile(state, id)) {
-            self.handles.console.set_hosts(self.rows());
-        }
+        self.store.edit(|state| shared::delete_profile(state, id));
     }
 
     fn notice(&self, text: String) {
@@ -880,16 +861,13 @@ impl Service {
         loop {
             match rx.try_recv() {
                 Ok(s) => {
-                    self.rows_dirty = true;
-                    self.reachable.insert(s.key.clone(), s.online);
-                    match s.rights {
-                        Some(r) => {
-                            self.rights.insert(s.key, r);
-                        }
-                        None => {
-                            self.rights.remove(&s.key);
-                        }
-                    }
+                    // A sweep repeats what is already shown far more often than it changes it.
+                    let was_online = self.reachable.insert(s.key.clone(), s.online);
+                    let old_rights = match s.rights {
+                        Some(r) => self.rights.insert(s.key, r),
+                        None => self.rights.remove(&s.key),
+                    };
+                    self.rows_dirty |= was_online != Some(s.online) || old_rights != s.rights;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -919,8 +897,7 @@ impl Service {
             .iter()
             .find(|h| h.addr == addr && h.port == port)
             .map_or_else(|| shared::host_key("", addr, port), shared::known_host_key);
-        self.rows_dirty = true;
-        self.reachable.insert(key, online);
+        self.rows_dirty |= self.reachable.insert(key, online) != Some(online);
     }
 
     fn start_wake(&mut self, key: &str, then_connect: bool) {
@@ -1153,7 +1130,7 @@ fn spawn_art(
             };
             let mut cache = crate::services::art::CoverCache::new(&addr, port);
             let mut fetch = |game: &GameEntry| {
-                crate::services::art::cached_cover(&addr, port, &game.id).or_else(|| {
+                cache.cached(&game.id).or_else(|| {
                     // Portrait, then header, then hero.
                     [&game.art.portrait, &game.art.header, &game.art.hero]
                         .into_iter()
@@ -1209,7 +1186,38 @@ fn spawn_art(
     ArtReceiver { rx, cancelled }
 }
 
-/// Max time per tick to adopt art. ~33ms = 2 frames @ 60Hz; burst costs a visible beat, not stall.
+/// The row for a host answering mDNS that this TV has not saved.
+fn discovered_row(d: &DiscoveredHost) -> HostRow {
+    HostRow {
+        key: shared::host_key("", &d.addr, d.port),
+        // Nothing saved to point at, so the shell hides "Make default host".
+        id: None,
+        name: d.name.clone(),
+        addr: d.addr.clone(),
+        port: d.port,
+        // The advert's: it is what Request access pins while the host decides.
+        fp_hex: d.fp_hex.clone(),
+        paired: false,
+        saved: false,
+        // It is answering mDNS right now, which is the whole of what "online" claims.
+        online: true,
+        mgmt_port: d.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
+        can_wake: false,
+        clipboard_sync: false,
+        last_used: None,
+        os: d.os.clone(),
+        // Unpaired: there is nothing it would let this TV do to it.
+        actions: Vec::new(),
+        pin: None,
+        bound_preset: None,
+        game_presets: Default::default(),
+        // Needs `/api/v1/status`, which this client does not ask — the same reason
+        // `LibraryGame::running` is false here. Empty renders as no line.
+        running: String::new(),
+    }
+}
+
+/// Max time per tick to adopt art. Half a 60 Hz frame; a burst costs a visible beat, not a stall.
 const ART_DRAIN_BUDGET: Duration = Duration::from_millis(8);
 
 /// How long the covers that failed wait before their one retry.

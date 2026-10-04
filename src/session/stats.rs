@@ -2,12 +2,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-/// Live video-pump counters for stats overlay (read at ~2Hz); relaxed atomics written per frame.
+/// Live video-pump counters for stats overlay (read at ~2Hz); relaxed atomics, most written on
+/// the pump's 2 s heartbeat.
 #[derive(Default)]
 pub struct StreamStats {
     /// Freeze-until-reanchor hold active.
     pub holding: AtomicBool,
-    /// Most recent decoder feed duration (µs).
+    /// Submit time of the last timed AU, summed across its pieces (µs).
     pub feed_us: AtomicU32,
     /// NDL render-buffer backlog or -1 if unavailable.
     pub render_backlog: AtomicI32,

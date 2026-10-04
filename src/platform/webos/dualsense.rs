@@ -24,7 +24,8 @@
 //! A Bluetooth `DualSense` on SDL's HIDAPI driver refuses it: rumble needs enhanced reports,
 //! which stay off on this TV. Reports built here never set the vibration valid-flag, so
 //! they cannot fight the kernel's force-feedback state — see [`build_report`].
-use std::fmt::Write as _;
+use std::ffi::CStr;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ static TRIGGERS_SEEN: AtomicU32 = AtomicU32::new(0);
 
 /// `hid/internal/sendData` — the only one of the three HID methods that works. `getReport`
 /// hangs on a pad that doesn't answer; `setReport` refuses with error 4 whatever the payload.
-const SEND_DATA_URI: &str = "luna://com.webos.service.bluetooth2/hid/internal/sendData";
+const SEND_DATA_URI: &CStr = c"luna://com.webos.service.bluetooth2/hid/internal/sendData";
 
 /// Bluetooth `DualSense` output report, per Linux `hid-playstation`'s
 /// `dualsense_output_report_bt`: `0x31`, seq/tag, tag, the 47-byte common block, 24 reserved
@@ -406,12 +407,26 @@ fn build_report(seq: u8, state: &State) -> [u8; REPORT_LEN] {
     r[1] = (seq & 0x0F) << 4; // high nibble = sequence, low nibble = tag mask (0)
     r[2] = 0x10; // DS_OUTPUT_TAG
     fill_common(&mut r[COMMON..COMMON + 47], state);
-    // CRC32 over a 0xA2 seed byte (the HIDP DATA/Output header the stack prepends) followed
-    // by everything ahead of the CRC field itself.
-    let signed = std::iter::once(0xA2).chain(r[..REPORT_LEN - 4].iter().copied());
-    let crc = crc32_le(signed);
-    r[REPORT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+    seal(&mut r);
     r
+}
+
+/// Writes the trailing CRC32: over a 0xA2 seed byte (the HIDP DATA/Output header the stack
+/// prepends) followed by everything ahead of the CRC field itself.
+fn seal(r: &mut [u8]) {
+    let body = r.len() - 4;
+    let crc = crc32_le(std::iter::once(0xA2).chain(r[..body].iter().copied()));
+    r[body..].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// Routes the pad's audio to its speaker at full volume with the pre-amp, as the Linux sink does.
+/// `c` is a 47-byte common block; only the audio valid-flags are added to what it holds.
+fn speaker_routing(c: &mut [u8]) {
+    c[0] |= 0x80 | 0x20; // AllowAudioControl | AllowSpeakerVolume
+    c[1] |= 0x80; // AllowAudioControl2
+    c[5] = SPEAKER_VOLUME;
+    c[7] = 0x30; // OutputPathSelect: speaker
+    c[37] = 0x02; // SpeakerCompPreGain
 }
 
 /// The 47-byte common block (`0x31` body, `0x10` sub-packet payload) for `state`.
@@ -441,14 +456,8 @@ fn build_speaker_setup(seq: u8) -> [u8; REPORT_LEN] {
     r[0] = 0x31;
     r[1] = (seq & 0x0F) << 4;
     r[2] = 0x10;
-    r[COMMON] = 0x80 | 0x20; // AllowAudioControl | AllowSpeakerVolume
-    r[COMMON + 1] = 0x80; // AllowAudioControl2
-    r[COMMON + 5] = SPEAKER_VOLUME;
-    r[COMMON + 7] = 0x30; // OutputPathSelect: speaker
-    r[COMMON + 37] = 0x02; // SpeakerCompPreGain
-    let signed = std::iter::once(0xA2).chain(r[..REPORT_LEN - 4].iter().copied());
-    let crc = crc32_le(signed);
-    r[REPORT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+    speaker_routing(&mut r[COMMON..COMMON + 47]);
+    seal(&mut r);
     r
 }
 
@@ -472,11 +481,7 @@ fn build_audio_report(
     r[11] = 0x10 | 0x80;
     r[12] = 63;
     fill_common(&mut r[13..13 + 47], state);
-    r[13] |= 0x80 | 0x20; // AllowAudioControl | AllowSpeakerVolume
-    r[14] |= 0x80; // AllowAudioControl2
-    r[13 + 5] = SPEAKER_VOLUME;
-    r[13 + 7] = 0x30;
-    r[13 + 37] = 0x02;
+    speaker_routing(&mut r[13..13 + 47]);
     r[76] = 0x12 | 0x80;
     r[77] = (COIL_REPORT_FRAMES * 2) as u8;
     for (i, [l, right]) in coils.iter().enumerate() {
@@ -486,9 +491,7 @@ fn build_audio_report(
     r[142] = 0x13 | 0x80;
     r[143] = SPEAKER_FRAME_LEN as u8;
     r[144..144 + SPEAKER_FRAME_LEN].copy_from_slice(speaker);
-    let signed = std::iter::once(0xA2).chain(r[..AUDIO_REPORT_LEN - 4].iter().copied());
-    let crc = crc32_le(signed);
-    r[AUDIO_REPORT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+    seal(&mut r);
     r
 }
 
@@ -567,22 +570,27 @@ impl SpeakerLane {
 
 /// `reportData` as a bare int array — **no `reportId` key**. The service validates the whole
 /// object against a strict schema, so one extra property fails the call outright.
-fn payload_for(address: &str, report: &[u8]) -> String {
-    let mut payload = String::with_capacity(report.len() * 4 + 64);
-    let _ = write!(payload, "{{\"address\":\"{address}\",\"reportData\":[");
+///
+/// Written into `buf`, reused across reports: ~94 a second on the audio lane.
+fn payload_for<'a>(buf: &'a mut Vec<u8>, address: &str, report: &[u8]) -> anyhow::Result<&'a CStr> {
+    buf.clear();
+    buf.extend_from_slice(b"{\"address\":\"");
+    buf.extend_from_slice(address.as_bytes());
+    buf.extend_from_slice(b"\",\"reportData\":[");
     for (i, b) in report.iter().enumerate() {
         let _ = if i == 0 {
-            write!(payload, "{b}")
+            write!(buf, "{b}")
         } else {
-            write!(payload, ",{b}")
+            write!(buf, ",{b}")
         };
     }
-    payload.push_str("]}");
-    payload
+    buf.extend_from_slice(b"]}\0");
+    Ok(CStr::from_bytes_with_nul(buf)?)
 }
 
-fn send_report(address: &str, report: &[u8; REPORT_LEN]) -> anyhow::Result<()> {
-    crate::platform::webos::luna::call(SEND_DATA_URI, &payload_for(address, report))
+fn send_report(buf: &mut Vec<u8>, address: &str, report: &[u8; REPORT_LEN]) -> anyhow::Result<()> {
+    let payload = payload_for(buf, address, report)?;
+    crate::platform::webos::luna::call(SEND_DATA_URI.to_str()?, payload.to_str()?)
 }
 
 /// The wired pad's output report: `0x02`, the same 47-byte common block the Bluetooth `0x31`
@@ -611,11 +619,7 @@ fn build_usb_report(state: &State) -> [u8; USB_REPORT_LEN] {
 pub fn build_usb_speaker_setup() -> [u8; USB_REPORT_LEN] {
     let mut r = [0u8; USB_REPORT_LEN];
     r[0] = 0x02;
-    r[USB_COMMON] = 0x80 | 0x20; // AllowAudioControl | AllowSpeakerVolume
-    r[USB_COMMON + 1] = 0x80; // AllowAudioControl2
-    r[USB_COMMON + 5] = SPEAKER_VOLUME;
-    r[USB_COMMON + 7] = 0x30; // OutputPathSelect: speaker
-    r[USB_COMMON + 37] = 0x02; // SpeakerCompPreGain
+    speaker_routing(&mut r[USB_COMMON..USB_COMMON + 47]);
     r
 }
 
@@ -664,9 +668,7 @@ fn build_coil_report(seq: u8, counter: u8, frames: &[[i8; 2]; COIL_REPORT_FRAMES
         r[13 + i * 2] = *l as u8;
         r[14 + i * 2] = *right as u8;
     }
-    let signed = std::iter::once(0xA2).chain(r[..COIL_REPORT_LEN - 4].iter().copied());
-    let crc = crc32_le(signed);
-    r[COIL_REPORT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+    seal(&mut r);
     r
 }
 
@@ -731,13 +733,12 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
             None
         }
     });
+    let mut payload = Vec::with_capacity(AUDIO_REPORT_LEN * 4 + 64);
     if let (Some(bus), Some(_)) = (&bus, &speaker) {
         // Routing + volume once; every audio report re-asserts it in its state sub-packet.
-        let _ = bus.call(
-            SEND_DATA_URI,
-            &payload_for(address, &build_speaker_setup(0)),
-            ls2::Call::SendReport,
-        );
+        if let Ok(p) = payload_for(&mut payload, address, &build_speaker_setup(0)) {
+            let _ = bus.call(SEND_DATA_URI, p, ls2::Call::SendReport);
+        }
     }
     let mut speaker_pcm = [0f32; SPEAKER_IN_SAMPLES * 2];
     // `true` while the pad plays the speaker lane: cleared when it goes quiet, so the next burst
@@ -792,8 +793,9 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
             seq = seq.wrapping_add(1);
             let report = build_report(seq, &state);
             let sent = match &bus {
-                Some(bus) => bus.call(SEND_DATA_URI, &payload_for(address, &report), ls2::Call::SendReport),
-                None => send_report(address, &report),
+                Some(bus) => payload_for(&mut payload, address, &report)
+                    .and_then(|p| bus.call(SEND_DATA_URI, p, ls2::Call::SendReport)),
+                None => send_report(&mut payload, address, &report),
             };
             match sent {
                 Ok(()) => {
@@ -850,7 +852,9 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
                     1
                 };
                 for _ in 0..if holding { 0 } else { reports_now } {
-                    let report: Vec<u8> = if speaker_live {
+                    let audio;
+                    let coil;
+                    let report: &[u8] = if speaker_live {
                         let lane_enc = speaker.as_mut().expect("speaker_live implies a lane");
                         let frame = if envelope.take_speaker(&mut speaker_pcm) {
                             lane_enc.encode(&speaker_pcm)
@@ -859,17 +863,21 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
                         };
                         seq = seq.wrapping_add(1);
                         counter = counter.wrapping_add(1);
-                        build_audio_report(seq, counter, &current, &frames, &frame).to_vec()
+                        audio = build_audio_report(seq, counter, &current, &frames, &frame);
+                        &audio
                     } else if had_coils || envelope.active() {
                         // Keep the cadence through the hold window after the last frame — zeros, so
                         // the pad's buffer runs out cleanly rather than looping its tail.
                         seq = seq.wrapping_add(1);
                         counter = counter.wrapping_add(1);
-                        build_coil_report(seq, counter, &frames).to_vec()
+                        coil = build_coil_report(seq, counter, &frames);
+                        &coil
                     } else {
                         break;
                     };
-                    if let Err(e) = bus.call(SEND_DATA_URI, &payload_for(address, &report), ls2::Call::SendReport) {
+                    let sent = payload_for(&mut payload, address, report)
+                        .and_then(|p| bus.call(SEND_DATA_URI, p, ls2::Call::SendReport));
+                    if let Err(e) = sent {
                         if !failing {
                             tracing::warn!("DualSense audio send failed (further errors quiet): {e}");
                             failing = true;
@@ -898,14 +906,11 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     if let (Some(bus), Some(_)) = (&bus, &lane) {
         // Wait out the replies HERE. This loop is the last thing that can report them, and
         // `REPLIES` is process-wide, so a refusal left undispatched surfaces inside the NEXT
-        // session and reads as its fault. Teardown is not latency-critical; a reply on this bus
-        // has measured 1.4-2.4 ms, so 100 ms is many times over.
-        for _ in 0..20 {
-            bus.pump();
-            if let Some(text) = ls2::REPLIES.take_failure() {
-                tracing::warn!("DualSense feedback: Bluetooth service refused a report: {text}");
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        // session and reads as its fault. A reply on this bus has measured 1.4-2.4 ms, so 100 ms
+        // is many times over.
+        bus.drain(Duration::from_millis(100));
+        if let Some(text) = ls2::REPLIES.take_failure() {
+            tracing::warn!("DualSense feedback: Bluetooth service refused a report: {text}");
         }
     }
 }

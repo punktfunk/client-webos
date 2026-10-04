@@ -49,19 +49,20 @@ struct RefusalStreak {
 }
 
 impl RefusalStreak {
-    /// Records one feed at `now_ns` (ns since load). Called on the feeding thread only.
-    fn note(&self, fed: bool, now_ns: u64) {
-        if fed {
-            self.first.store(0, Ordering::Relaxed);
-            self.last.store(0, Ordering::Relaxed);
-        } else {
-            // `max(1)` so a refusal in the first ns of a load still reads as a streak.
-            let now_ns = now_ns.max(1);
-            let _ = self
-                .first
-                .compare_exchange(0, now_ns, Ordering::Relaxed, Ordering::Relaxed);
-            self.last.store(now_ns, Ordering::Relaxed);
-        }
+    /// Records a landed feed: the streak ends. Called on the feeding thread only.
+    fn clear(&self) {
+        self.first.store(0, Ordering::Relaxed);
+        self.last.store(0, Ordering::Relaxed);
+    }
+
+    /// Records a refused feed at `now_ns` (ns since load). Called on the feeding thread only.
+    fn refused(&self, now_ns: u64) {
+        // `max(1)` so a refusal in the first ns of a load still reads as a streak.
+        let now_ns = now_ns.max(1);
+        let _ = self
+            .first
+            .compare_exchange(0, now_ns, Ordering::Relaxed, Ordering::Relaxed);
+        self.last.store(now_ns, Ordering::Relaxed);
     }
 
     /// How long every attempted feed has failed for; zero while any is landing.
@@ -138,7 +139,11 @@ impl NdlVideo {
         let first_frame = {
             let _ffi = lock_ffi();
             let fed = self.fns.video_play(au, pts_ms);
-            self.refused.note(fed.is_ok(), self.elapsed_ns());
+            // The clock is read only on a refusal: this runs under the FFI lock every frame.
+            match &fed {
+                Ok(()) => self.refused.clear(),
+                Err(_) => self.refused.refused(self.elapsed_ns()),
+            }
             fed?;
             mark_frame_fed_logged("NDL", self.load_instant)
         };
@@ -257,19 +262,19 @@ mod refusal_tests {
     fn only_an_unbroken_streak_ages() {
         let streak = RefusalStreak::default();
         assert_eq!(streak.span(), Duration::ZERO, "nothing fed yet is not a refusal");
-        streak.note(false, S);
-        streak.note(false, 5 * S);
+        streak.refused(S);
+        streak.refused(5 * S);
         assert_eq!(streak.span().as_secs(), 4, "first to latest refusal");
-        streak.note(false, 11 * S);
+        streak.refused(11 * S);
         assert!(
             streak.span() <= DEAD_AFTER_REFUSED,
             "the ceiling itself is not yet dead"
         );
-        streak.note(false, 12 * S);
+        streak.refused(12 * S);
         assert!(streak.span() > DEAD_AFTER_REFUSED);
-        streak.note(true, 12 * S);
+        streak.clear();
         assert_eq!(streak.span(), Duration::ZERO, "one accepted frame clears it");
-        streak.note(false, 31 * S);
+        streak.refused(31 * S);
         assert!(streak.span() < DEAD_AFTER_REFUSED, "a fresh streak starts over");
     }
 
@@ -278,9 +283,9 @@ mod refusal_tests {
     #[test]
     fn idle_time_is_not_a_refusal() {
         let streak = RefusalStreak::default();
-        streak.note(false, S);
+        streak.refused(S);
         assert_eq!(streak.span(), Duration::ZERO);
-        streak.note(false, 30 * S);
+        streak.refused(30 * S);
         assert!(
             streak.span() > DEAD_AFTER_REFUSED,
             "the next attempt refused too: now it is evidence"

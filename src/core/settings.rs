@@ -8,21 +8,21 @@ use punktfunk_core::config::GamepadPref;
 
 use crate::core::model::{AudioRoutePref, CodecPref, GamepadType, HdrDisplay};
 
-/// Prefix for rows only this client has. Namespaced so a future shared field of the same name
-/// cannot collide with what a TV persisted.
-const P: &str = "webos.";
-
-fn key(name: &str) -> String {
-    format!("{P}{name}")
+/// Keys of the rows only this client has. Namespaced under `webos.` so a future shared field of
+/// the same name cannot collide with what a TV persisted.
+macro_rules! key {
+    ($name:literal) => {
+        concat!("webos.", $name)
+    };
 }
 
 fn get<T: serde::de::DeserializeOwned>(t: &Settings, key: &str) -> Option<T> {
-    t.extra.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+    t.extra.get(key).and_then(|v| T::deserialize(v).ok())
 }
 
-fn put<T: serde::Serialize>(t: &mut Settings, key: String, value: &T) {
+fn put<T: serde::Serialize>(t: &mut Settings, key: &str, value: &T) {
     if let Ok(v) = serde_json::to_value(value) {
-        t.extra.insert(key, v);
+        t.extra.insert(key.to_string(), v);
     }
 }
 
@@ -108,27 +108,27 @@ impl TvSettings for Settings {
     }
 
     fn hdr_peak_nits(&self) -> u16 {
-        get(self, &key("hdr_peak_nits")).unwrap_or(HdrDisplay::DEFAULT.peak_nits)
+        get(self, key!("hdr_peak_nits")).unwrap_or(HdrDisplay::DEFAULT.peak_nits)
     }
 
     fn hdr_frame_avg_nits(&self) -> u16 {
-        get(self, &key("hdr_frame_avg_nits")).unwrap_or(HdrDisplay::DEFAULT.frame_avg_nits)
+        get(self, key!("hdr_frame_avg_nits")).unwrap_or(HdrDisplay::DEFAULT.frame_avg_nits)
     }
 
     fn hdr_black_code(&self) -> u16 {
-        get(self, &key("hdr_black_code")).unwrap_or(HdrDisplay::DEFAULT.black_code)
+        get(self, key!("hdr_black_code")).unwrap_or(HdrDisplay::DEFAULT.black_code)
     }
 
     fn hdr_calibrated(&self) -> bool {
-        get(self, &key("hdr_calibrated")).unwrap_or(false)
+        get(self, key!("hdr_calibrated")).unwrap_or(false)
     }
 
     fn audio_route(&self) -> AudioRoutePref {
-        get(self, &key("audio_route")).unwrap_or_default()
+        get(self, key!("audio_route")).unwrap_or_default()
     }
 
     fn set_audio_route(&mut self, route: AudioRoutePref) {
-        put(self, key("audio_route"), &route);
+        put(self, key!("audio_route"), &route);
     }
 
     fn hdr_display(&self) -> HdrDisplay {
@@ -140,10 +140,10 @@ impl TvSettings for Settings {
     }
 
     fn set_hdr_display(&mut self, display: HdrDisplay, calibrated: bool) {
-        put(self, key("hdr_peak_nits"), &display.peak_nits);
-        put(self, key("hdr_frame_avg_nits"), &display.frame_avg_nits);
-        put(self, key("hdr_black_code"), &display.black_code);
-        put(self, key("hdr_calibrated"), &calibrated);
+        put(self, key!("hdr_peak_nits"), &display.peak_nits);
+        put(self, key!("hdr_frame_avg_nits"), &display.frame_avg_nits);
+        put(self, key!("hdr_black_code"), &display.black_code);
+        put(self, key!("hdr_calibrated"), &calibrated);
     }
 
     fn clamp_to_caps(&mut self) {

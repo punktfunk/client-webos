@@ -221,16 +221,13 @@ impl NdlVideo {
     ///
     /// The thread also owns [`Self::check_plane_confirmed`], kept off the feed path, and exits once
     /// neither job can fire again.
-    pub fn run_clock_plane(&self, stop: &std::sync::atomic::AtomicBool, yields_to_real: bool) {
+    pub fn run_clock_plane(&self, stop: &std::sync::atomic::AtomicBool, route: &'static str) {
         if !self.audio {
             tracing::info!("NDL clock plane: the load has no audio plane — nothing to pace against");
             return;
         }
         // Logged per-load, so every capture carries the config that produced it.
-        tracing::info!(
-            "NDL clock plane: route={} feed=prime-until-confirmed plane_lead={PLANE_LEAD_MS}ms",
-            if yields_to_real { "offload" } else { "software" },
-        );
+        tracing::info!("NDL clock plane: route={route} feed=prime-until-confirmed plane_lead={PLANE_LEAD_MS}ms");
         while !stop.load(Ordering::Relaxed) {
             self.check_plane_confirmed();
             if LOAD_COMPLETED.fired() {
@@ -353,8 +350,8 @@ impl AudioPlane for NdlVideo {
         self.audio_plane_lead_ms()
     }
 
-    fn run_keepalive(&self, stop: &std::sync::atomic::AtomicBool, yields_to_real: bool) {
-        self.run_clock_plane(stop, yields_to_real);
+    fn run_keepalive(&self, stop: &std::sync::atomic::AtomicBool, route: &'static str) {
+        self.run_clock_plane(stop, route);
     }
 
     fn set_extra_lead_ms(&self, ms: i64) {

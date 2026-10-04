@@ -158,7 +158,7 @@ fn run(stop: &Arc<AtomicBool>, rx: &mpsc::Receiver<Command>, meta: HdrMeta, patt
     // software-audio stream runs.
     let clock = video
         .audio_plane()
-        .map(|plane| ndl::spawn_clock_plane(plane, Arc::clone(stop), false))
+        .map(|plane| ndl::spawn_clock_plane(plane, Arc::clone(stop), "calibration"))
         .transpose()
         .context("spawn HDR pattern clock plane")?;
 

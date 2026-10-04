@@ -12,6 +12,8 @@ struct Queue {
     /// The last snapshot queued. Outlives `pending`, since the unchanged-snapshot comparison has
     /// to keep working after the worker has drained it.
     last: Persisted,
+    /// Bumped per queued snapshot, so the worker can tell a newer one arrived without comparing.
+    seq: u64,
     /// Consecutive failures at `last`; zero means disk is fresh.
     failures: u8,
     retry_at: Option<Instant>,
@@ -72,6 +74,7 @@ impl StateWriter {
                 guard.retry_at = None;
                 match guard.pending.take() {
                     Some(state) => {
+                        let taken = guard.seq;
                         // Unlocked across the write so `save` below never blocks on disk I/O.
                         drop(guard);
                         let result = save(&state);
@@ -80,7 +83,7 @@ impl StateWriter {
                         }
                         guard = lock.lock().expect(POISONED);
                         // Skip retry if a newer snapshot was queued.
-                        if guard.last != state {
+                        if guard.seq != taken {
                             continue;
                         }
                         if result.is_err() {
@@ -115,6 +118,7 @@ impl StateWriter {
         }
         queue.last.clone_from(&state);
         queue.pending = Some(state);
+        queue.seq += 1;
         queue.failures = 0;
         queue.retry_at = None;
         drop(queue);

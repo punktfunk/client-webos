@@ -10,7 +10,7 @@ use punktfunk_core::reject::RejectReason;
 use punktfunk_core::PunktfunkError;
 
 /// Why the host turned this connection away.
-pub fn reject_message(reason: RejectReason) -> String {
+fn reject_message(reason: RejectReason) -> String {
     match reason {
         RejectReason::Denied => "The host declined this device's request.".into(),
         RejectReason::ApprovalTimeout => {
@@ -53,7 +53,7 @@ pub fn reject_message(reason: RejectReason) -> String {
 }
 
 /// Why connect/probe failed (distinguishes rejection from transport trouble).
-pub fn connect_message(err: &PunktfunkError) -> String {
+fn connect_message(err: &PunktfunkError) -> String {
     match err {
         PunktfunkError::Rejected(reason) => reject_message(*reason),
         PunktfunkError::Timeout => "The host didn't answer. Is it running and reachable?".into(),
