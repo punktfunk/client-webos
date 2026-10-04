@@ -232,7 +232,8 @@ pub struct CadenceTrace {
     pub repeats: u64,
     /// Host PTS going backwards. Excluded from `source` — a negative delta is not a short frame.
     pub regressions: u64,
-    /// Host PTS gaps over 1.5 nominal periods; excluded from source.
+    /// Host PTS gaps past [`STALL_GAP_NS`] (or 1.5 nominal periods, if longer): a stall, not a
+    /// frame time. Excluded from source.
     pub gaps: u64,
     /// Pictures mapped in this window, including excluded ones.
     pub mapped: u64,
@@ -263,7 +264,9 @@ impl CadenceTrace {
             return false;
         }
         let delta = i64::try_from(host_pts_ns - last).unwrap_or(i64::MAX);
-        if delta > nominal_ns.saturating_mul(3) / 2 {
+        // A variable-rate source (a 50 fps game on a 120 Hz stream) runs well past the nominal
+        // period on every frame; those intervals are the cadence this trace exists to show.
+        if delta > (nominal_ns.saturating_mul(3) / 2).max(STALL_GAP_NS) {
             self.gaps += 1;
             return false;
         }
@@ -271,6 +274,9 @@ impl CadenceTrace {
         true
     }
 }
+
+/// Source interval past which the trace reads a stall instead of a frame time: 10 fps.
+const STALL_GAP_NS: i64 = 100_000_000;
 
 #[derive(Clone, Copy, Default)]
 pub struct PacingHealth {
@@ -323,8 +329,8 @@ mod tests {
             now += I;
             feed(&mut p, pts, now);
         }
-        pts += 3 * I; // gap
-        now += 3 * I;
+        pts += 10 * I; // gap
+        now += 10 * I;
         feed(&mut p, pts, now);
         for _ in 0..3 {
             pts += I;
@@ -363,7 +369,7 @@ mod tests {
         let mut p = Pacing::new(I, PresentPriority::Latency);
         let (mut pts, mut now) = (0u64, 0u64);
         for i in 0..100 {
-            let step = if i % 2 == 0 { 3 * I } else { I };
+            let step = if i % 2 == 0 { 15 * I } else { I };
             pts += step;
             now += step;
             p.map(pts, now);
