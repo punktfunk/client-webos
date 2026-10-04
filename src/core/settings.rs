@@ -7,7 +7,6 @@ use pf_client_core::trust::Settings;
 use punktfunk_core::config::GamepadPref;
 
 use crate::core::model::{AudioRoutePref, CodecPref, GamepadType, HdrDisplay};
-use crate::core::model::{HDR_BLACK, HDR_FRAME_AVG, HDR_PEAK};
 
 /// Prefix for rows only this client has. Namespaced so a future shared field of the same name
 /// cannot collide with what a TV persisted.
@@ -185,19 +184,9 @@ impl TvSettings for Settings {
             self.audio_channels = caps.max_channels;
         }
         // Snapped rather than merely clamped: the sliders move on a lattice, and a value off it
-        // would leave a thumb between two stops. A full field never out-runs a small window.
-        let peak = HDR_PEAK.snap(u32::from(self.hdr_peak_nits())) as u16;
-        let frame_avg = (HDR_FRAME_AVG.snap(u32::from(self.hdr_frame_avg_nits())) as u16).min(peak);
-        let black = HDR_BLACK.snap(u32::from(self.hdr_black_code())) as u16;
-        let calibrated = self.hdr_calibrated();
-        self.set_hdr_display(
-            HdrDisplay {
-                peak_nits: peak,
-                frame_avg_nits: frame_avg,
-                black_code: black,
-            },
-            calibrated,
-        );
+        // would leave a thumb between two stops.
+        let (display, calibrated) = (self.hdr_display().normalized(), self.hdr_calibrated());
+        self.set_hdr_display(display, calibrated);
     }
 }
 

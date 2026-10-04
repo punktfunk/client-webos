@@ -383,6 +383,13 @@ pub fn poison() -> LeakGuard {
     LeakGuard(())
 }
 
+/// The bounded join every NDL-touching thread gets: one still running past the deadline may be
+/// inside an NDL call, so it poisons NDL ([`poison`]) for as long as it runs rather than being
+/// raced by the unload. `false` if it was left running.
+pub fn join_thread(handle: std::thread::JoinHandle<()>, name: &str) -> bool {
+    crate::services::join::join_with_timeout(handle, crate::services::join::SHUTDOWN_JOIN_TIMEOUT, name, poison)
+}
+
 /// The latest session teardown running off the UI thread, so the menu comes back at once.
 static TEARDOWN: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 

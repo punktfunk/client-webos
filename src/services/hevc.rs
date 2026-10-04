@@ -6,7 +6,7 @@
 //!
 //! Every coding unit is a **PCM** CU: raw samples, no prediction, no transform, no residual, and
 //! `pcm_loop_filter_disabled_flag` so the deblocker never touches them. What is written here is
-//! what the panel is asked to show. The cost is size (~3.9 MB per 1080p frame), which is fine for
+//! what the panel is asked to show. The cost is size (~1 MB per frame), which is fine for
 //! a still pattern re-fed a few times a second.
 //!
 //! The SPS pins `log2_min_luma_coding_block_size == log2_ctb_size == 32`, so `split_cu_flag` is
@@ -51,23 +51,27 @@ pub struct Patch {
 }
 
 impl Patch {
-    /// The patch in coded samples: `(x0, y0, x1, y1)`, the far edges exclusive. Clipped to the
-    /// picture, and never smaller than one sample.
-    fn rect(self) -> (u32, u32, u32, u32) {
+    /// The patch in coded samples, the far edges exclusive. Clipped to the picture, and never
+    /// smaller than one sample.
+    fn rect(self) -> PatchRect {
         let scale = |v: f32, span: u32| (f64::from(v.clamp(0.0, 1.0)) * f64::from(span)).round() as u32;
         let x0 = scale(self.x, WIDTH).min(WIDTH - 1);
         let y0 = scale(self.y, HEIGHT).min(HEIGHT - 1);
-        let x1 = (x0 + scale(self.w, WIDTH).max(1)).min(WIDTH);
-        let y1 = (y0 + scale(self.h, HEIGHT).max(1)).min(HEIGHT);
-        (x0, y0, x1, y1)
+        PatchRect {
+            x0,
+            y0,
+            x1: (x0 + scale(self.w, WIDTH).max(1)).min(WIDTH),
+            y1: (y0 + scale(self.h, HEIGHT).max(1)).min(HEIGHT),
+            code: self.code,
+        }
     }
 }
 
 /// Builds access units, reusing every buffer between frames.
 ///
-/// A 1080p PCM frame is ~3.9 MB and the parameter sets never change, so an encoder is kept for
+/// A PCM frame is ~1 MB and the parameter sets never change, so an encoder is kept for
 /// the life of the pattern feed: the parameter-set NALs are built once, and each frame re-fills
-/// the same slice and output buffers instead of allocating ~12 MB per slider step.
+/// the same slice and output buffers instead of allocating ~2 MB per slider step.
 pub struct Encoder {
     /// Start-code-prefixed VPS, SPS and PPS — identical for every frame.
     header: Vec<u8>,
@@ -85,7 +89,7 @@ impl Encoder {
         nal(&mut header, 34, &pps());
         Self {
             header,
-            out: Vec::with_capacity(4 << 20),
+            out: Vec::with_capacity(1 << 20),
             // 1024 luma + 2x256 chroma samples at 10 bits is exactly 1920 bytes per CTU.
             slice: BitWriter::with_capacity((CTBS_X * CTBS_Y * 1920) as usize + 4096),
             pcm: PcmBlocks::new(),
@@ -250,9 +254,9 @@ impl BitWriter {
         &self.buf
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    fn finish(self) -> Vec<u8> {
         debug_assert!(self.aligned(), "RBSP must end byte-aligned");
-        std::mem::take(&mut self.buf)
+        self.buf
     }
 }
 
@@ -261,8 +265,9 @@ fn nal(out: &mut Vec<u8>, nal_type: u8, rbsp: &[u8]) {
     out.extend_from_slice(&[0, 0, 0, 1]);
     out.push(nal_type << 1);
     out.push(1); // nuh_layer_id = 0, nuh_temporal_id_plus1 = 1
-                 // Copied in runs between insertions: the RBSP is ~3.9 MB and a byte at a time here costs
-                 // as much as producing it did.
+
+    // Copied in runs between insertions: the RBSP is ~1 MB and a byte at a time here costs as
+    // much as producing it did.
     let mut zeros = 0u32;
     let mut start = 0;
     for (i, &b) in rbsp.iter().enumerate() {
@@ -281,10 +286,15 @@ fn nal(out: &mut Vec<u8>, nal_type: u8, rbsp: &[u8]) {
 // Parameter sets
 // ---------------------------------------------------------------------------------------------
 
-/// `profile_tier_level(1, 0)` — Main10, level 4.0, progressive frames only.
+/// `profile_tier_level(1, 0)` — Main10, High tier level 5.1, progressive frames only.
+///
+/// The feed runs ~78 Mb/s (~7.8 Mbit a frame at 10 fps), past every Main-tier level a TV decodes;
+/// High tier 5.1 allows 160 Mb/s and is UHD Blu-ray's own profile, so any HDR TV takes it. PCM
+/// still breaks the level's minimum compression ratio, which no level can fix and decoders do
+/// not enforce.
 fn profile_tier_level(w: &mut BitWriter) {
     w.bits(0, 2); // general_profile_space
-    w.bit(0); // general_tier_flag
+    w.bit(1); // general_tier_flag: High
     w.bits(2, 5); // general_profile_idc: Main10
     for i in 0..32 {
         w.bit(u32::from(i == 2)); // general_profile_compatibility_flag
@@ -296,7 +306,7 @@ fn profile_tier_level(w: &mut BitWriter) {
     w.bits(0, 32); // general_reserved_zero_43bits, first 32
     w.bits(0, 11); // ...and the remaining 11
     w.bit(0); // general_reserved_zero_bit
-    w.bits(120, 8); // general_level_idc: level 4.0
+    w.bits(153, 8); // general_level_idc: level 5.1
 }
 
 fn vps() -> Vec<u8> {
@@ -343,7 +353,8 @@ fn sps() -> Vec<u8> {
     w.ue(0); // sps_max_dec_pic_buffering_minus1[0]
     w.ue(0); // sps_max_num_reorder_pics[0]
     w.ue(0); // sps_max_latency_increase_plus1[0]
-             // Minimum coding block == CTB == 32, so coding_quadtree never signals split_cu_flag.
+
+    // Minimum coding block == CTB == 32, so coding_quadtree never signals split_cu_flag.
     w.ue(CTB_LOG2 - 3); // log2_min_luma_coding_block_size_minus3
     w.ue(0); // log2_diff_max_min_luma_coding_block_size
     w.ue(0); // log2_min_luma_transform_block_size_minus2
@@ -506,16 +517,19 @@ struct Cabac<'a> {
 
 impl<'a> Cabac<'a> {
     fn new(w: &'a mut BitWriter) -> Self {
-        Self {
+        let mut cabac = Self {
             w,
             low: 0,
-            range: 510,
+            range: 0,
             outstanding: 0,
             first_bit: true,
-        }
+        };
+        cabac.reset();
+        cabac
     }
 
-    /// 9.3.2.5, re-applied after PCM samples. Context variables deliberately survive.
+    /// 9.3.2.5: at the start of the slice, and re-applied after PCM samples. Context variables
+    /// deliberately survive.
     fn reset(&mut self) {
         self.low = 0;
         self.range = 510;
@@ -593,25 +607,15 @@ impl<'a> Cabac<'a> {
 // ---------------------------------------------------------------------------------------------
 
 fn idr_slice(w: &mut BitWriter, pcm: &mut PcmBlocks, background: u16, patches: &[Patch]) {
-    let rects: Vec<PatchRect> = patches
-        .iter()
-        .map(|p| {
-            let (x0, y0, x1, y1) = p.rect();
-            PatchRect {
-                x0,
-                y0,
-                x1,
-                y1,
-                code: p.code,
-            }
-        })
-        .collect();
+    let rects: Vec<PatchRect> = patches.iter().map(|p| p.rect()).collect();
+    pcm.keep_only(background, &rects);
 
     w.bit(1); // first_slice_segment_in_pic_flag
     w.bit(0); // no_output_of_prior_pics_flag (present because this is an IRAP NAL type)
     w.ue(0); // slice_pic_parameter_set_id
     w.ue(2); // slice_type: I
-             // IDR: no POC lsb, no reference picture set, no SAO flags, no reference list.
+
+    // IDR: no POC lsb, no reference picture set, no SAO flags, no reference list.
     w.se_zero(); // slice_qp_delta
     w.stop_bit_and_align();
 
@@ -626,8 +630,9 @@ fn idr_slice(w: &mut BitWriter, pcm: &mut PcmBlocks, background: u16, patches: &
         c.encode_bin(&mut part_mode, 1); // part_mode: PART_2Nx2N
         c.encode_terminate(1); // pcm_flag
         c.w.align_zero(); // pcm_alignment_zero_bit
-                          // The picture is a flat field with rects on it, so a CTU's content follows from
-                          // arithmetic: only the few a rect edge crosses are built sample by sample.
+
+        // The picture is a flat field with rects on it, so a CTU's content follows from
+        // arithmetic: only the few a rect edge crosses are built sample by sample.
         match PatchRect::cover(&rects, background, cx, cy) {
             Some(code) => pcm.uniform(c.w, code),
             None => {
@@ -664,7 +669,7 @@ fn pack10(samples: &[u16], out: &mut Vec<u8>) {
 /// The `pcm_sample()` payloads, as ready-made bytes.
 ///
 /// PCM data is byte-aligned and a whole number of bytes per CU, so it is packed directly rather
-/// than pushed through the bit writer — at ~3.1M samples a frame that loop was the entire cost of
+/// than pushed through the bit writer — at ~0.8M samples a frame that loop was the entire cost of
 /// building a pattern. Two more things never change: the chroma tail is the same 640 bytes for
 /// every CU (every pattern here is achromatic), and every pattern is a flat field with one or two
 /// rects on it, so nearly every CU is uniform and re-emits a luma block already built.
@@ -683,6 +688,13 @@ impl PcmBlocks {
             uniform: Vec::new(),
             scratch: Vec::new(),
         }
+    }
+
+    /// Drops the packed blocks of codes this picture does not use, so a slider swept end to end
+    /// keeps the cache at a pattern's two or three codes rather than every code it passed.
+    fn keep_only(&mut self, background: u16, rects: &[PatchRect]) {
+        self.uniform
+            .retain(|(code, _)| *code == background || rects.iter().any(|r| r.code == *code));
     }
 
     /// Writes a CU whose luma is all one `code`, then its chroma. The packed luma block is kept:
