@@ -45,9 +45,9 @@ This repo is only the webOS-specific client: a host for punktfunk's shared contr
   (NDL DirectMedia). No AV1: the pipeline never presented one.
 - **Bitrate** — Automatic mode adjusts to the network, or set a fixed rate from 10 to 200 Mbps.
   A per-host network speed test measures over the real data plane and applies a recommended rate.
-- **HDR calibration** — press the remote's **Blue** button in the menu to measure the panel's peak,
-  full-screen and black levels against test patterns on the video plane. The host then renders to
-  that volume.
+- **HDR calibration** — press the remote's **Blue** button in the menu to measure the panel's black,
+  peak and full-screen levels against the Windows HDR Calibration patterns, played on the video
+  plane. The host then renders to that volume.
 - **Audio** — stereo, 5.1 or 7.1 Opus, decoded in software on the TV. An experimental
   stereo or 5.1 route hands the Opus to the TV's media pipeline instead.
 - **Library** — the host's game library, custom collections and ordering.

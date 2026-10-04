@@ -2,6 +2,11 @@
 //! block, made against synthetic PQ patterns played on the real video plane — the only signal
 //! path a stream will ever use. Opened from the menu with the remote's Blue key.
 //!
+//! The patterns and their order follow the Windows HDR Calibration app (HGIG's recommended
+//! tests): a window pane whose frame is at the slider's luminance and whose four squares are at
+//! a fixed reference — no light for the floor, 10,000 nits for the two bright steps. The squares vanish
+//! where the panel can no longer tell the slider from the reference: where it crushes, or clips.
+//!
 //! The edits are held in a scratch [`HdrDisplay`] and only written to the document by the last
 //! step's OK. A half-walked calibration is worse than none: it would advertise a volume the user
 //! never confirmed.
@@ -14,28 +19,22 @@ use super::*;
 use crate::core::model::{self, HdrDisplay};
 use crate::core::pq;
 use crate::platform::webos::hdr_pattern::{Pattern, Playback};
-use crate::platform::webos::input::{menu_event_for_button, menu_event_for_key, RemoteKey, RemoteKeys};
-use crate::services::hevc::Patch;
+use crate::platform::webos::input::{menu_event_for_button, menu_event_for_key, wait_for_event, RemoteKey, RemoteKeys};
+use crate::services::hevc::{self, Patch};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent};
+use punktfunk_core::quic::HdrMeta;
 
-/// Where the mosaic centres vertically, as a fraction of picture height — above centre, clear of
-/// the card pinned to the bottom of the screen.
-const WINDOW_CENTER_Y: f32 = 0.36;
+/// The window pane, measured off the Windows HDR Calibration app: a square covering 10% of the
+/// picture (HGIG's peak window, small enough that ABL leaves a self-emissive panel free), centred
+/// where Windows centres it — clear of the card pinned to the bottom of the screen.
+const PANE_AREA: f32 = 0.10;
+const PANE_CENTER_Y: f32 = 0.47;
 
-/// Checkerboard tiles per side. Enough that the texture is unmistakable across the room, few
-/// enough that each tile is a large flat area the panel's own processing cannot soften.
-const MOSAIC_TILES: usize = 6;
-
-/// Where the dim half sits, as a fraction of the declared volume's ceiling. Far enough below it to
-/// be plainly visible while the TV renders the volume as it is, close enough that a tone map's
-/// shoulder takes both together.
-const SHOULDER_RATIO: f32 = 0.9;
-
-/// Window sizes, as a fraction of the picture. Peak is measured on a small window, where ABL
-/// leaves a self-emissive panel free; the floor fills the screen, easiest to judge with nothing
-/// else lit.
-const PEAK_WINDOW_AREA: f32 = 0.024;
-const FULL_SCREEN_AREA: f32 = 1.0;
+/// Across the pane's side: a frame band, a square, a cross bar twice the band, a square, a band.
+/// On a 432-pixel pane that is 18 + 180 + 36 + 180 + 18.
+const PANE_BAND: f32 = 1.0 / 24.0;
+const PANE_SQUARE: f32 = 5.0 / 12.0;
+const PANE_BAR: f32 = 2.0 * PANE_BAND;
 
 /// Design units.
 const CARD_WIDTH_FRAC: f32 = 0.5;
@@ -49,161 +48,152 @@ const GAP: f32 = 12.0;
 const TRACK_H: f32 = 6.0;
 const KNOB_R: f32 = 9.0;
 
-const TICK: Duration = Duration::from_millis(16);
-
+/// Windows' order: floor, then peak, then full frame, which the peak bounds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Step {
     #[default]
+    Black,
     Peak,
     FrameAverage,
-    Black,
+}
+
+/// What a step shows and measures, apart from the value itself.
+struct StepSpec {
+    label: &'static str,
+    instruction: &'static str,
+    lattice: model::Lattice,
+    /// Whether the slider's luminance fills the picture rather than only the pane's frame.
+    full_field: bool,
 }
 
 impl Step {
     /// The step after this one; `None` on the last, whose OK saves.
     fn next(self) -> Option<Self> {
         match self {
+            Self::Black => Some(Self::Peak),
             Self::Peak => Some(Self::FrameAverage),
-            Self::FrameAverage => Some(Self::Black),
-            Self::Black => None,
+            Self::FrameAverage => None,
         }
     }
 
-    fn label(self) -> &'static str {
+    fn spec(self) -> &'static StepSpec {
+        const BLACK: StepSpec = StepSpec {
+            label: "Minimum luminance",
+            instruction: "Step 1 of 3. Lower until the pattern is no longer visible.",
+            lattice: model::HDR_BLACK,
+            full_field: false,
+        };
+        const PEAK: StepSpec = StepSpec {
+            label: "Maximum luminance",
+            instruction: "Step 2 of 3. With the TV's Tone Mapping on HGIG, raise until the pattern is no longer \
+                          visible.",
+            lattice: model::HDR_PEAK,
+            full_field: false,
+        };
+        const FRAME_AVERAGE: StepSpec = StepSpec {
+            label: "Max full frame luminance",
+            instruction: "Step 3 of 3. Raise until the pattern is no longer visible.",
+            lattice: model::HDR_FRAME_AVG,
+            full_field: true,
+        };
         match self {
-            Self::Peak => "Peak brightness",
-            Self::FrameAverage => "Full-screen brightness",
-            Self::Black => "Black level",
-        }
-    }
-
-    fn instruction(self) -> &'static str {
-        match self {
-            Self::Peak => "Step 1 of 3. Raise until the edge between the two squares disappears.",
-            Self::FrameAverage => "Step 2 of 3. Raise until the checkerboard flattens to one tone.",
-            Self::Black => "Step 3 of 3. Lower until the tiles just disappear into the black.",
-        }
-    }
-
-    fn lattice(self) -> model::Lattice {
-        match self {
-            Self::Peak => model::HDR_PEAK,
-            Self::FrameAverage => model::HDR_FRAME_AVG,
-            Self::Black => model::HDR_BLACK,
+            Self::Black => &BLACK,
+            Self::Peak => &PEAK,
+            Self::FrameAverage => &FRAME_AVERAGE,
         }
     }
 
     fn value(self, display: HdrDisplay) -> u16 {
         match self {
+            Self::Black => display.black_code,
             Self::Peak => display.peak_nits,
             Self::FrameAverage => display.frame_avg_nits,
-            Self::Black => display.black_code,
         }
+    }
+
+    /// `display` with this step's value replaced, back inside the volume's invariants.
+    fn with_value(self, mut display: HdrDisplay, value: u16) -> HdrDisplay {
+        *match self {
+            Self::Black => &mut display.black_code,
+            Self::Peak => &mut display.peak_nits,
+            Self::FrameAverage => &mut display.frame_avg_nits,
+        } = value;
+        display.normalized()
     }
 
     fn value_text(self, display: HdrDisplay) -> String {
         match self {
+            Self::Black => black_text(self.value(display)),
             Self::Peak | Self::FrameAverage => format!("{} nits", self.value(display)),
-            Self::Black => black_text(display.black_code),
         }
     }
 }
 
-/// The mastering volume to declare while `step` is measured. Its ceiling is the value that step
-/// measures, so the pattern sits at the top of the declared range — the only place a static tone
-/// map flattens anything. The floor is declared at its minimum throughout: a declared black that
-/// moved with the slider would change how the TV lifts the range while it is being judged.
-fn pattern_meta(step: Step, display: HdrDisplay) -> punktfunk_core::quic::HdrMeta {
-    let ceiling = match step {
-        Step::Peak | Step::Black => display.peak_nits,
-        Step::FrameAverage => display.frame_avg_nits,
+/// What the plane shows for `step`: the mastering volume to declare, and the picture.
+///
+/// The picture is the window pane: its frame at the slider's luminance, its squares at the
+/// reference. Above the floor the reference is the top of PQ; declared above the volume's
+/// ceiling, it clips to wherever the TV puts that ceiling. So the squares show while the slider is
+/// below what the panel renders and go once both land on the same light. Near black the TV has
+/// nothing to compress, so the codes reach the panel unconverted.
+///
+/// The declared ceiling is the value the step measures, so the frame sits at the top of the
+/// declared range. The floor is declared at its minimum throughout: a declared black that moved
+/// with the slider would change how the TV lifts the range while it is being judged.
+fn frame(step: Step, display: HdrDisplay) -> (HdrMeta, Pattern) {
+    let value = step.value(display);
+    let (field, icon, ceiling) = match step {
+        Step::Black => (value, pq::BLACK_CODE, display.peak_nits),
+        Step::Peak | Step::FrameAverage => (pq::pq_code(f32::from(value)), pq::WHITE_CODE, value),
     };
-    HdrDisplay {
+    let meta = HdrDisplay {
         peak_nits: ceiling,
-        frame_avg_nits: display.frame_avg_nits.min(ceiling),
+        frame_avg_nits: display.frame_avg_nits,
         black_code: pq::BLACK_CODE,
     }
-    .hdr_meta()
-}
-
-/// The picture for `step`, defined against the declared volume rather than in absolute nits.
-/// Each bright step shows the volume's ceiling against [`SHOULDER_RATIO`] of it: plainly two tones
-/// while the TV renders the volume as is, one tone once the volume outruns the panel and the tone
-/// map pulls both onto its ceiling. The largest volume that still shows the boundary is the one
-/// this panel can render.
-fn pattern(step: Step, display: HdrDisplay) -> Pattern {
-    let patches = match step {
-        Step::Peak => {
-            let nits = f32::from(display.peak_nits);
-            pair(PEAK_WINDOW_AREA, pq::pq_code(nits), pq::pq_code(nits * SHOULDER_RATIO))
-        }
-        Step::FrameAverage => {
-            let nits = f32::from(display.frame_avg_nits);
-            mosaic(FULL_SCREEN_AREA, pq::pq_code(nits * SHOULDER_RATIO), pq::pq_code(nits))
-        }
-        // Near black the TV has nothing to compress, so the codes reach the panel unconverted.
-        Step::Black => mosaic(FULL_SCREEN_AREA, pq::BLACK_CODE, display.black_code),
-    };
-    Pattern {
+    .hdr_meta();
+    let spec = step.spec();
+    let pattern = Pattern {
         background: pq::BLACK_CODE,
-        patches,
-    }
+        patches: window_pane(spec.full_field, field, icon),
+    };
+    (meta, pattern)
 }
 
-/// Two squares sharing an edge, `max` left and `adjusted` right. No gap: a shared edge is a single
-/// boundary that either exists or does not, a finer judgement than comparing two objects.
-fn pair(area: f32, max: u16, adjusted: u16) -> Vec<Patch> {
-    let (x, y, side) = window_rect(area);
-    let half = side / 2.0;
-    vec![
+/// The Windows window pane: a square frame and cross in `field`, four squares in `icon`. With
+/// `full_field` the field covers the whole picture rather than only the pane.
+fn window_pane(full_field: bool, field: u16, icon: u16) -> Vec<Patch> {
+    // Square on the panel: the coded picture has the panel's aspect.
+    let aspect = hevc::WIDTH as f32 / hevc::HEIGHT as f32;
+    let h = (PANE_AREA * aspect).sqrt();
+    let w = h / aspect;
+    let (x, y) = ((1.0 - w) / 2.0, PANE_CENTER_Y - h / 2.0);
+    let field = if full_field {
+        Patch {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            code: field,
+        }
+    } else {
         Patch {
             x,
             y,
-            w: half,
-            h: side,
-            code: max,
-        },
-        Patch {
-            x: x + half,
-            y,
-            w: half,
-            h: side,
-            code: adjusted,
-        },
-    ]
-}
-
-/// `(x, y, side)` of a window covering `area` of the picture, kept whole inside it and above
-/// centre when there is room — clear of the card's own light.
-fn window_rect(area: f32) -> (f32, f32, f32) {
-    let side = area.clamp(0.0, 1.0).sqrt();
-    let y = (WINDOW_CENTER_Y - side / 2.0).clamp(0.0, 1.0 - side);
-    ((1.0 - side) / 2.0, y, side)
-}
-
-/// A checkerboard of `a` and `b` tiles: the `a` field, then every second tile in `b` over it.
-fn mosaic(area: f32, a: u16, b: u16) -> Vec<Patch> {
-    let (x, y, side) = window_rect(area);
-    let tile = side / MOSAIC_TILES as f32;
-    let mut patches = vec![Patch {
-        x,
-        y,
-        w: side,
-        h: side,
-        code: a,
-    }];
-    for row in 0..MOSAIC_TILES {
-        for col in (0..MOSAIC_TILES).filter(|col| (row + col) % 2 == 1) {
-            patches.push(Patch {
-                x: x + col as f32 * tile,
-                y: y + row as f32 * tile,
-                w: tile,
-                h: tile,
-                code: b,
-            });
+            w,
+            h,
+            code: field,
         }
-    }
-    patches
+    };
+    let (near, far) = (PANE_BAND, PANE_BAND + PANE_SQUARE + PANE_BAR);
+    let squares = [(near, near), (far, near), (near, far), (far, far)].map(|(dx, dy)| Patch {
+        x: x + dx * w,
+        y: y + dy * h,
+        w: PANE_SQUARE * w,
+        h: PANE_SQUARE * h,
+        code: icon,
+    });
+    std::iter::once(field).chain(squares).collect()
 }
 
 /// The floor's luminance to two significant figures. The bottom stop is no light at all.
@@ -224,49 +214,40 @@ struct Calibration {
     playback: Option<Playback>,
 }
 
+/// Everything the card and the clear depend on: the card is redrawn only when this changes.
+type Visual = (Step, HdrDisplay, bool, bool);
+
 impl Calibration {
     /// The one writer of the scratch volume: clamps the stop, applies it to the step's field and
     /// re-feeds the pattern if anything changed.
     fn nudge(&mut self, delta: i32) {
-        let lattice = self.step.lattice();
-        let stop = lattice.index(u32::from(self.step.value(self.display))) as i32 + delta;
-        let value = lattice.value(stop) as u16;
-        let before = self.display;
-        match self.step {
-            Step::Peak => {
-                self.display.peak_nits = value;
-                // A full field can never out-run a small window.
-                self.display.frame_avg_nits = self.display.frame_avg_nits.min(value);
-            }
-            Step::FrameAverage => self.display.frame_avg_nits = value.min(self.display.peak_nits),
-            Step::Black => self.display.black_code = value,
-        }
-        if self.display != before {
+        let lattice = self.step.spec().lattice;
+        let value = lattice.value(lattice.index(self.step.value(self.display)) as i32 + delta);
+        let display = self.step.with_value(self.display, value);
+        if display != self.display {
+            self.display = display;
             self.refresh();
         }
     }
 
     fn refresh(&self) {
         if let Some(playback) = &self.playback {
-            playback.show(pattern_meta(self.step, self.display), pattern(self.step, self.display));
+            let (meta, pattern) = frame(self.step, self.display);
+            playback.show(meta, pattern);
         }
     }
 
-    fn presenting(&self) -> bool {
-        self.playback.as_ref().is_some_and(Playback::presenting)
+    fn presented(&self) -> bool {
+        self.playback.as_ref().is_some_and(Playback::presented)
     }
 
     fn stalled(&self) -> bool {
         self.playback.as_ref().is_none_or(Playback::stalled)
     }
-}
 
-/// How the screen was left.
-pub(super) enum Exit {
-    /// Saved or cancelled; back to the menu.
-    Menu,
-    /// The app is closing.
-    Quit,
+    fn visual(&self) -> Visual {
+        (self.step, self.display, self.presented(), self.stalled())
+    }
 }
 
 /// Runs the calibration screen until it is saved, cancelled, or the app is asked to close.
@@ -276,10 +257,11 @@ pub(super) fn run(
     events: &mut sdl3::EventPump,
     fonts: &pf_console_ui::theme::Fonts,
     display: (u32, u32),
-) -> Result<Exit> {
-    let stored = store::load().settings.hdr_display();
+) -> Result<StreamOutcome> {
+    let stored = store::load().settings.hdr_display().normalized();
     let step = Step::default();
-    let playback = Playback::start(pattern_meta(step, stored), pattern(step, stored))
+    let (meta, pattern) = frame(step, stored);
+    let playback = Playback::start(meta, pattern)
         .inspect_err(|e| tracing::warn!("HDR calibration playback: {e:#}"))
         .ok();
     let mut cal = Calibration {
@@ -291,19 +273,20 @@ pub(super) fn run(
     let mut exit_held = true;
     // One line per streak of undrawable frames — see `overlay::drawn`.
     let mut overlay_warned = false;
+    let mut drawn: Option<Visual> = None;
     let exit = 'screen: loop {
         let started = Instant::now();
         if QUIT_REQUESTED.load(Ordering::Relaxed) {
-            break 'screen Exit::Quit;
+            break 'screen StreamOutcome::Quit;
         }
         if exit_gesture_fired(&mut exit_held) {
-            break 'screen Exit::Menu;
+            break 'screen StreamOutcome::ReturnToMenu;
         }
         for event in events.poll_iter() {
             use sdl3::event::Event;
             let remote = remote_keys.press(&event);
             let ev = match event {
-                Event::Quit { .. } => break 'screen Exit::Quit,
+                Event::Quit { .. } => break 'screen StreamOutcome::Quit,
                 _ if remote == Some(RemoteKey::Back) => Some(MenuEvent::Back),
                 // A held OK must not walk every step and save values nobody judged.
                 Event::KeyDown {
@@ -322,7 +305,7 @@ pub(super) fn run(
             match ev {
                 Some(MenuEvent::Back) => {
                     tracing::info!("HDR calibration cancelled");
-                    break 'screen Exit::Menu;
+                    break 'screen StreamOutcome::ReturnToMenu;
                 }
                 Some(MenuEvent::Move(MenuDir::Left | MenuDir::Down)) => cal.nudge(-1),
                 Some(MenuEvent::Move(MenuDir::Right | MenuDir::Up)) => cal.nudge(1),
@@ -333,26 +316,29 @@ pub(super) fn run(
                     }
                     None => {
                         save(cal.display);
-                        break 'screen Exit::Menu;
+                        break 'screen StreamOutcome::ReturnToMenu;
                     }
                 },
                 _ => {}
             }
         }
-        // Punched through once the plane shows the pattern; a plain ground until then.
-        let clear = if cal.presenting() {
-            overlay::TRANSPARENT
-        } else {
-            Color4f::new(0.0, 0.0, 0.0, 1.0)
-        };
-        // A TV panel over the pattern (picture settings, the natural thing to open here) fails
-        // every GL call on this surface until it closes: the card freezes, the screen stays.
-        let frame = overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal));
-        overlay::drawn(frame, &mut overlay_warned);
-        let elapsed = started.elapsed();
-        if elapsed < TICK {
-            std::thread::sleep(TICK - elapsed);
+        let visual = cal.visual();
+        if drawn != Some(visual) {
+            // Punched through once the plane shows the pattern; a plain ground until then.
+            let clear = if visual.2 {
+                overlay::TRANSPARENT
+            } else {
+                Color4f::new(0.0, 0.0, 0.0, 1.0)
+            };
+            // A TV panel over the pattern (picture settings, the natural thing to open here)
+            // fails every GL call on this surface until it closes: the card freezes, the screen
+            // stays, and the frame is retried next tick.
+            let frame = overlay::frame(gl, canvas, fonts, display, clear, |f| draw(f, &cal));
+            if overlay::drawn(frame, &mut overlay_warned) {
+                drawn = Some(visual);
+            }
         }
+        wait_for_event(console_flow::TICK_BUDGET.saturating_sub(started.elapsed()));
     };
     // Dropping the feed unloads NDL, which has to happen before a stream loads its own player.
     drop(cal);
@@ -380,17 +366,31 @@ fn save(volume: HdrDisplay) {
 /// the slider with its value, and the key hint.
 fn draw(f: &Frame<'_>, cal: &Calibration) {
     let (c, k) = (f.canvas, f.k);
+    let kf = f64::from(k);
+    let spec = cal.step.spec();
+    // Text whose line box starts at `top`, `line` tall.
+    let text = |s: &str, x: f32, top: f32, line: f32, weight: W, size: f64, color| {
+        f.fonts.draw(
+            c,
+            s,
+            f64::from(x),
+            f64::from(top + line * 0.8),
+            weight,
+            size * kf,
+            color,
+        );
+    };
     let w = (f.w * CARD_WIDTH_FRAC).round();
     let inner = w - 2.0 * PAD * k;
-    let body = if cal.stalled() && !cal.presenting() {
+    let body = if cal.stalled() {
         "The video plane did not accept the test pattern. The values below are unchanged."
     } else {
-        cal.step.instruction()
+        spec.instruction
     };
-    let lines = wrap(f.fonts, body, W::Regular, BODY_SIZE * f64::from(k), f64::from(inner));
-    let title_h = line_h(TITLE_SIZE * f64::from(k)) as f32;
-    let body_line = line_h(BODY_SIZE * f64::from(k)) as f32;
-    let hint_h = line_h(HINT_SIZE * f64::from(k)) as f32;
+    let lines = wrap(f.fonts, body, W::Regular, BODY_SIZE * kf, f64::from(inner));
+    let title_h = line_h(TITLE_SIZE * kf) as f32;
+    let body_line = line_h(BODY_SIZE * kf) as f32;
+    let hint_h = line_h(HINT_SIZE * kf) as f32;
     let slider_h = 2.0 * KNOB_R * k;
     let h = 2.0 * PAD * k + title_h + body_line * lines.len() as f32 + slider_h + hint_h + 3.0 * GAP * k;
     let card = Rect::from_xywh(
@@ -403,41 +403,17 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     opaque_card(f, card, CORNER);
     let left = card.left + PAD * k;
     let mut y = card.top + PAD * k;
-    f.fonts.draw(
-        c,
-        cal.step.label(),
-        f64::from(left),
-        f64::from(y + title_h * 0.8),
-        W::SemiBold,
-        TITLE_SIZE * f64::from(k),
-        theme::fg(1.0),
-    );
+    text(spec.label, left, y, title_h, W::SemiBold, TITLE_SIZE, theme::fg(1.0));
     let value = cal.step.value_text(cal.display);
-    let value_w = f.fonts.measure(&value, W::Medium, TITLE_SIZE * f64::from(k));
-    f.fonts.draw(
-        c,
-        &value,
-        f64::from(card.right - PAD * k - value_w),
-        f64::from(y + title_h * 0.8),
-        W::Medium,
-        TITLE_SIZE * f64::from(k),
-        theme::accent(1.0),
-    );
+    let value_x = card.right - PAD * k - f.fonts.measure(&value, W::Medium, TITLE_SIZE * kf);
+    text(&value, value_x, y, title_h, W::Medium, TITLE_SIZE, theme::accent(1.0));
     y += title_h + GAP * k;
     for line in &lines {
-        f.fonts.draw(
-            c,
-            line,
-            f64::from(left),
-            f64::from(y + body_line * 0.8),
-            W::Regular,
-            BODY_SIZE * f64::from(k),
-            theme::fg(0.72),
-        );
+        text(line, left, y, body_line, W::Regular, BODY_SIZE, theme::fg(0.72));
         y += body_line;
     }
     y += GAP * k;
-    let fraction = cal.step.lattice().fraction(u32::from(cal.step.value(cal.display)));
+    let fraction = spec.lattice.fraction(cal.step.value(cal.display));
     let cy = y + KNOB_R * k;
     let track = Rect::from_xywh(left, cy - TRACK_H * k / 2.0, inner, TRACK_H * k);
     let radius = TRACK_H * k / 2.0;
@@ -456,15 +432,7 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     } else {
         "◀ ▶ Adjust   ·   OK Save   ·   Back Cancel"
     };
-    f.fonts.draw(
-        c,
-        hint,
-        f64::from(left),
-        f64::from(y + hint_h * 0.8),
-        W::Regular,
-        HINT_SIZE * f64::from(k),
-        theme::fg(0.5),
-    );
+    text(hint, left, y, hint_h, W::Regular, HINT_SIZE, theme::fg(0.5));
     c.restore();
 }
 
@@ -472,14 +440,17 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
 mod tests {
     use super::*;
 
-    /// A full-screen mosaic is half `b` tiles over an `a` field, all inside the picture.
+    /// The pane's four squares sit inside its frame, whatever the field covers.
     #[test]
-    fn mosaic_fills_the_picture_with_half_the_tiles() {
-        let patches = mosaic(FULL_SCREEN_AREA, 1, 2);
-        assert_eq!(patches.len(), 1 + MOSAIC_TILES * MOSAIC_TILES / 2);
-        assert!(patches
-            .iter()
-            .all(|p| p.x >= 0.0 && p.y >= 0.0 && p.x + p.w <= 1.0 + 1e-6));
+    fn window_pane_stays_inside_its_box() {
+        for full_field in [false, true] {
+            let patches = window_pane(full_field, 1, 2);
+            let b = patches[0];
+            assert_eq!(patches.len(), 5);
+            assert!(patches[1..]
+                .iter()
+                .all(|p| p.x >= b.x && p.y >= b.y && p.x + p.w <= b.x + b.w + 1e-6 && p.y + p.h <= b.y + b.h + 1e-6));
+        }
     }
 
     /// Lowering the peak below the frame average drags the average down with it.
@@ -488,8 +459,8 @@ mod tests {
         let mut cal = Calibration {
             step: Step::Peak,
             display: HdrDisplay {
-                peak_nits: model::HDR_PEAK.lo as u16,
-                frame_avg_nits: model::HDR_FRAME_AVG.hi as u16,
+                peak_nits: model::HDR_PEAK.lo,
+                frame_avg_nits: model::HDR_FRAME_AVG.hi,
                 black_code: pq::BLACK_CODE,
             },
             playback: None,

@@ -13,8 +13,7 @@ use punktfunk_core::client::NativeClient;
 use crate::core::media::{AudioPlane, AudioSink, VideoSink};
 use crate::platform::webos::device::{self, NdlGeneration};
 use crate::platform::webos::ndl::v1::NdlV1Video;
-use crate::platform::webos::ndl::{NdlCodec, NdlVideo};
-use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
+use crate::platform::webos::ndl::{join_thread, NdlCodec, NdlVideo};
 use crate::services::store::AudioRoutePref;
 use crate::session::audio::AudioStage;
 use crate::session::connect::ConnectParams;
@@ -74,7 +73,7 @@ impl MediaPipeline {
             Ok(handles) => handles,
             Err(e) => {
                 stop.store(true, Ordering::Relaxed);
-                join_ndl_thread(video_thread, "video");
+                join_thread(video_thread, "video");
                 return Err(e);
             }
         };
@@ -92,22 +91,15 @@ impl MediaPipeline {
     /// an NDL call, so the caller must skip `ndl::quit()`, and these three are the threads that
     /// touch NDL, so a wedge also refuses new loads until it finishes.
     pub fn join(self) -> bool {
-        let mut clean = join_ndl_thread(self.video_thread, "video");
+        let mut clean = join_thread(self.video_thread, "video");
         if let Some(audio) = self.audio_thread {
-            clean &= join_ndl_thread(audio, "audio");
+            clean &= join_thread(audio, "audio");
         }
         if let Some(clock) = self.clock_thread {
-            clean &= join_ndl_thread(clock, "clock");
+            clean &= join_thread(clock, "clock");
         }
         clean
     }
-}
-
-/// The bounded join every NDL-touching thread gets: one still running past the deadline may be
-/// inside an NDL call, so it poisons NDL (`ndl::poison`) for as long as it runs rather than being
-/// raced by the unload.
-fn join_ndl_thread(handle: std::thread::JoinHandle<()>, name: &str) -> bool {
-    join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT, name, crate::platform::webos::ndl::poison)
 }
 
 /// Downgrades the requested route to what the load proved. Software is the default and only
@@ -277,7 +269,7 @@ fn spawn_plane_threads(
         // Avoid detaching threads still feeding NDL.
         Err(e) => {
             stop.store(true, Ordering::Relaxed);
-            join_ndl_thread(clock_thread, "clock");
+            join_thread(clock_thread, "clock");
             Err(e).context("spawn audio pump thread")
         }
     }

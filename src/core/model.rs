@@ -341,40 +341,40 @@ pub fn recommended_bitrate_kbps(throughput_kbps: u32) -> u32 {
 
 /// A slider's discrete positions: a closed range walked in fixed steps.
 ///
-/// One value type for every slider — the three HDR measurements and Bitrate — so the range, the
+/// One value type for the three HDR measurement sliders, so the range, the
 /// stop count, the value at a stop and the snap back onto the lattice all come from the same
 /// numbers. They have to stay inverses of each other, and spelling each one out per slider is
 /// how they stop being.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Lattice {
-    pub lo: u32,
-    pub hi: u32,
-    pub step: u32,
+    pub lo: u16,
+    pub hi: u16,
+    pub step: u16,
 }
 
 impl Lattice {
     /// How many positions the slider has.
     #[must_use]
     pub fn stops(self) -> usize {
-        ((self.hi - self.lo) / self.step) as usize + 1
+        usize::from((self.hi - self.lo) / self.step) + 1
     }
 
     /// Which position `value` sits at.
     #[must_use]
-    pub fn index(self, value: u32) -> usize {
-        ((value.clamp(self.lo, self.hi) - self.lo) / self.step) as usize
+    pub fn index(self, value: u16) -> usize {
+        usize::from((value.clamp(self.lo, self.hi) - self.lo) / self.step)
     }
 
     /// The value at `stop`, which is clamped into range first.
     #[must_use]
-    pub fn value(self, stop: i32) -> u32 {
-        let stop = stop.clamp(0, self.stops() as i32 - 1) as u32;
+    pub fn value(self, stop: i32) -> u16 {
+        let stop = stop.clamp(0, self.stops() as i32 - 1) as u16;
         (self.lo + stop * self.step).min(self.hi)
     }
 
     /// Where `value` sits along the track, as 0..1.
     #[must_use]
-    pub fn fraction(self, value: u32) -> f32 {
+    pub fn fraction(self, value: u16) -> f32 {
         let last = self.stops().saturating_sub(1);
         if last == 0 {
             0.0
@@ -385,9 +385,9 @@ impl Lattice {
 
     /// Clamps into range, then rounds to the nearest stop.
     #[must_use]
-    pub fn snap(self, value: u32) -> u32 {
+    pub fn snap(self, value: u16) -> u16 {
         let offset = value.clamp(self.lo, self.hi) - self.lo;
-        self.value(((offset + self.step / 2) / self.step) as i32)
+        self.value(i32::from((offset + self.step / 2) / self.step))
     }
 }
 
@@ -445,21 +445,26 @@ impl HdrDisplay {
         black_code: 68,
     };
 
+    /// Every value on its slider's lattice, and the full field never above the small window.
+    /// The one place these hold: the stored document, and every calibration step, go through it.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        let peak_nits = HDR_PEAK.snap(self.peak_nits);
+        Self {
+            peak_nits,
+            frame_avg_nits: HDR_FRAME_AVG.snap(self.frame_avg_nits).min(peak_nits),
+            black_code: HDR_BLACK.snap(self.black_code),
+        }
+    }
+
     /// The black floor in the 0.0001 cd/m² units the wire carries, never zero: ST.2086 reads a
     /// zero there as "unknown", and a self-emissive panel's real floor is better described by the
     /// smallest luminance the field can express than by no answer at all.
-    #[must_use]
-    pub fn min_luminance_units(self) -> u32 {
+    fn min_luminance_units(self) -> u32 {
         ((crate::core::pq::pq_nits(self.black_code) * 10_000.0).round() as u32).max(1)
     }
 
-    /// HDR10 mastering metadata describing this panel.
-    ///
-    /// It goes two places, and both matter. To NDL, where it is the volume the TV tone-maps the
-    /// stream into: give it the panel's real numbers and that map becomes an identity. And to the
-    /// host in `Hello::display_hdr`, which codes it into the virtual display's CTA-861.3 HDR block,
-    /// so the game renders to this volume rather than to a placeholder someone else has to undo.
-    /// One tone map, at the source — which is what `HGiG` asks for.
+    /// HDR10 mastering metadata describing this panel, for NDL and the host alike (see the type).
     ///
     /// The primaries are fixed (P3-D65); only the luminances are this panel's — an LG CX's
     /// until calibrated ([`Self::DEFAULT`]).
