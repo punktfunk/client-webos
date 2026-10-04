@@ -154,8 +154,6 @@ impl VideoPump {
     }
 
     fn on_frame(&mut self, frame: &punktfunk_core::session::Frame) {
-        self.heartbeat(false);
-
         // Everything wire-shaped, and nothing else: whether this delivery is decodable at all,
         // and how one AU's pieces fit together, is the stage's bookkeeping.
         let wire = WireFrame {
@@ -166,8 +164,6 @@ impl VideoPump {
             reanchor: frame.flags & (u32::from(FLAG_SOF) | USER_FLAG_RECOVERY_ANCHOR) != 0,
             loss: self.note_loss(frame),
         };
-        // Diagnostic only — see `VideoStage::sample_backlog`. Nothing steers on the reading.
-        self.stage.sample_backlog();
         match self.stage.submit(&wire) {
             SinkResult::Presented { decode_us } => {
                 if let Some(us) = decode_us {
@@ -195,6 +191,10 @@ impl VideoPump {
                 }
             }
         }
+        // After the feed: the backlog query is an NDL FFI call and the heartbeat formats the
+        // window's lines, so either one ahead of `submit` delays that frame's release to NDL.
+        self.stage.sample_backlog();
+        self.heartbeat(false);
     }
 
     /// Close the measurement window: take-and-re-arm all figures and difference all session counters
