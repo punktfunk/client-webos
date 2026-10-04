@@ -400,11 +400,11 @@ pub const HDR_PEAK: Lattice = Lattice {
     step: 10,
 };
 /// Full-field (frame-average) slider, in nits, and the pattern's declared `MaxFALL` while it is
-/// being measured. OLEDs hold ~140-180 once ABL settles; backlit LCDs hold far more, so this too
-/// has to reach past any of them for the flattening point to land inside the slider.
+/// being measured: climbed until a step no longer brightens a full field, where ABL holds it.
+/// In use it ends at the measured peak ([`HdrDisplay::frame_avg_range`]).
 pub const HDR_FRAME_AVG: Lattice = Lattice {
     lo: 100,
-    hi: 1_000,
+    hi: HDR_PEAK.hi,
     step: 10,
 };
 /// Black-floor slider, as 10-bit narrow-range PQ luma codes — 64 (zero light) up to 160
@@ -449,11 +449,23 @@ impl HdrDisplay {
     /// The one place these hold: the stored document, and every calibration step, go through it.
     #[must_use]
     pub fn normalized(self) -> Self {
-        let peak_nits = HDR_PEAK.snap(self.peak_nits);
+        let peak = Self {
+            peak_nits: HDR_PEAK.snap(self.peak_nits),
+            ..self
+        };
         Self {
-            peak_nits,
-            frame_avg_nits: HDR_FRAME_AVG.snap(self.frame_avg_nits).min(peak_nits),
+            frame_avg_nits: peak.frame_avg_range().snap(self.frame_avg_nits),
             black_code: HDR_BLACK.snap(self.black_code),
+            ..peak
+        }
+    }
+
+    /// The full-field lattice for this peak: a full field never out-runs a small window.
+    #[must_use]
+    pub fn frame_avg_range(self) -> Lattice {
+        Lattice {
+            hi: self.peak_nits,
+            ..HDR_FRAME_AVG
         }
     }
 
@@ -559,6 +571,21 @@ pub struct GameEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full field above the peak comes down to it, and every value lands on its lattice.
+    #[test]
+    fn normalized_caps_full_field_at_peak() {
+        let display = HdrDisplay {
+            peak_nits: 805,
+            frame_avg_nits: 2_000,
+            black_code: 67,
+        }
+        .normalized();
+        assert_eq!(
+            (display.peak_nits, display.frame_avg_nits, display.black_code),
+            (810, 810, 68)
+        );
+    }
 
     /// The saved record is the shared one plus this TV's fields, in one flat object (plan D8):
     /// what the shell reads is what is stored, and the pin round-trips through its hex.
