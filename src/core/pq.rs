@@ -5,7 +5,7 @@
 
 /// 10-bit narrow-range luma endpoints (ITU-R BT.2020 / ST.2084 signal range).
 pub const BLACK_CODE: u16 = 64;
-const WHITE_CODE: u16 = 940;
+pub const WHITE_CODE: u16 = 940;
 
 // ST.2084 (PQ) constants.
 const M1: f32 = 2610.0 / 16384.0;

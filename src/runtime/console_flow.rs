@@ -20,7 +20,7 @@ pub(super) use crate::console::ConsoleGl;
 
 /// Target period when the swap does not block — a driver that ignores the vsync request would
 /// otherwise spin this loop at whatever the GPU can manage.
-const TICK_BUDGET: Duration = Duration::from_millis(16);
+pub(super) const TICK_BUDGET: Duration = Duration::from_millis(16);
 
 /// Once the shell reports itself idle (no input it saw for a minute), it is being looked at, not
 /// used: one extra frame period between swaps. Android's console does the same, for the same

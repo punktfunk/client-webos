@@ -320,8 +320,8 @@ pub(super) fn run_inner() -> Result<()> {
                     &app.fonts,
                     app.display,
                 )? {
-                    calibration::Exit::Menu => continue,
-                    calibration::Exit::Quit => break plan,
+                    StreamOutcome::ReturnToMenu => continue,
+                    StreamOutcome::Quit => break plan,
                 }
             }
         };
