@@ -326,6 +326,18 @@ impl GamepadType {
     pub fn is_dualsense(self) -> bool {
         matches!(self, Self::DualSense | Self::DualSenseEdge)
     }
+
+    /// The dial's Controller type step: the shared order (`overlay_actions::next_pad_type`),
+    /// skipping the kinds this client offers no row for.
+    pub fn next_on_dial(self) -> Self {
+        let mut pref = self.to_core();
+        loop {
+            pref = pf_client_core::overlay_actions::next_pad_type(pref);
+            if let Some(next) = Self::from_core(pref) {
+                return next;
+            }
+        }
+    }
 }
 
 /// The one bitrate ceiling this client has. It bounds the manual bitrate AND, through `main`,
@@ -572,6 +584,27 @@ pub struct GameEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dial steps the shared order over this client's rows; a Settings-only kind steps back.
+    #[test]
+    fn the_dial_steps_the_types_this_client_offers() {
+        let mut seen = vec![GamepadType::Auto];
+        let mut kind = GamepadType::Auto.next_on_dial();
+        while kind != GamepadType::Auto {
+            seen.push(kind);
+            kind = kind.next_on_dial();
+        }
+        assert_eq!(
+            seen,
+            [
+                GamepadType::Auto,
+                GamepadType::XboxOne,
+                GamepadType::DualSense,
+                GamepadType::DualShock4
+            ]
+        );
+        assert_eq!(GamepadType::SwitchPro.next_on_dial(), GamepadType::Auto);
+    }
 
     /// A full field above the peak comes down to it, and every value lands on its lattice.
     #[test]

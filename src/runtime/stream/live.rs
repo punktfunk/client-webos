@@ -376,6 +376,7 @@ impl Stream {
                 self.hud.tier(),
                 self.native_mode,
                 !cx.pads.is_empty(),
+                self.kind_setting,
             ));
         }
         self.ring.tick();
@@ -435,6 +436,18 @@ impl Stream {
                 if let Err(e) = cx.connected.client.cycle_pad_mouse(u16::from(!cx.pads.is_empty())) {
                     tracing::warn!("dial: controller mouse: {e}");
                 }
+            }
+            // This stream only: the next one starts from Settings.
+            RingCommand::CyclePadType => {
+                self.kind_setting = self.kind_setting.next_on_dial();
+                pad_session::replug(
+                    cx.connected,
+                    cx.pads,
+                    self.kind_setting,
+                    cx.settings,
+                    self.pad_audio.as_ref(),
+                );
+                cx.pads.publish_routes(&self.pad_routes);
             }
             // No microphone and no touch surface on a TV. Stream mute needs a zeroed
             // decoded frame, and NDL's audio plane decodes Opus itself. `ring_facts`
@@ -621,6 +634,7 @@ pub(super) fn ring_facts(
     stats: StatsVerbosity,
     native: punktfunk_core::config::Mode,
     pad: bool,
+    pad_type: store::GamepadType,
 ) -> RingFacts {
     let c = &connected.client;
     let m = c.mode();
@@ -631,6 +645,7 @@ pub(super) fn ring_facts(
         pad_mouse: c.pad_mouse_mode(u16::from(pad)),
         invert_scroll: c.invert_scroll(),
         pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
+        pad_type: pad_type.to_core(),
         mode: (m.width, m.height, m.refresh_hz),
         native_mode: (native.width, native.height, native.refresh_hz),
         ..RingFacts::default()
