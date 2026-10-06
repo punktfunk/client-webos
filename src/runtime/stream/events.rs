@@ -206,6 +206,7 @@ impl Stream {
                             self.hud.tier(),
                             self.native_mode,
                             true,
+                            self.kind_setting,
                         ));
                         self.ring.input(RingInput::Toggle {
                             x: cx.display.0 as f32 / 2.0,

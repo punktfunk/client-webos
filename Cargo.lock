@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "cros-codecs"
 version = "0.0.5"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 dependencies = [
  "log",
 ]
@@ -592,7 +592,7 @@ dependencies = [
 [[package]]
 name = "fec-rs"
 version = "0.1.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 
 [[package]]
 name = "fiat-crypto"
@@ -1140,8 +1140,8 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pf-bitstream"
-version = "0.43.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+version = "0.43.1"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 dependencies = [
  "cros-codecs",
  "tracing",
@@ -1149,8 +1149,8 @@ dependencies = [
 
 [[package]]
 name = "pf-client-core"
-version = "0.43.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+version = "0.43.1"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 dependencies = [
  "anyhow",
  "cfg_aliases",
@@ -1164,8 +1164,8 @@ dependencies = [
 
 [[package]]
 name = "pf-console-ui"
-version = "0.43.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+version = "0.43.1"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 dependencies = [
  "anyhow",
  "pf-client-core",
@@ -1265,8 +1265,8 @@ dependencies = [
 
 [[package]]
 name = "punktfunk-core"
-version = "0.43.0"
-source = "git+https://git.unom.io/unom/punktfunk?rev=d6920bf5dc7cb93673201b58bf9de61de3dcfbe5#d6920bf5dc7cb93673201b58bf9de61de3dcfbe5"
+version = "0.43.1"
+source = "git+https://git.unom.io/unom/punktfunk?rev=93ce154face1c5f583dd7ace8fefb31de8ba5434#93ce154face1c5f583dd7ace8fefb31de8ba5434"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",

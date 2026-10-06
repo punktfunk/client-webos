@@ -187,6 +187,30 @@ pub(super) fn bring_up(
     }
 }
 
+/// The dial's type change, for the rest of this stream. The host builds a pad from its arrival
+/// and never swaps a built one, so each pad whose kind moves is unplugged as a real unplug is,
+/// then brought up again as `setting`.
+pub(super) fn replug(
+    connected: &Connected,
+    pads: &mut Pads,
+    setting: GamepadType,
+    settings: &Settings,
+    registry: Option<&Arc<Envelopes>>,
+) {
+    let moved: Vec<sdl3::joystick::JoystickId> = pads
+        .iter()
+        .filter(|slot| slot.declared != Some(slot.host_kind(setting)))
+        .map(|slot| slot.id)
+        .collect();
+    for id in moved {
+        let Some(slot) = pads.get_mut(id) else { continue };
+        slot.release_held(connected);
+        connected.send_input(&gamepad::remove_event(slot.index));
+        slot.declared = None;
+        bring_up(connected, pads, id, setting, settings, registry);
+    }
+}
+
 impl Slot {
     /// Tells the host what this pad is when that differs from what it last heard. Nonzero `caps`
     /// always re-declare: they ride the arrival.
