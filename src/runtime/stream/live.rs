@@ -7,7 +7,7 @@
 //! 3. the dial: its open/close edge, its facts and its commands ([`Stream::tick_ring`]);
 //! 4. the stop dialog's openers and its hand-over of input ([`Stream::tick_dialog_shortcuts`]);
 //! 5. the colour keys' actions and the hold toast ([`Stream::tick_remote_actions`]);
-//! 6. pointer capture and the HID grab ([`Stream::sync_capture`]);
+//! 6. pointer capture, the HID grab and who draws the pointer ([`Stream::sync_capture`]);
 //! 7. the dialog's own frame ([`Stream::tick_dialog`]), pad feedback, the overlays
 //!    ([`hud::Hud::draw`]);
 //! 8. whether the session is over ([`Stream::ended`]).
@@ -183,6 +183,7 @@ impl App {
             cursor,
             hid,
             hid_device_seen: false,
+            host_draws_cursor: false,
             remote_gate: RemoteGate::default(),
             remote_keys: RemoteKeys::default(),
             buttons: mouse::RemoteButtons::default(),
@@ -541,7 +542,8 @@ impl Stream {
         self.hud.note_hold(cx.connected.stats().holding.load(Ordering::Relaxed));
     }
 
-    /// Pointer capture and the HID grab follow the dialog, the dial and focus.
+    /// Pointer capture and the HID grab follow the dialog, the dial and focus. Who draws the
+    /// pointer follows the HID mouse.
     fn sync_capture(&mut self, cx: &Cx<'_>) {
         // The dialog is navigated with the Magic Remote's pointer, so a captured stream
         // must hand the pointer back while it's up — hidden/relative there'd be nothing
@@ -557,6 +559,20 @@ impl Stream {
             hid.set_active(self.focused && !self.disconnect.is_open() && !self.ring.open());
         }
         self.input_suspended = self.disconnect.is_open();
+        // Desktop mode aims with the TV's arrow, which never draws for a mouse node the reader
+        // holds, so the host draws its own while one is plugged in. Keyed to the mouse, not the
+        // grab: each hand-over to the host re-centres a Linux host's pointer.
+        let host_draws = self
+            .hid
+            .as_ref()
+            .is_some_and(crate::platform::webos::evdev::HidInput::has_mouse);
+        if host_draws != self.host_draws_cursor
+            && cx.connected.client.host_caps() & punktfunk_core::quic::HOST_CAP_CURSOR != 0
+            && cx.connected.client.set_cursor_render(!host_draws).is_ok()
+        {
+            tracing::info!(host_draws, "host cursor render handed over");
+            self.host_draws_cursor = host_draws;
+        }
     }
 
     /// The stop dialog's own frame. `Continue(true)` while it has one on screen, which the

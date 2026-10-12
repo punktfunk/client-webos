@@ -389,6 +389,9 @@ struct Stream {
     /// (that blocked every stream connect on the node-open cost), so presence is only known
     /// once the reader thread's own scan catches up; checked each tick.
     hid_device_seen: bool,
+    /// The host was last told to composite its own pointer. A session with the cursor channel
+    /// starts with the client drawing.
+    host_draws_cursor: bool,
     /// The one resolver for the remote's own keys in this loop — see `RemoteKeys`. The
     /// stream takes both edges: it mirrors held keys to the host (Back as Esc, Red as the
     /// right button), so dropping a release would leave the host holding one down.
