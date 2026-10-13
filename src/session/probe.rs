@@ -1,7 +1,7 @@
-//! Handshake-only connections: the pairing trust step and the network speed test.
+//! The network speed test's handshake-only connection.
 //!
-//! Neither loads a video backend or spawns a pump — see the `connect` module for the streaming
-//! path. Both block, and both are run on a worker thread by their callers.
+//! It loads no video backend and spawns no pump — see the `connect` module for the streaming
+//! path. It blocks, so its caller runs it on a worker thread.
 
 use std::time::{Duration, Instant};
 
@@ -11,9 +11,8 @@ use punktfunk_core::config::Mode;
 use punktfunk_core::{quic, PunktfunkError};
 
 /// Opens a handshake-only session: no video backend loads, no pump thread spawns, nothing is
-/// presented. Both callers below share it so the decisions that are the same either way — the
-/// throwaway 720p mode, whole-AU delivery, no cursor, no HDR metadata, the host's own device
-/// label — are stated once.
+/// presented. A throwaway 720p mode, whole-AU delivery, no cursor, no HDR metadata, the host's
+/// own device label.
 ///
 /// **`video_caps` always advertises `VIDEO_CAP_CHACHA20`, exactly as a real session does.**
 /// `punktfunk-core` counts delivered bytes AFTER AEAD decrypt, so a probe that negotiated
@@ -43,38 +42,6 @@ fn handshake_only(
         identity: Some(identity),
         ..punktfunk_core::client::ConnectParams::new(host, port, mode, timeout)
     })
-}
-
-/// The no-PIN "request access" trust step: connect presenting our identity, which a host
-/// requiring pairing PARKS until its operator approves this device, then return the host's
-/// fingerprint to pin and tear the connection straight back down. `pin` is an advertised
-/// fingerprint to hold the host to; `None` trusts whoever answers.
-///
-/// Uses `handshake_only`, so the video plane is never touched — this needs the handshake to reach
-/// `Welcome`, not a running stream. Blocks up to `timeout` (the operator-approval window).
-pub fn request_access(
-    host: &str,
-    port: u16,
-    pin: Option<[u8; 32]>,
-    identity: (String, String),
-    timeout: Duration,
-) -> Result<[u8; 32]> {
-    let client = handshake_only(
-        host,
-        port,
-        1_000, // minimal bitrate — connection is closed as soon as trust is established
-        quic::CODEC_H264,
-        pin,
-        identity,
-        timeout,
-    )
-    .context("request access connect")?;
-    let fingerprint = client.host_fingerprint;
-    // Deliberate teardown — the host should drop the parked/approved session now, not
-    // linger for a stream that isn't coming. (Runs on a background thread, so no log handle
-    // here; the caller logs the outcome.)
-    client.disconnect_quit();
-    Ok(fingerprint)
 }
 
 /// What the host is asked to burst during a speed test, and for how long.
@@ -134,7 +101,7 @@ pub struct SpeedProbeResult {
 
 /// Runs one network speed test against `host` and returns the host's final measurement.
 ///
-/// Like [`request_access`], this uses [`NativeClient`] directly rather than `session::connect`:
+/// Uses [`NativeClient`] directly rather than `session::connect`:
 /// no video backend is loaded and no pump thread is spawned, so the punch-through plane
 /// is never touched — the host builds a virtual output, but nothing is decoded or
 /// presented. Blocks; run it on a worker thread.

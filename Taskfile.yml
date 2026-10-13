@@ -9,10 +9,8 @@ silent: true
 dotenv: ['.env']
 
 env:
-  # CMake workaround for vendored libopus (audiopus_sys via punktfunk-core quic feature).
-  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
   # Prebuilt Skia for armv7; skia-bindings builds from source (~1 hour) without it.
-  SKIA_BINARIES_URL: 'https://git.unom.io/unom/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
+  SKIA_BINARIES_URL: 'https://git.unom.io/unom/skia-binaries/releases/download/0.153.3/skia-binaries-{key}.tar.gz'
 
 includes:
   toolchain:
@@ -83,7 +81,7 @@ tasks:
       and X11 headers — docker:test brings its own.
     env:
       # Use rust-skia upstream (our mirror is armv7-only).
-      SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
+      SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.153.3/skia-binaries-{key}.tar.gz'
     cmds:
       # `vendored-sdl3`: the host target has no libSDL3 to link against — see Cargo.toml.
       - cargo test --locked --bins --features vendored-sdl3
@@ -237,7 +235,7 @@ tasks:
       # Pinned: the real value carries the git SHA, and `core::VERSION` reads it through
       # option_env!, so every commit would invalidate the crate and re-link.
       PKG_VERSION: 0.0.1+preview
-      SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.99.0/skia-binaries-{key}.tar.gz'
+      SKIA_BINARIES_URL: 'https://github.com/rust-skia/skia-binaries/releases/download/0.153.3/skia-binaries-{key}.tar.gz'
       TELEMETRY_LEVEL: '{{.TELEMETRY_LEVEL | default "debug"}}'
       WEBOS_SDK: '{{.WEBOS_SDK}}'
     cmds:

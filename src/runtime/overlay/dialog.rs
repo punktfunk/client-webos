@@ -160,7 +160,7 @@ pub(super) fn draw(
     }
     if let Some(x) = by_name("x") {
         let tone = theme::fg(if motion.hover_close { 1.0 } else { 0.5 });
-        draw_icon(c, x, l.close.center_x(), l.close.center_y(), ICON_BOX * k, tone);
+        draw_icon(c, x, l.close.center_x(), l.close.center_y(), ICON_BOX * k, k, tone);
     }
     for (i, label) in labels.iter().enumerate() {
         let focused = i == focus;
@@ -202,6 +202,7 @@ pub(super) fn draw(
                 start + ICON_BOX * k / 2.0,
                 rect.center_y(),
                 ICON_BOX * k,
+                k,
                 color,
             );
         }

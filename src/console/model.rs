@@ -20,6 +20,7 @@ use pf_console_ui::{
     ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, SpeedPhase, Stale,
     WakeStatus,
 };
+use punktfunk_core::client::NativeClient;
 
 use crate::core::model::{GameEntry, KnownHost};
 use crate::services::discovery::{DiscoveredHost, Discovery};
@@ -108,8 +109,6 @@ pub(crate) struct Service {
     /// Covers as they arrive, encoded — see [`spawn_art`].
     art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
-    /// A Request access knock in flight — see [`Service::request_access`].
-    access: Option<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
 }
@@ -136,7 +135,6 @@ impl Service {
             games: None,
             art: None,
             pair: None,
-            access: None,
             wake_cancel: None,
         }
     }
@@ -297,6 +295,7 @@ impl Service {
             // these against the catalog it was handed, and a dangling one resolves to nothing
             // there exactly as it does at launch.
             game_presets: h.game_presets.clone(),
+            profile: h.profile.clone(),
             running: String::new(),
             key,
         }
@@ -312,7 +311,25 @@ impl Service {
                 port,
                 pin,
                 device_name,
-            } => self.start_pair(addr, port, &pin, &device_name),
+            } => self.start_pair(addr, port, move |addr, port, id| {
+                // Gated on somebody walking to their PC, so the long host budget.
+                NativeClient::pair(addr, port, (&id.0, &id.1), &pin, &device_name, budget::HOST_WAIT)
+                    .map_err(|e| crate::core::errors::pair_message(&e))
+            }),
+            // The host parks this TV until its operator approves it, held to the advertised
+            // fingerprint. Never streams.
+            ConsoleCmd::RequestAccess {
+                addr,
+                port,
+                fp_hex,
+                device_name,
+            } => {
+                let pin = shared::parse_fp(&fp_hex);
+                self.start_pair(addr, port, move |addr, port, id| {
+                    NativeClient::request_access(addr, port, (&id.0, &id.1), pin, &device_name, budget::HOST_WAIT, None)
+                        .map_err(|e| crate::core::errors::access_message(&e))
+                });
+            }
             ConsoleCmd::SendLogs {
                 addr,
                 mgmt,
@@ -380,7 +397,6 @@ impl Service {
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
-            ConsoleCmd::SetHostDelivery { key, profile } => self.set_host_delivery(&key, profile),
             // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -392,12 +408,17 @@ impl Service {
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
+            // - `FetchProfiles`, `WakeProfile`, `SetProfile`: the profile picker is off here
+            //   (`ConsoleOptions::profiles`), so the shell sends none of them.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PadTest { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
-            | ConsoleCmd::Install { .. } => {}
+            | ConsoleCmd::Install { .. }
+            | ConsoleCmd::FetchProfiles { .. }
+            | ConsoleCmd::WakeProfile { .. }
+            | ConsoleCmd::SetProfile { .. } => {}
         }
     }
 
@@ -434,19 +455,6 @@ impl Service {
     /// A pinned card on or off, through the shared edit; the carousel re-reads on a change.
     fn set_pin(&self, key: &str, profile_id: String, pin: bool) {
         self.store.edit(|state| shared::set_pin(state, key, profile_id, pin));
-    }
-
-    /// Remember the delivery profile a network check offered (`0` clears it); the next connect
-    /// asks the host for it.
-    fn set_host_delivery(&self, key: &str, profile: u8) {
-        self.store.edit(|state| {
-            let Some(i) = shared::find_known(&state.known_hosts, key) else {
-                tracing::warn!(%key, "console: delivery profile for an unknown host");
-                return false;
-            };
-            state.known_hosts[i].delivery = (profile != 0).then_some(profile);
-            true
-        });
     }
 
     /// Drop the pinned certificate and keep the record: the next connect asks for a PIN
@@ -587,26 +595,23 @@ impl Service {
         (name, mgmt_port, mac, os)
     }
 
-    fn start_pair(&mut self, addr: String, port: u16, pin: &str, device_name: &str) {
+    /// Run one pairing on its own thread: `ask` is the PIN ceremony or a request for access.
+    /// Reports Busy now; [`Self::drain_pair`] reports Paired or Failed.
+    fn start_pair(
+        &mut self,
+        addr: String,
+        port: u16,
+        ask: impl FnOnce(&str, u16, &(String, String)) -> Result<[u8; 32], String> + Send + 'static,
+    ) {
         let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
         self.handles.console.set_pair(PairPhase::Busy);
         let (tx, rx) = std::sync::mpsc::channel();
         self.pair = Some(rx);
         let identity = self.identity.clone();
-        let (pin, device_name) = (pin.to_string(), device_name.to_string());
         std::thread::Builder::new()
             .name("punktfunk-webos-console-pair".into())
             .spawn(move || {
-                let result = punktfunk_core::client::NativeClient::pair(
-                    &addr,
-                    port,
-                    (&identity.0, &identity.1),
-                    &pin,
-                    &device_name,
-                    // Gated on somebody walking to their PC, so the long host budget.
-                    budget::HOST_WAIT,
-                )
-                .map_err(|e| crate::core::errors::pair_message(&e));
+                let result = ask(&addr, port, &identity);
                 // A failed send just means the ceremony was cancelled and nobody is listening.
                 let _ = tx.send(PairOutcome {
                     name,
@@ -636,61 +641,6 @@ impl Service {
         tracing::info!("console: paired with {}:{}", outcome.addr, outcome.port);
         let key = self.remember_paired(outcome, fingerprint);
         self.handles.console.set_pair(PairPhase::Paired { key });
-    }
-
-    /// Knock on a host that parks unknown devices until its operator approves this TV,
-    /// holding it to the advertised `pin`. [`Self::drain_access`] saves the pairing.
-    pub(crate) fn request_access(&mut self, addr: String, port: u16, pin: [u8; 32]) {
-        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.access = Some(rx);
-        let identity = self.identity.clone();
-        std::thread::Builder::new()
-            .name("punktfunk-webos-console-access".into())
-            .spawn(move || {
-                let result = crate::session::probe::request_access(&addr, port, Some(pin), identity, budget::HOST_WAIT)
-                    .map_err(|e| crate::core::errors::friendly(&e));
-                let _ = tx.send(PairOutcome {
-                    name,
-                    addr,
-                    port,
-                    mgmt_port,
-                    mac,
-                    os,
-                    result,
-                });
-            })
-            .ok();
-    }
-
-    /// The knock's answer once there is one; `Ok` means the host is saved as paired.
-    pub(crate) fn drain_access(&mut self) -> Option<Result<(), String>> {
-        let outcome = match self.access.as_ref()?.try_recv() {
-            Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.access = None;
-                return Some(Err("Couldn't ask the host for access.".into()));
-            }
-        };
-        self.access = None;
-        match &outcome.result {
-            Ok(fp) => {
-                let fingerprint = *fp;
-                tracing::info!("console: access granted by {}:{}", outcome.addr, outcome.port);
-                self.remember_paired(outcome, fingerprint);
-                Some(Ok(()))
-            }
-            Err(e) => {
-                tracing::warn!("console: request access failed: {e}");
-                Some(Err(e.clone()))
-            }
-        }
-    }
-
-    /// Stop listening for the knock. The connection it holds ends on its own timeout.
-    pub(crate) fn cancel_access(&mut self) {
-        self.access = None;
     }
 
     /// Save a host this TV just paired with, returning its row key.
@@ -1211,6 +1161,7 @@ fn discovered_row(d: &DiscoveredHost) -> HostRow {
         pin: None,
         bound_preset: None,
         game_presets: Default::default(),
+        profile: None,
         // Needs `/api/v1/status`, which this client does not ask — the same reason
         // `LibraryGame::running` is false here. Empty renders as no line.
         running: String::new(),

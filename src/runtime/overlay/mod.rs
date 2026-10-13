@@ -103,7 +103,7 @@ pub(super) fn opaque_card(f: &Frame<'_>, rect: Rect, corner: f32) {
         RRect::new_rect_xy(rect, corner * f.k, corner * f.k),
         &theme::fill(surface()),
     );
-    theme::panel(f.canvas, rect, corner, None, PanelStroke::Gradient, f.k);
+    theme::panel(f.canvas, rect, corner, None, PanelStroke::Edge, f.k);
 }
 
 /// Layer with optional alpha, skipped at full alpha. Caller must pair with one `restore`.
@@ -314,7 +314,7 @@ fn pill(f: &Frame<'_>, text: &str, alpha: f32, bottom: bool) {
     let c = f.canvas;
     alpha_layer(c, pill, alpha);
     c.draw_rrect(RRect::new_rect_xy(pill, h / 2.0, h / 2.0), &theme::fill(surface()));
-    theme::panel(c, pill, h / 2.0 / k, None, PanelStroke::Gradient, k);
+    theme::panel(c, pill, h / 2.0 / k, None, PanelStroke::Edge, k);
     f.fonts.draw(
         c,
         text,

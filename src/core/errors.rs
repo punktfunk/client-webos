@@ -49,6 +49,10 @@ fn reject_message(reason: RejectReason) -> String {
              or ask the host's owner to allow launching."
                 .into()
         }
+        RejectReason::ProfileUnknown => "That profile is gone from this host. Pick another one.".into(),
+        RejectReason::NoSeat => "All seats are taken.".into(),
+        RejectReason::SeatOccupied => "Someone is already playing as that profile.".into(),
+        RejectReason::SeatUnavailable => "That profile can't play on this host right now.".into(),
     }
 }
 
@@ -69,6 +73,16 @@ fn connect_message(err: &PunktfunkError) -> String {
 pub fn pair_message(err: &PunktfunkError) -> String {
     match err {
         PunktfunkError::Crypto => "Wrong PIN — check the PIN on the host's Pairing page and try again.".into(),
+        other => connect_message(other),
+    }
+}
+
+/// Why a request for access failed. It has no PIN, so Crypto is a host that didn't match its advert.
+pub fn access_message(err: &PunktfunkError) -> String {
+    match err {
+        PunktfunkError::Crypto => {
+            "The host didn't present the identity it advertised. Pair with its PIN instead.".into()
+        }
         other => connect_message(other),
     }
 }
