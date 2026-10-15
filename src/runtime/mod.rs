@@ -159,9 +159,9 @@ fn spawn_connect(
                     pin: Some(fp),
                     launch,
                     profile,
-                    // A pinned host is reachable now or off, so a long budget would only hold the
-                    // black launch scrim. Waiting on an operator is the pairing flow's job.
-                    timeout: crate::services::budget::PROBE,
+                    // The Connecting card and the reconnect toast both cancel it. Waiting on an
+                    // operator is the pairing flow's job.
+                    timeout: crate::services::budget::CONNECT,
                     codec: settings.codec_pref(),
                     compositor: CompositorPref::from_name(&settings.compositor).unwrap_or(CompositorPref::Auto),
                     gamepad_type: settings.gamepad_type(),

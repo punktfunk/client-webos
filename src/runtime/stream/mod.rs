@@ -17,7 +17,8 @@ pub(super) mod live;
 
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
-/// costs the connect budget (`budget::PROBE`) per attempt, with the toast up the whole time.
+/// costs up to the connect budget (`budget::CONNECT`) per attempt, with the toast up the whole
+/// time and Back giving up.
 const RECONNECT_ATTEMPTS: u8 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 /// A session that streamed this long earns the full attempt budget back: the count is for a

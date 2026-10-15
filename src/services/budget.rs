@@ -7,6 +7,10 @@ use std::time::Duration;
 /// inside this; an off one fails fast. Also the per-request TCP connect budget.
 pub const PROBE: Duration = Duration::from_secs(3);
 
+/// A stream's handshake. The host brings up its capture and encoder before it answers, and a
+/// gamescope host does that behind any other client's session. The other clients wait 15 s too.
+pub const CONNECT: Duration = Duration::from_secs(15);
+
 /// A host that answered but isn't ready to stream yet: an unpinned connection waiting on the
 /// host's operator to approve this client, and a PIN handshake waiting on someone to walk to
 /// their PC. A shorter budget sent the user
