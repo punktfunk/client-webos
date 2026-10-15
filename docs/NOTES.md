@@ -182,6 +182,8 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - Apps install to `/media/developer/apps/usr/palm/applications/<appid>/` = `$HOME`.
 - `luna-send` over raw ssh needs `ssh -tt` (real PTY) or output swallowed; `ares-install`/`ares-launch` work.
 - **Black screen despite decode:** launch via real lifecycle (`luna-send .../launch`, SAM jailed uid). NDL punch-through composites for SAM foreground app only.
+- ⚠ **A firmware update can strand the app's bus role.** The role is written at install. webOS 11.2's player registers `com.webos.media.smp.*`, which the newer `NDK.json` template grants and an older role lacks. Its config calls then fail, the load fails, and NDL's cleanup hangs in `~StarfishMediaAPIs`: `NDL_DirectMediaLoad` never returns. A reinstall rewrites the role; a tar-over deploy does not. `ndl::ensure_media_role` probes the name before each connect.
+- NDL's own log (`[dmplayer.cpp::Load] ...`) never reaches a file from the jail. To read it, define `_PmLogMsgKV` and `PmLogString_` in the binary and export them (`-Wl,--export-dynamic-symbol=`): NDL and the player bind to the executable's copies first.
 - No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
 - SDL/Wayland may report `refresh_rate=0`; clamp to default. (SDL3 reports it as a float plus an exact numerator/denominator pair, so 59.94 is no longer rounded to 60.)
 

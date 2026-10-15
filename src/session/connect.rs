@@ -280,8 +280,9 @@ fn log_handshake(client: &NativeClient, negotiated: &Negotiated) {
 /// display geometry is needed here.
 pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Connected> {
     // Fails before touching the network: a full handshake would only end in `NdlVideo::load()`
-    // rejecting the same gate, pointlessly holding the host's pending-session slot for `timeout`.
+    // rejecting the same gate, or hanging in it, while the host holds a session for us.
     crate::platform::webos::ndl::ensure_not_poisoned()?;
+    crate::platform::webos::ndl::ensure_media_role()?;
     let negotiated = Negotiated::clamp(params);
     let client = Arc::new(dial(params, &negotiated)?);
     log_handshake(&client, &negotiated);
