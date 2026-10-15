@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_console_ui::{
-    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, SpeedPhase, Stale,
-    WakeStatus,
+    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, PairStatus, RequestKey,
+    SpeedPhase, Stale, WakeStatus,
 };
 use punktfunk_core::client::NativeClient;
 
@@ -49,6 +49,8 @@ const WAKE_RESEND_EVERY: Duration = Duration::from_secs(6);
 
 /// What a finished pairing ceremony reports. The shell re-reads its rows from the document.
 struct PairOutcome {
+    /// The `Pair` or `RequestAccess` this answers.
+    req: RequestKey,
     name: String,
     addr: String,
     port: u16,
@@ -105,7 +107,8 @@ pub(crate) struct Service {
     last_tick: Option<Instant>,
     rows_revision: Option<u64>,
     rows_dirty: bool,
-    games: Option<Receiver<GamesLoaded>>,
+    /// The library fetch in flight and the `FetchLibrary` it answers.
+    games: Option<(RequestKey, Receiver<GamesLoaded>)>,
     /// Covers as they arrive, encoded — see [`spawn_art`].
     art: Option<ArtReceiver>,
     pair: Option<Receiver<PairOutcome>>,
@@ -305,13 +308,20 @@ impl Service {
 
     fn handle(&mut self, cmd: ConsoleCmd) {
         match cmd {
-            ConsoleCmd::FetchLibrary { addr, mgmt, fp_hex } => self.fetch_library(&addr, mgmt, &fp_hex),
+            ConsoleCmd::FetchLibrary {
+                addr,
+                port,
+                mgmt,
+                fp_hex,
+                req,
+            } => self.fetch_library(&addr, port, mgmt, &fp_hex, req),
             ConsoleCmd::Pair {
                 addr,
                 port,
                 pin,
                 device_name,
-            } => self.start_pair(addr, port, move |addr, port, id| {
+                req,
+            } => self.start_pair(addr, port, req, move |addr, port, id| {
                 // Gated on somebody walking to their PC, so the long host budget.
                 NativeClient::pair(addr, port, (&id.0, &id.1), &pin, &device_name, budget::HOST_WAIT)
                     .map_err(|e| crate::core::errors::pair_message(&e))
@@ -323,9 +333,10 @@ impl Service {
                 port,
                 fp_hex,
                 device_name,
+                req,
             } => {
                 let pin = shared::parse_fp(&fp_hex);
-                self.start_pair(addr, port, move |addr, port, id| {
+                self.start_pair(addr, port, req, move |addr, port, id| {
                     NativeClient::request_access(addr, port, (&id.0, &id.1), pin, &device_name, budget::HOST_WAIT, None)
                         .map_err(|e| crate::core::errors::access_message(&e))
                 });
@@ -347,11 +358,10 @@ impl Service {
             ConsoleCmd::SaveHost { name, addr, port } => self.save_host(name, addr, port),
             ConsoleCmd::UpdateHost { key, name, addr, port } => self.update_host(&key, name, addr, port),
             ConsoleCmd::ForgetHost { key } => self.forget_host(&key),
-            ConsoleCmd::Wake { key, then_connect } => self.start_wake(&key, then_connect),
-            ConsoleCmd::CancelWake => {
-                self.stop();
-                self.handles.console.set_wake(None);
-            }
+            ConsoleCmd::Wake { key, then_connect, req } => self.start_wake(&key, then_connect, req),
+            // The shell closed the card as it sent this; clearing the slot here would close the
+            // card of a `Wake` queued behind it.
+            ConsoleCmd::CancelWake => self.stop(),
             ConsoleCmd::Probe => self.start_sweep(),
             ConsoleCmd::SpeedTest {
                 key,
@@ -503,36 +513,28 @@ impl Service {
 
     // ---- library -----------------------------------------------------------------------
 
-    fn fetch_library(&mut self, addr: &str, mgmt: u16, fp_hex: &str) {
-        // `begin_fetch` rather than a bare Loading phase: it also advances the fetch epoch,
-        // which is how the shelf tells its own result from the previous host's.
+    /// Answers under `req`: the model drops a list or phase for any fetch but the one the shell
+    /// is on.
+    fn fetch_library(&mut self, addr: &str, port: u16, mgmt: u16, fp_hex: &str, req: RequestKey) {
+        // `Loading`, and the posters a superseded fetch left go.
         self.handles.library.begin_fetch();
-        // Dropping the old receivers cancels them — a result for the host we just navigated
-        // away from must not land on this shelf.
+        // Dropping the old receivers cancels them.
         self.art = None;
-        // `FetchLibrary` names the management port, not the stream one, so the record supplies
-        // it — only so the answer can say which host proved reachable.
-        let port = self
-            .store
-            .snapshot()
-            .known_hosts
-            .iter()
-            .find(|h| h.addr == addr)
-            .map_or(0, |h| h.port);
-        self.games = Some(library::load_games_async(
+        let rx = library::load_games_async(
             addr.to_string(),
             port,
             mgmt,
             self.identity.clone(),
             shared::parse_fp(fp_hex),
             budget::REQUEST,
-        ));
+        );
+        self.games = Some((req, rx));
     }
 
     fn drain_games(&mut self) {
-        let Some(rx) = &self.games else { return };
+        let Some((_, rx)) = &self.games else { return };
         let Ok(loaded) = rx.try_recv() else { return };
-        self.games = None;
+        let Some((req, _)) = self.games.take() else { return };
         let games = match loaded.result {
             Ok(games) => games,
             Err(e) => {
@@ -544,16 +546,19 @@ impl Service {
                     e,
                     LibraryError::Unreachable(_) | LibraryError::Timeout(_) | LibraryError::BadReply(_)
                 );
-                self.handles.library.set_phase(LibraryPhase::Error {
-                    title: "Couldn't load the library".into(),
-                    body: e.to_string(),
-                    can_retry,
-                });
+                self.handles.library.set_phase(
+                    &req,
+                    LibraryPhase::Error {
+                        title: "Couldn't load the library".into(),
+                        body: e.to_string(),
+                        can_retry,
+                    },
+                );
                 return;
             }
         };
         self.note_reachable(&loaded.host, loaded.port, true);
-        self.handles.library.set_games(to_model(&games));
+        self.handles.library.set_games(&req, to_model(&games));
         self.handles.library.set_stale(Stale::No);
         self.art = Some(spawn_art(
             loaded.host,
@@ -596,15 +601,19 @@ impl Service {
     }
 
     /// Run one pairing on its own thread: `ask` is the PIN ceremony or a request for access.
-    /// Reports Busy now; [`Self::drain_pair`] reports Paired or Failed.
+    /// Reports Busy under `req` now; [`Self::drain_pair`] reports Paired or Failed.
     fn start_pair(
         &mut self,
         addr: String,
         port: u16,
+        req: RequestKey,
         ask: impl FnOnce(&str, u16, &(String, String)) -> Result<[u8; 32], String> + Send + 'static,
     ) {
         let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
-        self.handles.console.set_pair(PairPhase::Busy);
+        self.handles.console.set_pair(PairStatus {
+            req: req.clone(),
+            phase: PairPhase::Busy,
+        });
         let (tx, rx) = std::sync::mpsc::channel();
         self.pair = Some(rx);
         let identity = self.identity.clone();
@@ -614,6 +623,7 @@ impl Service {
                 let result = ask(&addr, port, &identity);
                 // A failed send just means the ceremony was cancelled and nobody is listening.
                 let _ = tx.send(PairOutcome {
+                    req,
                     name,
                     addr,
                     port,
@@ -630,17 +640,20 @@ impl Service {
         let Some(rx) = &self.pair else { return };
         let Ok(outcome) = rx.try_recv() else { return };
         self.pair = None;
+        let req = outcome.req.clone();
         let fingerprint = match &outcome.result {
             Ok(fp) => *fp,
             Err(e) => {
                 tracing::warn!("console: pairing failed: {e}");
-                self.handles.console.set_pair(PairPhase::Failed(e.clone()));
+                let phase = PairPhase::Failed(e.clone());
+                self.handles.console.set_pair(PairStatus { req, phase });
                 return;
             }
         };
         tracing::info!("console: paired with {}:{}", outcome.addr, outcome.port);
         let key = self.remember_paired(outcome, fingerprint);
-        self.handles.console.set_pair(PairPhase::Paired { key });
+        let phase = PairPhase::Paired { key };
+        self.handles.console.set_pair(PairStatus { req, phase });
     }
 
     /// Save a host this TV just paired with, returning its row key.
@@ -850,7 +863,8 @@ impl Service {
         self.rows_dirty |= self.reachable.insert(key, online) != Some(online);
     }
 
-    fn start_wake(&mut self, key: &str, then_connect: bool) {
+    /// Reports each tick under `req`, onto the card the shell raised as it sent the `Wake`.
+    fn start_wake(&mut self, key: &str, then_connect: bool, req: RequestKey) {
         self.stop();
         let Some(row) = self.rows().into_iter().find(|r| r.key == key) else {
             return;
@@ -861,11 +875,21 @@ impl Service {
             .unwrap_or_default();
         if macs.is_empty() {
             self.notice(format!("{} has no wake address on record", row.name));
+            // Nothing to send: end the card the shell opened.
+            self.handles.console.set_wake(Some(WakeStatus {
+                req,
+                key: row.key,
+                name: row.name,
+                seconds: 0,
+                timed_out: true,
+                online: false,
+                then_connect,
+            }));
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.wake_cancel = Some(cancel.clone());
-        spawn_wake(self.handles.clone(), row, macs, then_connect, cancel);
+        spawn_wake(self.handles.clone(), row, macs, then_connect, req, cancel);
     }
 
     fn host_action(&self, addr: String, mgmt: u16, fp_hex: &str, host_name: String, action_id: String, label: String) {
@@ -999,13 +1023,19 @@ fn power_rows(rights: PowerRights) -> Vec<HostAction> {
 }
 
 /// The wake-and-wait loop: re-send the magic packet every 6 s, probe once a second, give up at
-/// 90 s. The thread owns the wake card until cancelled; the shell reads `online`/`timed_out` and
-/// acts.
+/// 90 s. Each tick lands under `req`, so only this wake's card takes it; the shell reads
+/// `online`/`timed_out` and acts.
 ///
-/// A cancelled worker leaves the card alone: whoever cancelled it owns the card from then on —
-/// `CancelWake` clears it, and a fresh `Wake` hands it to the next worker, whose card a stale
-/// clear from this one would wipe.
-fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_connect: bool, cancel: Arc<AtomicBool>) {
+/// A cancelled worker writes nothing: the shell closed its card as it sent `CancelWake`, and a
+/// fresh `Wake` has a card of its own.
+fn spawn_wake(
+    handles: ConsoleHandles,
+    row: HostRow,
+    macs: Vec<String>,
+    then_connect: bool,
+    req: RequestKey,
+    cancel: Arc<AtomicBool>,
+) {
     std::thread::Builder::new()
         .name("punktfunk-webos-console-wake".into())
         .spawn(move || {
@@ -1024,13 +1054,12 @@ fn spawn_wake(handles: ConsoleHandles, row: HostRow, macs: Vec<String>, then_con
                 }
                 let online = punktfunk_core::client::NativeClient::probe(&row.addr, row.port, budget::PROBE);
                 // Again after the probe, which blocks for up to `budget::PROBE` — where a cancel
-                // against a sleeping host almost always lands. Publishing now would put back the
-                // card the cancel just cleared, and an `online` with `then_connect` would launch
-                // the stream the user had just called off.
+                // against a sleeping host almost always lands.
                 if cancel.load(Ordering::SeqCst) {
                     return;
                 }
                 handles.console.set_wake(Some(WakeStatus {
+                    req: req.clone(),
                     key: row.key.clone(),
                     name: row.name.clone(),
                     seconds: elapsed.as_secs() as u32,

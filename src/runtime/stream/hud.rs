@@ -213,23 +213,31 @@ impl Hud {
         let (lines, tier, corner, scale) = (&self.lines, self.tier, self.corner, self.scale);
         let log_rows = &mut self.log_rows;
         let notif_frame = if notif_active { self.notif.frame() } else { None };
-        let frame = overlay::frame(cx.gl, cx.window, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
-            if let Some(alpha) = stats_alpha {
-                overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
-            }
-            if let Some(lines) = log_lines {
-                overlay::log(f, log_rows, lines);
-            }
-            if let Some((text, alpha)) = notif_frame {
-                overlay::toast(f, text, alpha);
-            }
-            if let Some(alpha) = hint_frame {
-                overlay::exit_hint(f, exit_hint_text(pad), alpha);
-            }
-            if ring_visible {
-                ring.render(f.canvas, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
-            }
-        });
+        let frame = overlay::frame(
+            cx.gl,
+            cx.window,
+            cx.fonts,
+            cx.ui,
+            cx.display,
+            overlay::TRANSPARENT,
+            |f| {
+                if let Some(alpha) = stats_alpha {
+                    overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
+                }
+                if let Some(lines) = log_lines {
+                    overlay::log(f, log_rows, lines);
+                }
+                if let Some((text, alpha)) = notif_frame {
+                    overlay::toast(f, text, alpha);
+                }
+                if let Some(alpha) = hint_frame {
+                    overlay::exit_hint(f, exit_hint_text(pad), alpha);
+                }
+                if ring_visible {
+                    ring.render(f.canvas, f.ui, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
+                }
+            },
+        );
         self.drawn(frame);
     }
 }

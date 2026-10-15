@@ -68,16 +68,11 @@ pub(super) fn run(
         // No profile list here yet: a connect names no profile and the host picks.
         profiles: false,
     };
-    // Land back on the shelf the last stream was launched from (`selected_host`). The fetch is seeded here because the shell only asks
-    // for a library when it navigates to one, and this entry skips that navigation.
-    let entry = service.selected_row().map_or(ConsoleEntry::Home, |row| {
-        handles.bus.send(pf_console_ui::ConsoleCmd::FetchLibrary {
-            addr: row.addr.clone(),
-            mgmt: row.mgmt_port,
-            fp_hex: row.fp_hex.clone(),
-        });
-        ConsoleEntry::Library(Box::new(row))
-    });
+    // Land back on the shelf the last stream was launched from (`selected_host`). The shell
+    // sends that shelf's fetch itself.
+    let entry = service
+        .selected_row()
+        .map_or(ConsoleEntry::Home, |row| ConsoleEntry::Library(Box::new(row)));
     let opened_on_a_shelf = matches!(entry, ConsoleEntry::Library(_));
     let mut console = Console::new(opts, entry, &handles).context("console: shell")?;
     // Every tab drawn once, unseen, so the GL driver compiles their programs now rather than
@@ -345,8 +340,10 @@ pub(super) fn run(
                 }
                 // Nothing to swap to: this client reveals its stream by LEAVING the console
                 // loop, so the hold ends when the launch commits rather than on this ask. The
-                // action exists for a host that keeps the console and its stream side by side.
-                OverlayAction::ShowStream => {}
+                // console offers the two shortcut actions on Android only.
+                OverlayAction::ShowStream
+                | OverlayAction::PinShortcut { .. }
+                | OverlayAction::SaveLauncherFile { .. } => {}
                 OverlayAction::CancelConnect => {
                     // Dropping a pending connect, or abandoning a landed one, tears the session
                     // down off this thread. `|` so every slot is cleared.

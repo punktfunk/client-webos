@@ -157,8 +157,8 @@ MANIFEST (crate version — SPDX license — source)
   opusic-sys 0.7.5 — BSD-3-Clause — https://github.com/DoumanAsh/opusic-sys
   pem 4.0.0 — MIT — https://github.com/jcreekmore/pem-rs.git
   percent-encoding 2.3.2 — MIT OR Apache-2.0 — https://github.com/servo/rust-url/
-  pf-client-core 0.43.1 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
-  pf-console-ui 0.43.1 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-client-core 0.44.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-console-ui 0.44.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   pin-project-lite 0.2.17 — Apache-2.0 OR MIT — https://github.com/taiki-e/pin-project-lite
   pkg-config 0.3.34 — MIT OR Apache-2.0 — https://github.com/rust-lang/pkg-config-rs
   png 0.18.1 — MIT OR Apache-2.0 — https://github.com/image-rs/image-png
@@ -168,7 +168,7 @@ MANIFEST (crate version — SPDX license — source)
   powerfmt 0.2.0 — MIT OR Apache-2.0 — https://github.com/jhpratt/powerfmt
   prettyplease 0.2.37 — MIT OR Apache-2.0 — https://github.com/dtolnay/prettyplease
   proc-macro2 1.0.107 — MIT OR Apache-2.0 — https://github.com/dtolnay/proc-macro2
-  punktfunk-core 0.43.1 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  punktfunk-core 0.44.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   pxfm 0.1.30 — BSD-3-Clause OR Apache-2.0 — https://github.com/awxkee/pxfm
   quinn 0.11.11 — MIT OR Apache-2.0 — https://github.com/quinn-rs/quinn
   quinn-proto 0.11.18 — MIT OR Apache-2.0 — https://github.com/quinn-rs/quinn
@@ -270,8 +270,8 @@ MANIFEST (crate version — SPDX license — source)
 Crates whose package did not embed a license file (SPDX + source only)
 ----------------------------------------------------------------------------
   asn1-rs-impl 0.2.0 — MIT/Apache-2.0 — https://github.com/rusticata/asn1-rs.git
-  pf-client-core 0.43.1 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
-  punktfunk-core 0.43.1 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  pf-client-core 0.44.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
+  punktfunk-core 0.44.0 — MIT OR Apache-2.0 — https://git.unom.io/unom/punktfunk
   skia-bindings 0.153.3 — MIT — https://github.com/rust-skia/rust-skia
   skia-safe 0.153.3 — MIT — https://github.com/rust-skia/rust-skia
   taffy 0.14.0 — MIT — https://github.com/DioxusLabs/taffy
@@ -7300,7 +7300,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ----------------------------------------------------------------------------
-The following license (LUCIDE-LICENSE) applies to: pf-console-ui 0.43.1
+The following license (LUCIDE-LICENSE) applies to: pf-console-ui 0.44.0
 ----------------------------------------------------------------------------
 ISC License
 
@@ -7320,7 +7320,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 ----------------------------------------------------------------------------
-The following license (KENNEY-LICENSE) applies to: pf-console-ui 0.43.1
+The following license (KENNEY-LICENSE) applies to: pf-console-ui 0.44.0
 ----------------------------------------------------------------------------
 Kenney Input Prompts 1.5 — the controller outlines of the console's device marks
 (`PAD_*` in crates/client/pf-console-ui/src/icons.rs) are refit from the pack's

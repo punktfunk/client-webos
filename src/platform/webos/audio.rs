@@ -33,7 +33,9 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 
 use anyhow::Result;
-use punktfunk_core::audio::{crossfade_drop, JitterPolicy, JitterTuning};
+use punktfunk_core::audio::plane::PlaneFormat;
+use punktfunk_core::audio::{crossfade_drop, AudioPlayout, JitterPolicy, JitterTuning};
+use punktfunk_core::quic::AUDIO_CODEC_OPUS;
 
 use crate::core::media::{AudioFormat, AudioSink, Samples};
 use crate::session::audio::SAMPLE_RATE;
@@ -79,6 +81,12 @@ fn ring_capacity(device_samples: u32, channels: u8) -> usize {
 ///   cannot oscillate prime → dropout → re-prime. ✓
 const TUNING: JitterTuning = JitterTuning::AAUDIO;
 
+/// The ring's de-jitter policy under [`TUNING`]. This route plays Opus only: 48 kHz, 5 ms frames.
+fn jitter_policy(channels: u8) -> JitterPolicy {
+    let format = PlaneFormat::from_welcome(AUDIO_CODEC_OPUS, SAMPLE_RATE, 16, channels, 0, 0);
+    AudioPlayout { tuning: TUNING, format }.jitter()
+}
+
 /// The playback device. Holding it alive is the whole job — the ring drains on SDL's own
 /// audio thread from construction until this is dropped. See the module docs for when it is used
 /// at all.
@@ -117,7 +125,7 @@ impl AudioPlayer {
                     rx: pcm_rx,
                     recycle: recycle_tx,
                     ring: VecDeque::new(),
-                    policy: JitterPolicy::new(TUNING, channels),
+                    policy: jitter_policy(channels),
                     per_ms: (SAMPLE_RATE as usize / 1000) * channels as usize,
                     scratch: Vec::new(),
                     buffer_ms,
@@ -407,7 +415,7 @@ mod tests {
             rx,
             recycle,
             ring: VecDeque::new(),
-            policy: JitterPolicy::new(TUNING, 2),
+            policy: jitter_policy(2),
             per_ms: 96,
             scratch: Vec::new(),
             buffer_ms: Arc::new(AtomicU32::new(0)),

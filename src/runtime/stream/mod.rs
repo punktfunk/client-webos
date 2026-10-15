@@ -224,6 +224,7 @@ impl App {
             &mut self.console_gl,
             &self.window,
             &self.fonts,
+            &overlay::look(settings),
             self.display,
             overlay::TRANSPARENT,
             |f| {
@@ -357,6 +358,8 @@ struct Cx<'a> {
     window: &'a sdl3::video::Window,
     gl: &'a mut Option<console_flow::ConsoleGl>,
     fonts: &'a pf_console_ui::theme::Fonts,
+    /// The overlays' look, from `settings` ([`overlay::look`]).
+    ui: &'a pf_console_ui::theme::Frame,
     display: (u32, u32),
     pads: &'a mut pads::Pads,
     game_controller: &'a sdl3::GamepadSubsystem,
