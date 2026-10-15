@@ -219,11 +219,13 @@ impl App {
             notice: None,
         };
 
+        let ui = overlay::look(settings);
         let outcome = {
             let mut cx = Cx {
                 window: &self.window,
                 gl: &mut self.console_gl,
                 fonts: &self.fonts,
+                ui: &ui,
                 display: self.display,
                 pads: &mut self.pads,
                 game_controller: &self.game_controller,
@@ -585,9 +587,17 @@ impl Stream {
             // Own pass over the punch-through video: the dialog alone, on a transparent
             // clear (NDL video is on a hardware plane below this surface, so no blur).
             let disconnect = &self.disconnect;
-            let frame = overlay::frame(cx.gl, cx.window, cx.fonts, cx.display, overlay::TRANSPARENT, |f| {
-                disconnect.draw(f);
-            });
+            let frame = overlay::frame(
+                cx.gl,
+                cx.window,
+                cx.fonts,
+                cx.ui,
+                cx.display,
+                overlay::TRANSPARENT,
+                |f| {
+                    disconnect.draw(f);
+                },
+            );
             self.hud.drawn(frame);
         } else if !shown && animating {
             // Close-fade just finished. Confirmed Disconnect: end now, nothing to wipe

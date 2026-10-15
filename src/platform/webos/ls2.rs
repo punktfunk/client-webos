@@ -309,6 +309,33 @@ impl Drop for Bus {
     }
 }
 
+/// Whether the hub lets this executable take `name`; the inner `Err` is the hub's refusal.
+/// Registers the name and lets go of it at once. The outer `Err` means no bus library.
+pub fn may_register(name: &CStr) -> Result<std::result::Result<(), String>> {
+    let fns = fns()?;
+    let mut err = LsError {
+        error_code: 0,
+        message: std::ptr::null_mut(),
+        _rest: [0; 14],
+    };
+    let mut handle: Handle = std::ptr::null_mut();
+    // SAFETY: all pointers are to live locals; `name` is NUL-terminated.
+    let ok = unsafe {
+        (fns.error_init)(&mut err);
+        (fns.register)(name.as_ptr(), &mut handle, &mut err)
+    };
+    let answer = if ok && !handle.is_null() {
+        // SAFETY: `handle` was registered just above and is released exactly once here.
+        unsafe { (fns.unregister)(handle, &mut err) };
+        Ok(())
+    } else {
+        Err(describe(&err))
+    };
+    // SAFETY: `err` was initialised by `LSErrorInit` above.
+    unsafe { (fns.error_free)(&mut err) };
+    Ok(answer)
+}
+
 fn describe(err: &LsError) -> String {
     if err.message.is_null() {
         format!("code {}", err.error_code)

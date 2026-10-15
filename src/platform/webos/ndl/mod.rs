@@ -414,6 +414,45 @@ pub fn ensure_not_poisoned() -> Result<()> {
     Ok(())
 }
 
+/// The firmware's role template for native apps. It names the bus prefix its media player
+/// registers under when the player needs one.
+const NDK_ROLE_TEMPLATE: &str = "/usr/share/rolegen/templates/NDK.json";
+const MEDIA_PLAYER_BUS: &str = "com.webos.media.smp.";
+
+/// Refuses a connect this install's bus role cannot play. A role is written at install, and a
+/// firmware update that moves the player onto `com.webos.media.smp.*` leaves an older role
+/// without that name: `NDL_DirectMediaLoad` then never returns. Only a reinstall rewrites it.
+/// Probed once a run.
+pub fn ensure_media_role() -> Result<()> {
+    static STALE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *STALE.get_or_init(media_role_stale) {
+        bail!("this TV's last update blocks Punktfunk's video. Reinstall Punktfunk from the Homebrew Channel");
+    }
+    Ok(())
+}
+
+fn media_role_stale() -> bool {
+    let wants_player_bus = std::fs::read_to_string(NDK_ROLE_TEMPLATE).is_ok_and(|t| t.contains(MEDIA_PLAYER_BUS));
+    if !wants_player_bus {
+        return false;
+    }
+    let Ok(name) = CString::new(format!("{MEDIA_PLAYER_BUS}punktfunk{}", std::process::id())) else {
+        return false;
+    };
+    match super::ls2::may_register(&name) {
+        Ok(Ok(())) => false,
+        Ok(Err(why)) => {
+            tracing::warn!(%why, "media role predates this firmware: the player bus name is refused");
+            true
+        }
+        // No bus library means no answer, not a refusal.
+        Err(e) => {
+            tracing::debug!("media role probe skipped: {e:#}");
+            false
+        }
+    }
+}
+
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Calls `NDL_DirectMediaInit` once (process-global, idempotent-guarded). One symbol, two

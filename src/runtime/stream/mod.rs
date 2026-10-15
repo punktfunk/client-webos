@@ -17,7 +17,8 @@ pub(super) mod live;
 
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
-/// costs the connect budget (`budget::PROBE`) per attempt, with the toast up the whole time.
+/// costs up to the connect budget (`budget::CONNECT`) per attempt, with the toast up the whole
+/// time and Back giving up.
 const RECONNECT_ATTEMPTS: u8 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 /// A session that streamed this long earns the full attempt budget back: the count is for a
@@ -224,6 +225,7 @@ impl App {
             &mut self.console_gl,
             &self.window,
             &self.fonts,
+            &overlay::look(settings),
             self.display,
             overlay::TRANSPARENT,
             |f| {
@@ -357,6 +359,8 @@ struct Cx<'a> {
     window: &'a sdl3::video::Window,
     gl: &'a mut Option<console_flow::ConsoleGl>,
     fonts: &'a pf_console_ui::theme::Fonts,
+    /// The overlays' look, from `settings` ([`overlay::look`]).
+    ui: &'a pf_console_ui::theme::Frame,
     display: (u32, u32),
     pads: &'a mut pads::Pads,
     game_controller: &'a sdl3::GamepadSubsystem,

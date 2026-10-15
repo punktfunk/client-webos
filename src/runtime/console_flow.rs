@@ -54,7 +54,7 @@ pub(super) fn run(
             crate::core::VERSION,
             env!("PF_CORE_VERSION")
         )),
-        deck: false,
+        system_keyboard: false,
         tv: true,
         // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
         fallback_ui: false,
@@ -65,17 +65,14 @@ pub(super) fn run(
         platform: Platform::WebOS,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
         screen: None,
+        // No profile list here yet: a connect names no profile and the host picks.
+        profiles: false,
     };
-    // Land back on the shelf the last stream was launched from (`selected_host`). The fetch is seeded here because the shell only asks
-    // for a library when it navigates to one, and this entry skips that navigation.
-    let entry = service.selected_row().map_or(ConsoleEntry::Home, |row| {
-        handles.bus.send(pf_console_ui::ConsoleCmd::FetchLibrary {
-            addr: row.addr.clone(),
-            mgmt: row.mgmt_port,
-            fp_hex: row.fp_hex.clone(),
-        });
-        ConsoleEntry::Library(Box::new(row))
-    });
+    // Land back on the shelf the last stream was launched from (`selected_host`). The shell
+    // sends that shelf's fetch itself.
+    let entry = service
+        .selected_row()
+        .map_or(ConsoleEntry::Home, |row| ConsoleEntry::Library(Box::new(row)));
     let opened_on_a_shelf = matches!(entry, ConsoleEntry::Library(_));
     let mut console = Console::new(opts, entry, &handles).context("console: shell")?;
     // Every tab drawn once, unseen, so the GL driver compiles their programs now rather than
@@ -127,8 +124,6 @@ pub(super) fn run(
     // A launch the shell committed: the connect runs while the shell keeps drawing its
     // Connecting card.
     let mut connect: Option<Started> = None;
-    // A Request access launch waiting on the host's approval — see `Service::request_access`.
-    let mut access: Option<Launch> = None;
     // A connect that landed, held while the shell keeps animating until its first frame
     // reaches NDL: leaving now would freeze the Connecting card for the whole wait.
     let mut reveal: Option<Reveal> = None;
@@ -317,30 +312,19 @@ pub(super) fn run(
                     fp_hex,
                     launch,
                     title,
-                    preset: profile,
-                    request_access,
+                    preset,
+                    profile,
+                    // Request access is `ConsoleCmd::RequestAccess`: the shell never sets this.
+                    request_access: _,
                 } => {
                     let want = Launch {
                         addr,
                         port,
                         fp_hex,
                         launch,
+                        preset,
                         profile,
                     };
-                    if request_access {
-                        // The host parks this TV until its operator approves; the launch
-                        // follows once the knock comes back and the pairing is saved.
-                        let Some(pin) = shared::parse_fp(&want.fp_hex) else {
-                            console.session_phase(SessionPhase::Failed(
-                                "This host didn't say who it is, so pair it with its PIN.",
-                            ));
-                            continue;
-                        };
-                        tracing::info!("console: requesting access to {}:{}", want.addr, want.port);
-                        service.request_access(want.addr.clone(), want.port, pin);
-                        access = Some(want);
-                        continue;
-                    }
                     let where_ = format!("{title} on {}:{}", want.addr, want.port);
                     match start_launch(&store, identity, game_controller, want) {
                         Ok(started) => {
@@ -356,15 +340,16 @@ pub(super) fn run(
                 }
                 // Nothing to swap to: this client reveals its stream by LEAVING the console
                 // loop, so the hold ends when the launch commits rather than on this ask. The
-                // action exists for a host that keeps the console and its stream side by side.
-                OverlayAction::ShowStream => {}
+                // console offers the two shortcut actions on Android only.
+                OverlayAction::ShowStream
+                | OverlayAction::PinShortcut { .. }
+                | OverlayAction::SaveLauncherFile { .. } => {}
                 OverlayAction::CancelConnect => {
                     // Dropping a pending connect, or abandoning a landed one, tears the session
                     // down off this thread. `|` so every slot is cleared.
                     let revealing = reveal.take().map(Reveal::abandon).is_some();
-                    if connect.take().is_some() | access.take().is_some() | revealing {
+                    if connect.take().is_some() | revealing {
                         tracing::info!("console: connect cancelled");
-                        service.cancel_access();
                         console.session_phase(SessionPhase::Ended(None));
                     }
                 }
@@ -379,24 +364,6 @@ pub(super) fn run(
                         tracing::warn!("console: clipboard: {e}");
                     }
                 }
-            }
-        }
-
-        // Approved: the host is paired now, so the launch the knock held back goes ahead.
-        if access.is_some() {
-            match service.drain_access() {
-                Some(Ok(())) => {
-                    let want = access.take().expect("just checked");
-                    match start_launch(&store, identity, game_controller, want) {
-                        Ok(started) => connect = Some(started),
-                        Err(e) => console.session_phase(SessionPhase::Failed(&format!("Couldn't start — {e}"))),
-                    }
-                }
-                Some(Err(e)) => {
-                    access = None;
-                    console.session_phase(SessionPhase::Failed(&e));
-                }
-                None => {}
             }
         }
 
@@ -548,12 +515,14 @@ pub(super) fn bring_up<'a>(
     Ok(gl)
 }
 
-/// What the shell committed to launch: the host, a title or the desktop, and a one-off profile.
+/// What the shell committed to launch: the host, a title or the desktop, a one-off settings
+/// preset and the host profile to play as.
 struct Launch {
     addr: String,
     port: u16,
     fp_hex: String,
     launch: Option<String>,
+    preset: Option<String>,
     profile: Option<String>,
 }
 
@@ -595,16 +564,16 @@ fn start_launch(
         port,
         fp_hex,
         launch,
+        preset,
         profile,
     } = want;
     let state = store.snapshot();
     let known = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
-    let delivery = known.and_then(|h| h.delivery);
     let fingerprint = known
         .and_then(crate::core::model::KnownHost::fingerprint)
         .or_else(|| shared::parse_fp(&fp_hex))
         .context("that host isn't paired with this TV yet")?;
-    let mut settings = shared::launch_settings(&state, &addr, port, launch.as_deref(), profile.as_deref());
+    let mut settings = shared::launch_settings(&state, &addr, port, launch.as_deref(), preset.as_deref());
     let gamepad_auto = settings.gamepad_type() == store::GamepadType::Auto;
     settings = resolve_gamepad_type(settings, game_controller);
     let target = ConnectTarget {
@@ -612,7 +581,7 @@ fn start_launch(
         port,
         fingerprint,
         launch,
-        delivery,
+        profile,
     };
     let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
     Ok((handle, target, settings, gamepad_auto))

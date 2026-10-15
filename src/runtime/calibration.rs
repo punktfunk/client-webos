@@ -267,7 +267,9 @@ pub(super) fn run(
     fonts: &pf_console_ui::theme::Fonts,
     display: (u32, u32),
 ) -> Result<StreamOutcome> {
-    let stored = store::load().settings.hdr_display().normalized();
+    let settings = store::load().settings;
+    let stored = settings.hdr_display().normalized();
+    let ui = overlay::look(&settings);
     let step = Step::default();
     let (meta, pattern) = frame(step, stored);
     let playback = Playback::start(meta, pattern)
@@ -343,7 +345,7 @@ pub(super) fn run(
             // A TV panel over the pattern (picture settings, the natural thing to open here)
             // fails every GL call on this surface until it closes: the card freezes, the screen
             // stays, and the frame is retried next tick.
-            let frame = overlay::frame(gl, window, fonts, display, clear, |f| draw(f, &cal));
+            let frame = overlay::frame(gl, window, fonts, &ui, display, clear, |f| draw(f, &cal));
             if overlay::drawn(frame, &mut overlay_warned) {
                 drawn = Some(visual);
             }
@@ -413,13 +415,13 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     opaque_card(f, card, CORNER);
     let left = card.left + PAD * k;
     let mut y = card.top + PAD * k;
-    text(spec.label, left, y, title_h, W::SemiBold, TITLE_SIZE, theme::fg(1.0));
+    text(spec.label, left, y, title_h, W::SemiBold, TITLE_SIZE, f.ui.fg(1.0));
     let value = cal.step.value_text(cal.display);
     let value_x = card.right - PAD * k - f.fonts.measure(&value, W::Medium, TITLE_SIZE * kf);
-    text(&value, value_x, y, title_h, W::Medium, TITLE_SIZE, theme::accent(1.0));
+    text(&value, value_x, y, title_h, W::Medium, TITLE_SIZE, f.ui.accent(1.0));
     y += title_h + GAP * k;
     for line in &lines {
-        text(line, left, y, body_line, W::Regular, BODY_SIZE, theme::fg(0.72));
+        text(line, left, y, body_line, W::Regular, BODY_SIZE, f.ui.fg(0.72));
         y += body_line;
     }
     y += GAP * k;
@@ -427,13 +429,13 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     let cy = y + KNOB_R * k;
     let track = Rect::from_xywh(left, cy - TRACK_H * k / 2.0, inner, TRACK_H * k);
     let radius = TRACK_H * k / 2.0;
-    c.draw_rrect(RRect::new_rect_xy(track, radius, radius), &theme::fill(theme::fg(0.15)));
+    c.draw_rrect(RRect::new_rect_xy(track, radius, radius), &theme::fill(f.ui.fg(0.15)));
     let filled = Rect::from_xywh(track.left, track.top, inner * fraction, track.height());
     c.draw_rrect(
         RRect::new_rect_xy(filled, radius, radius),
-        &theme::fill(theme::accent(1.0)),
+        &theme::fill(f.ui.accent(1.0)),
     );
-    let mut knob = theme::fill(theme::fg(1.0));
+    let mut knob = theme::fill(f.ui.fg(1.0));
     knob.set_anti_alias(true);
     c.draw_circle((track.left + inner * fraction, cy), KNOB_R * k, &knob);
     y += slider_h + GAP * k;
@@ -442,7 +444,7 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     } else {
         "◀ ▶ Adjust   ·   OK Save   ·   Back Cancel"
     };
-    text(hint, left, y, hint_h, W::Regular, HINT_SIZE, theme::fg(0.5));
+    text(hint, left, y, hint_h, W::Regular, HINT_SIZE, f.ui.fg(0.5));
     c.restore();
 }
 

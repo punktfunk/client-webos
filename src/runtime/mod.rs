@@ -132,12 +132,12 @@ fn spawn_connect(
     target: ConnectTarget,
     settings: store::Settings,
 ) -> Result<PendingConnect> {
-    let (host, port, fp, launch, delivery) = (
+    let (host, port, fp, launch, profile) = (
         target.host,
         target.port,
         target.fingerprint,
         target.launch,
-        target.delivery,
+        target.profile,
     );
     let attempt = std::sync::Arc::new(session::ConnectAttempt::default());
     let worker_attempt = attempt.clone();
@@ -158,10 +158,10 @@ fn spawn_connect(
                     identity,
                     pin: Some(fp),
                     launch,
-                    delivery,
-                    // A pinned host is reachable now or off, so a long budget would only hold the
-                    // black launch scrim. Waiting on an operator is the pairing flow's job.
-                    timeout: crate::services::budget::PROBE,
+                    profile,
+                    // The Connecting card and the reconnect toast both cancel it. Waiting on an
+                    // operator is the pairing flow's job.
+                    timeout: crate::services::budget::CONNECT,
                     codec: settings.codec_pref(),
                     compositor: CompositorPref::from_name(&settings.compositor).unwrap_or(CompositorPref::Auto),
                     gamepad_type: settings.gamepad_type(),

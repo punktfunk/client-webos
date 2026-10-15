@@ -11,6 +11,7 @@ use skia_safe::{Canvas, Color4f, RRect, Rect};
 
 use crate::console::ConsoleGl;
 use crate::platform::webos::input::RemoteKey;
+use crate::services::store;
 use pf_client_core::menu_nav::{MenuDir, MenuEvent};
 
 mod dialog;
@@ -34,11 +35,13 @@ const TOAST_SIZE: f64 = 15.0;
 pub(super) const LOG_LINES: usize = 9;
 const NOTIFICATION_HOLD: Duration = Duration::from_secs(2);
 
-/// One frame's canvas and its size in display units.
+/// One frame's canvas, its look and its size in display units.
 #[derive(Clone, Copy)]
 pub(super) struct Frame<'a> {
     pub canvas: &'a Canvas,
     pub fonts: &'a Fonts,
+    /// The console's palette, from [`look`].
+    pub ui: &'a theme::Frame,
     pub w: f32,
     pub h: f32,
     /// Pixels per design unit.
@@ -46,15 +49,23 @@ pub(super) struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    fn new(canvas: &'a Canvas, fonts: &'a Fonts, w: u32, h: u32) -> Self {
+    fn new(canvas: &'a Canvas, fonts: &'a Fonts, ui: &'a theme::Frame, w: u32, h: u32) -> Self {
         Self {
             canvas,
             fonts,
+            ui,
             w: w as f32,
             h: h as f32,
             k: scale(h),
         }
     }
+}
+
+/// The look the console draws in: its palette's ink and the reduce-motion setting. Nothing here
+/// reads back the surface, so the reduced interface is on.
+pub(super) fn look(settings: &store::Settings) -> theme::Frame {
+    let ink = theme::Ink::of(pf_console_ui::palette::palette(&settings.ui_palette));
+    theme::Frame::new(ink, settings.reduce_motion, true, 0.0)
 }
 
 /// The kit's own default: 800 design units tall, clamped between a Deck and a 4K panel.
@@ -93,17 +104,17 @@ pub(super) fn wrap(fonts: &Fonts, text: &str, w: W, size: f64, max_w: f64) -> Ve
 }
 
 /// The overlays' card face.
-fn surface() -> Color4f {
-    theme::card_face(0.16)
+fn surface(ui: &theme::Frame) -> Color4f {
+    ui.card_face(0.16)
 }
 
 /// An opaque card. Never frosted: the video sits on a hardware plane our GL context cannot read.
 pub(super) fn opaque_card(f: &Frame<'_>, rect: Rect, corner: f32) {
     f.canvas.draw_rrect(
         RRect::new_rect_xy(rect, corner * f.k, corner * f.k),
-        &theme::fill(surface()),
+        &theme::fill(surface(f.ui)),
     );
-    theme::panel(f.canvas, rect, corner, None, PanelStroke::Gradient, f.k);
+    theme::panel(f.canvas, f.ui, rect, corner, None, PanelStroke::Edge, f.k);
 }
 
 /// Layer with optional alpha, skipped at full alpha. Caller must pair with one `restore`.
@@ -118,11 +129,13 @@ pub(super) fn alpha_layer(c: &Canvas, r: Rect, alpha: f32) {
 }
 
 /// One frame on the GL context: the surface, cleared to `clear`, scaled from `display`
-/// units to the drawable. `draw` paints in display units; the frame is then swapped.
+/// units to the drawable. `draw` paints in display units and in `ui`'s look; the frame is then
+/// swapped.
 pub(super) fn frame(
     gl: &mut Option<ConsoleGl>,
     window: &sdl3::video::Window,
     fonts: &Fonts,
+    ui: &theme::Frame,
     display: (u32, u32),
     clear: Color4f,
     draw: impl FnOnce(&Frame<'_>),
@@ -136,7 +149,7 @@ pub(super) fn frame(
         c.clear(clear);
         c.scale((dw as f32 / display.0.max(1) as f32, dh as f32 / display.1.max(1) as f32));
         fonts.begin_frame();
-        draw(&Frame::new(c, fonts, display.0, display.1));
+        draw(&Frame::new(c, fonts, ui, display.0, display.1));
     }
     gl.flush();
     window.gl_swap_window();
@@ -164,8 +177,9 @@ pub(super) const TRANSPARENT: Color4f = Color4f::new(0.0, 0.0, 0.0, 0.0);
 
 /// Two swaps of nothing, so both buffers of the window are wiped.
 pub(super) fn wipe(gl: &mut Option<ConsoleGl>, window: &sdl3::video::Window, fonts: &Fonts) -> Result<()> {
+    let ui = theme::Frame::default();
     for _ in 0..2 {
-        frame(gl, window, fonts, (1, 1), TRANSPARENT, |_| {})?;
+        frame(gl, window, fonts, &ui, (1, 1), TRANSPARENT, |_| {})?;
     }
     Ok(())
 }
@@ -174,11 +188,11 @@ pub(super) fn wipe(gl: &mut Option<ConsoleGl>, window: &sdl3::video::Window, fon
 const WARN_AMBER: Color4f = Color4f::new(1.0, 0.76, 0.03, 1.0);
 
 /// Headline bright, breakdowns softer, asides dimmer, warnings amber.
-fn role_tone(role: Role) -> Color4f {
+fn role_tone(ui: &theme::Frame, role: Role) -> Color4f {
     match role {
-        Role::Primary => theme::fg(1.0),
-        Role::Detail => theme::fg(0.78),
-        Role::Muted => theme::fg(0.6),
+        Role::Primary => ui.fg(1.0),
+        Role::Detail => ui.fg(0.78),
+        Role::Muted => ui.fg(0.6),
         Role::Warn => WARN_AMBER,
     }
 }
@@ -203,9 +217,9 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32, co
     alpha_layer(c, card, alpha);
     c.draw_rrect(
         RRect::new_rect_xy(card, STATS_CORNER * k, STATS_CORNER * k),
-        &theme::fill(surface()),
+        &theme::fill(surface(f.ui)),
     );
-    theme::panel(c, card, STATS_CORNER, None, PanelStroke::Plain(0.12), k);
+    theme::panel(c, f.ui, card, STATS_CORNER, None, PanelStroke::Plain(0.12), k);
     let x = f64::from(card.left + STATS_PAD * k);
     for (i, line) in lines.iter().enumerate() {
         f.fonts.draw(
@@ -215,7 +229,7 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32, co
             f64::from(card.top + STATS_PAD * k + stride * (i as f32 + 0.8)),
             W::Medium,
             size,
-            role_tone(line.role),
+            role_tone(f.ui, line.role),
         );
     }
     let hint_w = f.fonts.measure(hint, W::Regular, hint_size);
@@ -226,17 +240,17 @@ pub(super) fn stats(f: &Frame<'_>, lines: &[HudLine], hint: &str, alpha: f32, co
         f64::from(card.top + STATS_PAD * k + stride * lines.len() as f32) + line_h(hint_size) * 0.8,
         W::Regular,
         hint_size,
-        theme::fg(0.5),
+        f.ui.fg(0.5),
     );
     c.restore();
 }
 
-fn log_tone(line: &str) -> Color4f {
+fn log_tone(ui: &theme::Frame, line: &str) -> Color4f {
     match line.split_whitespace().next() {
         Some("ERROR") => theme::ERROR,
         Some("WARN") => WARN_AMBER,
-        Some("INFO") => theme::fg(1.0),
-        _ => theme::fg(0.6),
+        Some("INFO") => ui.fg(1.0),
+        _ => ui.fg(0.6),
     }
 }
 
@@ -259,7 +273,7 @@ impl LogRows {
         let wrap_w = f.w - 2.0 * LOG_PAD * k - LOG_INDENT * k;
         self.rows.clear();
         for line in &lines {
-            let tone = log_tone(line);
+            let tone = log_tone(f.ui, line);
             let wrapped = wrap(f.fonts, line, W::Regular, size, f64::from(wrap_w));
             self.rows.extend(wrapped.into_iter().enumerate().map(|(i, text)| {
                 let x = if i == 0 { 0.0 } else { LOG_INDENT * k };
@@ -280,7 +294,7 @@ pub(super) fn log(f: &Frame<'_>, cache: &mut LogRows, lines: Vec<String>) {
     let h = stride * rows.len().max(1) as f32 + 2.0 * LOG_PAD * k;
     let strip = Rect::from_xywh(0.0, f.h - h, f.w, h);
     let c = f.canvas;
-    c.draw_rect(strip, &theme::fill(surface()));
+    c.draw_rect(strip, &theme::fill(surface(f.ui)));
     for (i, (dx, text, tone)) in rows.iter().enumerate() {
         f.fonts.draw(
             c,
@@ -313,8 +327,8 @@ fn pill(f: &Frame<'_>, text: &str, alpha: f32, bottom: bool) {
     let pill = Rect::from_xywh((f.w - w) / 2.0, y, w, h);
     let c = f.canvas;
     alpha_layer(c, pill, alpha);
-    c.draw_rrect(RRect::new_rect_xy(pill, h / 2.0, h / 2.0), &theme::fill(surface()));
-    theme::panel(c, pill, h / 2.0 / k, None, PanelStroke::Gradient, k);
+    c.draw_rrect(RRect::new_rect_xy(pill, h / 2.0, h / 2.0), &theme::fill(surface(f.ui)));
+    theme::panel(c, f.ui, pill, h / 2.0 / k, None, PanelStroke::Edge, k);
     f.fonts.draw(
         c,
         text,
@@ -322,7 +336,7 @@ fn pill(f: &Frame<'_>, text: &str, alpha: f32, bottom: bool) {
         f64::from(pill.top + TOAST_PAD_Y * k) + line_h(size) * 0.8,
         W::Medium,
         size,
-        theme::fg(1.0),
+        f.ui.fg(1.0),
     );
     c.restore();
 }

@@ -143,7 +143,7 @@ pub(super) fn draw(
         f64::from(l.title_baseline),
         W::SemiBold,
         TITLE_SIZE * f64::from(k),
-        theme::fg(1.0),
+        f.ui.fg(1.0),
         f64::from(l.card.width() - (2.0 * PAD + CLOSE_BOX) * k),
     );
     let body_line = line_h(BODY_SIZE * f64::from(k)) as f32;
@@ -155,12 +155,12 @@ pub(super) fn draw(
             f64::from(l.body_top + body_line * (i as f32 + 0.8)),
             W::Regular,
             BODY_SIZE * f64::from(k),
-            theme::fg(0.72),
+            f.ui.fg(0.72),
         );
     }
     if let Some(x) = by_name("x") {
-        let tone = theme::fg(if motion.hover_close { 1.0 } else { 0.5 });
-        draw_icon(c, x, l.close.center_x(), l.close.center_y(), ICON_BOX * k, tone);
+        let tone = f.ui.fg(if motion.hover_close { 1.0 } else { 0.5 });
+        draw_icon(c, x, l.close.center_x(), l.close.center_y(), ICON_BOX * k, k, tone);
     }
     for (i, label) in labels.iter().enumerate() {
         let focused = i == focus;
@@ -176,7 +176,7 @@ pub(super) fn draw(
         } else {
             l.buttons[i]
         };
-        let tone = if i == 0 { theme::ERROR } else { theme::fg(0.9) };
+        let tone = if i == 0 { theme::ERROR } else { f.ui.fg(0.9) };
         let rr = RRect::new_rect_xy(rect, BUTTON_CORNER * k, BUTTON_CORNER * k);
         if focused {
             c.draw_rrect(rr, &theme::fill(Color4f { a: 0.16, ..tone }));
@@ -184,9 +184,9 @@ pub(super) fn draw(
             sp.set_anti_alias(true);
             c.draw_rrect(rr, &sp);
         } else {
-            theme::panel(c, rect, BUTTON_CORNER, None, PanelStroke::Plain(0.10), k);
+            theme::panel(c, f.ui, rect, BUTTON_CORNER, None, PanelStroke::Plain(0.10), k);
         }
-        let color = if focused { tone } else { theme::fg(0.75) };
+        let color = if focused { tone } else { f.ui.fg(0.75) };
         let size = BODY_SIZE * f64::from(k);
         let icon = (i == 0).then(|| by_name("x")).flatten();
         let icon_w = if icon.is_some() { (ICON_BOX + 8.0) * k } else { 0.0 };
@@ -202,6 +202,7 @@ pub(super) fn draw(
                 start + ICON_BOX * k / 2.0,
                 rect.center_y(),
                 ICON_BOX * k,
+                k,
                 color,
             );
         }

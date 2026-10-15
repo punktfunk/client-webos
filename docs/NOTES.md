@@ -13,7 +13,6 @@ Verified against LG CX (webOS 5.6) and G5 (webOS 10.3). Load-bearing decisions o
 - **rust-sdl3's `Keycode`/`Scancode` are closed enums,** with no variant for any webOS key. Every webOS key comes back `None` on BOTH fields of `Event::KeyDown`, so none of them can be named from the safe event API. Two different answers, and the split is load-bearing:
   - **The colour keys and Back are matched on `Event::KeyDown`'s `raw`,** which carries the plain evdev code (`KEY_RED`..`KEY_BLUE` 0x18e-0x191, `KEY_PREVIOUS` 0x19c) — see `platform::webos::input::RemoteKey`. Polling the state array for these is a **dead end**: Back and Red never set a bit at all, and bits in that range latch (368/369 `CURSOR_SHOW`/`CURSOR_HIDE` read as held all session), so a wrong guess sticks on. Matching the event also restores real down/up edges, which a poll can only approximate.
   - **Only Home (364) and Exit (375) are polled** with `webos_scancode_down`: they do set state bits and have no event worth matching.
-- **cmake/opus**: `punktfunk-core`'s `quic` feature needs CMAKE_POLICY_VERSION_MINIMUM=3.5 (modern CMake refuses vendored libopus's old minimum).
 - **Shipped builds use fat LTO, one codegen unit** (`Cargo.toml`'s `[profile.release]`). Cross-crate inlining (AEAD, FEC, QUIC parsing) required for armv7 hot loops. Docker tasks default thin LTO/16 units for speed; override with `RELEASE_LTO=fat|thin|false`.
 - **libstdc++ is linked statically, never bundled.** Bundled `lib/libstdc++.so.6` via `DT_RPATH` outranks `LD_LIBRARY_PATH`. webOS 11's `libNDL_media_impl.so.1` needs `GLIBCXX_3.4.32` (missing in SDK copy); webOS 10 needs 3.4.30. Static works on every firmware. No C++ crosses boundary — SDL, NDL, Luna are all C.
 
@@ -183,6 +182,8 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - Apps install to `/media/developer/apps/usr/palm/applications/<appid>/` = `$HOME`.
 - `luna-send` over raw ssh needs `ssh -tt` (real PTY) or output swallowed; `ares-install`/`ares-launch` work.
 - **Black screen despite decode:** launch via real lifecycle (`luna-send .../launch`, SAM jailed uid). NDL punch-through composites for SAM foreground app only.
+- ⚠ **A firmware update can strand the app's bus role.** The role is written at install. webOS 11.2's player registers `com.webos.media.smp.*`, which the newer `NDK.json` template grants and an older role lacks. Its config calls then fail, the load fails, and NDL's cleanup hangs in `~StarfishMediaAPIs`: `NDL_DirectMediaLoad` never returns. A reinstall rewrites the role; a tar-over deploy does not. `ndl::ensure_media_role` probes the name before each connect.
+- NDL's own log (`[dmplayer.cpp::Load] ...`) never reaches a file from the jail. To read it, define `_PmLogMsgKV` and `PmLogString_` in the binary and export them (`-Wl,--export-dynamic-symbol=`): NDL and the player bind to the executable's copies first.
 - No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
 - SDL/Wayland may report `refresh_rate=0`; clamp to default. (SDL3 reports it as a float plus an exact numerator/denominator pair, so 59.94 is no longer rounded to 60.)
 

@@ -124,8 +124,8 @@ pub struct ConnectParams {
     pub present_priority: pf_client_core::trust::PresentPriority,
     /// The panel volume advertised to the host and used until host metadata arrives.
     pub display_hdr: quic::HdrMeta,
-    /// Delivery profile to ask the host for (`1` capped, `2` smooth); `None` asks nothing.
-    pub delivery: Option<u8>,
+    /// The host profile to play as; `None` lets the host choose.
+    pub profile: Option<String>,
 }
 
 /// One `quic::CODEC_*` bit, or 0 where the preference names no single codec.
@@ -243,7 +243,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         launch: params.launch.clone(),
         pin: params.pin,
         identity: Some(params.identity.clone()),
-        delivery: params.delivery.map(|profile| quic::DeliveryAsk { profile, flags: 0 }),
+        profile: params.profile.clone(),
         // Uncancelable: the connect has its own thread and the caller joins it.
         ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, params.mode, params.timeout)
     })
@@ -280,8 +280,9 @@ fn log_handshake(client: &NativeClient, negotiated: &Negotiated) {
 /// display geometry is needed here.
 pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Connected> {
     // Fails before touching the network: a full handshake would only end in `NdlVideo::load()`
-    // rejecting the same gate, pointlessly holding the host's pending-session slot for `timeout`.
+    // rejecting the same gate, or hanging in it, while the host holds a session for us.
     crate::platform::webos::ndl::ensure_not_poisoned()?;
+    crate::platform::webos::ndl::ensure_media_role()?;
     let negotiated = Negotiated::clamp(params);
     let client = Arc::new(dial(params, &negotiated)?);
     log_handshake(&client, &negotiated);
