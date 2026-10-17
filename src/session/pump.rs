@@ -3,7 +3,7 @@
 //! delivery MEANS is the stages' business.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -74,6 +74,8 @@ struct VideoPump {
     /// True when real audio rides the NDL plane; false when the plane is left on its prime, or there
     /// is none.
     audio_rides_plane: bool,
+    /// The pipeline's frame between loads — see `MediaPipeline::reformat`.
+    reformat: Arc<Mutex<Option<punktfunk_core::session::Frame>>>,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
     /// Frame-index gaps pre-cover the reassembler's delayed drop accounting.
@@ -94,6 +96,7 @@ impl VideoPump {
         stats: Arc<StreamStats>,
         is_hdr: bool,
         audio_rides_plane: bool,
+        reformat: Arc<Mutex<Option<punktfunk_core::session::Frame>>>,
     ) -> Self {
         let last_dropped_seen = client.frames_dropped();
         // `StreamStats` derives `Default`, and 0 is a legitimate slack reading — so the sentinel
@@ -108,6 +111,7 @@ impl VideoPump {
             hud,
             is_hdr,
             audio_rides_plane,
+            reformat,
             last_dropped_seen,
             drop_credit: 0,
             drop_credit_expiry: None,
@@ -122,8 +126,18 @@ impl VideoPump {
     }
 
     fn run(&mut self, stop: &AtomicBool) {
+        let first = self.reformat.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(frame) = first {
+            self.on_frame(&frame);
+        }
         while !stop.load(Ordering::Relaxed) {
             match self.client.next_frame(FRAME_WAIT) {
+                // This load decodes one format; the stream loop reloads NDL for the next one.
+                Ok(frame) if frame.new_format.is_some() => {
+                    tracing::info!("video pump ending: the host changed the stream format");
+                    *self.reformat.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
+                    break;
+                }
                 Ok(frame) => self.on_frame(&frame),
                 // The SAME heartbeat as the frame path, not a second consumer of the tick: this
                 // arm used to swallow the fire and print only the idle line, so an idle stretch
@@ -180,9 +194,8 @@ impl VideoPump {
                     tracing::warn!("request_keyframe: {e:#}");
                 }
             }
-            // Nothing above this loop can revive the decoder — the load is gone and the plane
-            // threads have exited with it — so the session ends and the runtime returns to the
-            // menu, where the next launch builds a fresh pipeline.
+            // Nothing in this loop can revive the decoder: the load is gone. The stream loop asks
+            // the host for another codec and reloads NDL for it, or ends the session.
             SinkResult::Dead => {
                 // Once, not per frame: the stream loop needs a poll or two to notice, and the
                 // stage answers `Dead` to every delivery in the meantime.
@@ -415,23 +428,25 @@ impl VideoPump {
             meta.max_cll,
             meta.max_fall,
         );
-        if let Err(e) = self.stage.set_color_info(Some(&meta), self.client.color) {
+        if let Err(e) = self.stage.set_color_info(Some(&meta), self.client.video_format().color) {
             tracing::warn!("NDL set_color_info: {e:#}");
         }
     }
 }
 
-/// The video thread's body: pump until `stop`. Owns all `Arc`s, keeping client and stats alive.
+/// The video thread's body: feed the frame `reformat` holds, then pump until `stop` or a frame
+/// in a new format. Owns all `Arc`s, keeping client and stats alive.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn video_pump(
     client: Arc<NativeClient>,
     stage: VideoStage,
+    reformat: Arc<Mutex<Option<punktfunk_core::session::Frame>>>,
     stop: Arc<AtomicBool>,
     stats: Arc<StreamStats>,
     is_hdr: bool,
     audio_rides_plane: bool,
 ) {
-    VideoPump::new(client, stage, stats, is_hdr, audio_rides_plane).run(&stop);
+    VideoPump::new(client, stage, stats, is_hdr, audio_rides_plane, reformat).run(&stop);
 }
 
 /// How long an audio drain parks on an empty plane before re-checking `stop`.

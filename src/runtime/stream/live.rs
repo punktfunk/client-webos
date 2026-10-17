@@ -619,10 +619,10 @@ impl Stream {
     /// The session is over without anyone here asking: the decoder died, or the host or the
     /// link ended it.
     fn ended(&mut self, cx: &Cx<'_>) -> ControlFlow<StreamOutcome> {
-        // The decoder is gone for this load (`core::media::VideoSink::is_dead`, set by the
-        // pump). The transport is still healthy, so nothing below would ever end the session
-        // and the user would sit in front of a frozen picture — end it here instead.
-        if cx.connected.stats().decoder_dead.load(Ordering::Relaxed) {
+        // The decoder is gone and the host has no other codec for it. The transport is still
+        // healthy, so nothing below would ever end the session and the user would sit in front
+        // of a frozen picture — end it here instead.
+        if !cx.connected.tend_media() {
             tracing::error!("decoder failed for good — returning to the menu");
             self.notice = Some("Video decoder failed — session ended".to_string());
             return ControlFlow::Break(StreamOutcome::ReturnToMenu);

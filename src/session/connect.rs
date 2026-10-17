@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use punktfunk_core::client::NativeClient;
@@ -14,8 +14,11 @@ use punktfunk_core::quic;
 use crate::core::caps::video_caps;
 use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::services::store::{CodecPref, GamepadType};
-use crate::session::pipeline::MediaPipeline;
+use crate::session::pipeline::{MediaParams, MediaPipeline};
 use crate::session::StreamStats;
+
+/// How long a codec ask waits for the first frame in the host's next codec.
+const CODEC_ASK_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 pub struct ConnectAttempt(std::sync::Mutex<AttemptState>);
@@ -49,12 +52,23 @@ pub struct Connected {
     pub(crate) input_state: Arc<std::sync::Mutex<crate::core::input::HeldInputs>>,
     /// Live pump counters for stats overlay; see `StreamStats`.
     pub stats: Arc<StreamStats>,
-    /// The decode pipeline and the threads that drive it. Kept alive so `shutdown()` can join
-    /// them, and so the QUIC close frame goes out before exit.
-    pipeline: MediaPipeline,
+    /// The decode pipeline, reloaded on each format the host moves the stream to.
+    media: Mutex<Media>,
     /// Where this session's audio actually ended up — the preference, resolved against what the
     /// load produced.
     pub audio_route: crate::services::store::AudioRoutePref,
+}
+
+/// The session's decode pipeline and what its next load needs.
+struct Media {
+    /// Kept so `shutdown()` can join its threads, and so the QUIC close frame goes out before
+    /// exit. `None` once a reload failed.
+    pipeline: Option<MediaPipeline>,
+    params: MediaParams,
+    /// When this session asked the host for another codec, until a load for it is up.
+    asked: Option<Instant>,
+    /// `CODEC_*` bits NDL failed on, so an ask never sends the host back to one.
+    excluded: u8,
 }
 
 impl Connected {
@@ -66,7 +80,8 @@ impl Connected {
     /// are the threads that touch NDL.
     pub fn shutdown(self) -> bool {
         self.stop.store(true, Ordering::Relaxed);
-        let mut clean = self.pipeline.join();
+        let media = self.media.into_inner().unwrap_or_else(PoisonError::into_inner);
+        let mut clean = media.pipeline.is_none_or(MediaPipeline::join);
         // `NativeClient::drop` joins its own QUIC-close worker thread internally — bound
         // that the same way, on its own thread, rather than blocking here directly. Doesn't
         // touch NDL, so a wedge here doesn't refuse it, only skips `ndl::quit()` this run.
@@ -78,6 +93,51 @@ impl Connected {
             || (),
         );
         clean
+    }
+
+    /// Keeps NDL decoding across the host's format changes; the stream loop calls it every tick.
+    /// Reloads on a frame in a new format, and asks the host for another codec when the decoder
+    /// dies. `false` once the decoder is gone with nothing left to ask for.
+    pub fn tend_media(&self) -> bool {
+        let mut media = self.media.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(reformat) = media.pipeline.as_ref().map(MediaPipeline::take_reformat) else {
+            return false;
+        };
+        if let Some(first) = reformat {
+            tracing::info!(format = ?first.new_format, "the host changed the stream format — reloading NDL");
+            let old = media.pipeline.take().expect("the pipeline was just read");
+            match old.rebuild(first, &media.params, &self.client, &self.stats) {
+                Ok((pipeline, route)) => {
+                    // ponytail: a plane that stops proving itself leaves offload audio silent
+                    // until the next connect; the SDL route is picked once, at the stream start.
+                    if route != self.audio_route {
+                        tracing::warn!(?route, "NDL reload: the audio plane did not come back");
+                    }
+                    media.pipeline = Some(pipeline);
+                    media.asked = None;
+                    self.stats.decoder_dead.store(false, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    tracing::error!("NDL reload: {e:#}");
+                    return false;
+                }
+            }
+        }
+        if !self.stats.decoder_dead.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Some(asked) = media.asked {
+            return self.client.codec_refused() == 0 && asked.elapsed() < CODEC_ASK_WAIT;
+        }
+        let codec = self.client.video_format().codec;
+        media.excluded |= codec;
+        if let Err(e) = self.client.request_codec_change(media.excluded) {
+            tracing::debug!("no codec ask: {e:#}");
+            return false;
+        }
+        tracing::warn!("NDL failed on codec 0x{codec:02x} — asking the host for another");
+        media.asked = Some(Instant::now());
+        true
     }
 
     /// [`Self::shutdown`], then the NDL unload unless a thread is wedged inside it.
@@ -241,6 +301,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
             0
         },
         // NDL takes complete AUs, so `frame_parts` stays off.
+        // The stream loop reloads NDL on a frame in a new format (`Connected::tend_media`).
+        rebuilds_decoder: true,
         launch: params.launch.clone(),
         pin: params.pin,
         identity: Some(params.identity.clone()),
@@ -298,7 +360,7 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
         if negotiated.audio_channels > 2 {
             crate::platform::webos::ndl::log_audio_output();
         }
-        MediaPipeline::build(params, &client, &stop, &stats)
+        MediaPipeline::build(&MediaParams::of(params), &client, &stats, None)
     });
     let (pipeline, route) = match media {
         Ok(built) => built,
@@ -316,7 +378,16 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
         stop,
         input_state: Arc::default(),
         stats,
-        pipeline,
+        // A reload asks for the route this load settled on: see `MediaPipeline::rebuild`.
+        media: Mutex::new(Media {
+            pipeline: Some(pipeline),
+            params: MediaParams {
+                audio_route: route,
+                ..MediaParams::of(params)
+            },
+            asked: None,
+            excluded: 0,
+        }),
         audio_route: route,
     })
 }

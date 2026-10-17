@@ -283,7 +283,7 @@ Byte-exact with `mariotaku/ss4s` `ndl/webos5`: `sample_rate` in kHz (`48.0` not 
 
 Plane **asked for, kept confirmed or not.** `AUDIO_PRIME_BUDGET` (500ms) buys fast CX confirmation only; unconfirmed load taken, prime keeps feeding until the callback (ingest-gated sets eventually send it). `run_clock_plane` **not gated on `LOADCOMPLETED`** — prime's continuation; gating leaves unfed from prime-end to first frame. QNED seconds, covers ~100ms ingest NDL standing cushion.
 
-⚠ **No mid-session verdict, no in-session re-load.** One written for #188 reverted: couldn't be right (plane question resolution-independent, NDL `VideoInfo` no framerate; #188 4K120-HDR-only on set where 4K60/1440p120 fine). Re-apply HDR to new pipeline = mode-drop (fallback could break it). Rejected configs fail at load+fallback there — only fallback exists.
+⚠ **No mid-session verdict, no in-session re-load.** One written for #188 reverted: couldn't be right (plane question resolution-independent, NDL `VideoInfo` no framerate; #188 4K120-HDR-only on set where 4K60/1440p120 fine). Re-apply HDR to new pipeline = mode-drop (fallback could break it). Rejected configs fail at load+fallback there — only fallback exists. The one in-session reload is a host format change (`Connected::tend_media`): the reconnect's unload, `settle_before_retry` and load, no verdict.
 
 **Log line survives:** `v2::PLANE_CONFIRM_GRACE` (750ms past first frame) names unconfirmed plane. Window where two readings separate — before frame, "no callback" = healthy ingest-gated *or* rejected Opus config, accepts all frames to decoder that never runs. Nothing recovered deliberately: unmeasured set, guess costs #188. WARN in report = set to build fallback for.
 
