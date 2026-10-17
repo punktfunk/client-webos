@@ -123,6 +123,10 @@ pub struct NdlVideo {
     /// on CX, drops 1440p120 out of high-rate, blacks the stream. (Latent until metadata
     /// deferred; repeats used to hit non-ingesting pipeline.)
     applied_hdr: Mutex<Option<ffi::HdrInfo>>,
+    /// Loaded as `NDL_VIDEO_TYPE_AV1`: [`Self::play`] restamps every frame (see [`Self::av1_pts_ms`]).
+    av1: bool,
+    /// Last AV1 stamp fed, ms since load.
+    last_av1_pts_ms: AtomicI64,
 }
 
 impl NdlVideo {
@@ -132,10 +136,14 @@ impl NdlVideo {
     }
     /// Feed one access unit at `pts_ns` (ns since load, truncated to ms for NDL).
     /// Pass mapped base (`session::timeline::Pacing`), not raw `elapsed_ns()`,
-    /// to sync video and offloaded audio.
+    /// to sync video and offloaded audio. An AV1 load ignores it for [`Self::av1_pts_ms`].
     pub fn play(&self, au: &[u8], pts_ns: u64) -> Result<()> {
         self.ensure_loaded()?;
-        let pts_ms = (pts_ns / 1_000_000) as i64;
+        let pts_ms = if self.av1 {
+            self.av1_pts_ms()
+        } else {
+            (pts_ns / 1_000_000) as i64
+        };
         let first_frame = {
             let _ffi = lock_ffi();
             let fed = self.fns.video_play(au, pts_ms);
@@ -159,6 +167,16 @@ impl NdlVideo {
         }
         Ok(())
     }
+    /// HEVC presents on arrival whatever the stamp; AV1 waits for it, so a mapped stamp ahead of
+    /// the clock holds the frame for a later vsync. Now, one ms past the last, presents on arrival.
+    /// Called on the feeding thread only.
+    fn av1_pts_ms(&self) -> i64 {
+        let now_ms = (self.elapsed_ns() / 1_000_000) as i64;
+        let pts_ms = now_ms.max(self.last_av1_pts_ms.load(Ordering::Relaxed) + 1);
+        self.last_av1_pts_ms.store(pts_ms, Ordering::Relaxed);
+        pts_ms
+    }
+
     /// Buffered frames in NDL (None if query fails). Rising = decoder lagging;
     /// flat near-zero with stutter = upstream problem.
     pub fn render_buffer_length(&self) -> Option<i32> {

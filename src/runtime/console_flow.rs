@@ -58,9 +58,11 @@ pub(super) fn run(
         tv: true,
         // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
         fallback_ui: false,
-        // NDL decodes H.264 and HEVC only; the Hello never offers PyroWave or AV1.
+        // NDL has no PyroWave; AV1 only where the Hello offers it (`VideoCaps::codec_prefs`).
         pyrowave_ok: false,
-        av1_ok: false,
+        av1_ok: crate::core::caps::video_caps()
+            .codec_prefs()
+            .contains(&crate::core::model::CodecPref::Av1),
         store: Some(store.clone()),
         platform: Platform::WebOS,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,

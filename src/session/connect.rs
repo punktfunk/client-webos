@@ -134,6 +134,7 @@ fn codec_bit(pref: CodecPref) -> u8 {
         CodecPref::Auto => 0,
         CodecPref::H264 => quic::CODEC_H264,
         CodecPref::Hevc => quic::CODEC_HEVC,
+        CodecPref::Av1 => quic::CODEC_AV1,
     }
 }
 
@@ -181,14 +182,14 @@ impl Negotiated {
         } else {
             codecs[0]
         };
-        // HDR only ever applies to HEVC. An explicit H.264 pick disables it end to end
-        // (the shell hides the toggle too); on Automatic the
-        // caps are still advertised and the host resolves the codec, with application gated
-        // on the *negotiated* codec being HEVC in `load_player`.
-        let hdr = params.hdr_enabled && caps.hdr && codec_pref != CodecPref::H264;
+        // HDR only ever applies to HEVC. An explicit H.264 or AV1 pick streams 8-bit SDR; on
+        // Automatic the caps are still advertised and the host resolves the codec, with
+        // application gated on the *negotiated* codec being HEVC in `load_player`.
+        let hevc_able = matches!(codec_pref, CodecPref::Auto | CodecPref::Hevc);
+        let hdr = params.hdr_enabled && caps.hdr && hevc_able;
         // Same codec rule as HDR. NDL decodes Main10 from the SPS, and HDR metadata keys on the
         // host's colour, not the depth, so an SDR Main10 stream never flips the panel.
-        let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && codec_pref != CodecPref::H264;
+        let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && hevc_able;
         Self {
             audio_channels,
             // VIDEO_CAP_CHACHA20: unconditional — armv7 has no hardware AES, so ChaCha20 is
@@ -318,4 +319,20 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
         pipeline,
         audio_route: route,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::caps::VideoCaps;
+
+    #[test]
+    fn av1_is_offered_only_beside_hevc() {
+        let set = |caps: VideoCaps| caps.codec_prefs().iter().fold(0, |s, &p| s | codec_bit(p));
+        assert_eq!(
+            set(VideoCaps::FULL),
+            quic::CODEC_H264 | quic::CODEC_HEVC | quic::CODEC_AV1
+        );
+        assert_eq!(set(VideoCaps::H264_SDR), quic::CODEC_H264);
+    }
 }

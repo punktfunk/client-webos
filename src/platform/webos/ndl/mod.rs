@@ -50,6 +50,7 @@ pub use v2::{NdlVideo, OPUS_51_LAYOUT};
 pub enum NdlCodec {
     H264,
     H265,
+    Av1,
 }
 
 impl NdlCodec {
@@ -57,6 +58,7 @@ impl NdlCodec {
         match self {
             Self::H264 => 1,
             Self::H265 => 2,
+            Self::Av1 => 4,
         }
     }
 
@@ -64,6 +66,7 @@ impl NdlCodec {
         match codec {
             punktfunk_core::quic::CODEC_H264 => Some(Self::H264),
             punktfunk_core::quic::CODEC_HEVC => Some(Self::H265),
+            punktfunk_core::quic::CODEC_AV1 => Some(Self::Av1),
             _ => None,
         }
     }
