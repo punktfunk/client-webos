@@ -32,6 +32,7 @@ fn shared_codec(c: CodecPref) -> &'static str {
         CodecPref::Auto => "auto",
         CodecPref::H264 => "h264",
         CodecPref::Hevc => "hevc",
+        CodecPref::Av1 => "av1",
     }
 }
 
@@ -39,7 +40,8 @@ fn local_codec(name: &str) -> CodecPref {
     match name {
         "h264" => CodecPref::H264,
         "hevc" => CodecPref::Hevc,
-        // "av1" too: this client cannot decode it, so it reads as the host's choice.
+        "av1" => CodecPref::Av1,
+        // "pyrowave" too: this client cannot decode it, so it reads as the host's choice.
         _ => CodecPref::Auto,
     }
 }

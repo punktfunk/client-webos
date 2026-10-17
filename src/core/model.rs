@@ -175,7 +175,7 @@ pub fn seed_new_host_profiles(host: &mut KnownHost, profiles: &mut Vec<StreamPre
 
 /// Codec preference selectable in Settings — a *preference*, not a demand. The host
 /// resolves the session codec from the client's advertised set via its own precedence
-/// ladder (HEVC > H.264), honouring the preference only when its encoder can
+/// ladder (HEVC > AV1 > H.264), honouring the preference only when its encoder can
 /// actually produce it — so "H264" on a host that can't encode H.264 still gets HEVC
 /// rather than no session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -186,6 +186,8 @@ pub enum CodecPref {
     Auto,
     H264,
     Hevc,
+    /// Only ever the explicit pick: the ladder ranks HEVC first.
+    Av1,
 }
 
 /// Where a session's audio is decoded and played — the two routes this client can build,

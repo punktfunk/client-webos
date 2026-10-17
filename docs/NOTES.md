@@ -375,7 +375,9 @@ Burst 320 Mbps / 3s (not 3 Gbps / 5s) — 3-core A9 UI starves on unbounded. 320
 
 ## Video backend: NDL
 
-NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` mutex (not thread-safe per header). AV1 disabled.
+NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` mutex (not thread-safe per header).
+
+AV1 is v2 type 4, as in moonlight-tv and aurora-tv. HEVC presents on arrival; AV1 waits for its PTS, so `NdlVideo::av1_pts_ms` stamps "now". Fed 120 fps, AV1 is reported shown at 60 (aurora-tv on a C5, moonlight-tv #529 on a G4); unmeasured here. LG's browser has a Starfish-only 120 fps AV1 game mode (`enableGameLimitedAV1Fps120`, `externalVideoEncodingInfo`), so the limit looks like NDL's, not the decoder's. SDR only. Plain `strings` hides the impl's 3-letter `VP9`/`AV1`; use `strings -n 3`.
 
 Backpressure: pump samples `render_buffer_length` every 500ms; two ≥8-frame samples freeze+keyframe request (loss path, no flush — kills audio). Measured 0-1, fires decoder stall only.
 

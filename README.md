@@ -41,8 +41,9 @@ This repo is only the webOS-specific client: a host for punktfunk's shared contr
 
 ## Features
 
-- **Video** — up to 4K120 with HDR. H.264 or HEVC, decoded by the TV's hardware media pipeline
-  (NDL DirectMedia). No AV1: the pipeline never presented one.
+- **Video** — up to 4K120 with HDR. H.264, HEVC or AV1, decoded by the TV's hardware media
+  pipeline (NDL DirectMedia). AV1 is SDR only. Other webOS clients report AV1 at 120 fps
+  looking no smoother than 60, so HEVC is the pick for 120.
 - **Bitrate** — Automatic mode adjusts to the network, or set a fixed rate from 10 to 200 Mbps.
   A per-host network speed test measures over the real data plane and applies a recommended rate.
 - **HDR calibration** — press the remote's **Blue** button in the menu to measure the panel's black,

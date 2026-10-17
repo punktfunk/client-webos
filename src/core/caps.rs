@@ -51,10 +51,10 @@ impl VideoCaps {
     /// The codec preferences worth offering here, in display order — the one place the codec set
     /// is spelled, so the persisted-document clamp and the advertised wire set can't disagree.
     /// Without HEVC only one codec is decodable, so `Automatic` would resolve to it anyway and
-    /// the list collapses to a single entry.
+    /// the list collapses to a single entry. AV1 rides with HEVC: both are NDL v2 types.
     pub fn codec_prefs(self) -> &'static [CodecPref] {
         if self.h265 {
-            &[CodecPref::Auto, CodecPref::H264, CodecPref::Hevc]
+            &[CodecPref::Auto, CodecPref::H264, CodecPref::Hevc, CodecPref::Av1]
         } else {
             &[CodecPref::H264]
         }
