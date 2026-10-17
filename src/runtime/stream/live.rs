@@ -317,7 +317,7 @@ impl Stream {
         self.tick_ring(cx)?;
         self.tick_dialog_shortcuts(cx);
         self.tick_remote_actions(cx, osk);
-        self.sync_capture(cx);
+        self.sync_capture(cx, events);
         let dialog_shown = self.tick_dialog(cx)?;
         // Audio drains on its own threads either way now — the software path on
         // `session::pump`'s feed thread into SDL's audio callback, the offloaded path on
@@ -546,15 +546,20 @@ impl Stream {
 
     /// Pointer capture and the HID grab follow the dialog, the dial and focus. Who draws the
     /// pointer follows the HID mouse.
-    fn sync_capture(&mut self, cx: &Cx<'_>) {
+    fn sync_capture(&mut self, cx: &Cx<'_>, events: &sdl3::EventPump) {
         // The dialog is navigated with the Magic Remote's pointer, so a captured stream
         // must hand the pointer back while it's up — hidden/relative there'd be nothing
         // to aim with. Recaptured on dismiss. The evdev reader releases its grabs for the
         // same window in either Capture mode — the dialog needs the remote's keys as much
         // as its pointer, and holding a grab would only leave a HID device dead meanwhile.
-        let want_captured = cx.settings.cursor_capture() && !self.disconnect.is_open();
+        //
+        // Unfocused too: the compositor's cursor is TV-global and SDL's relative mode warps
+        // every motion, so a stream that kept them under the launcher left Home with no
+        // pointer and a warp per remote move. The hand-back needs the repaint nudge.
+        let want_captured = cx.settings.cursor_capture() && !self.disconnect.is_open() && self.focused;
         if want_captured != self.cursor.is_captured() {
             self.cursor.set_captured(want_captured, cx.window);
+            self.cursor.flush(cx.window, events);
         }
         if let Some(hid) = &self.hid {
             // Deactivating releases whatever HID held on the host.
