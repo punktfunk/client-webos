@@ -56,10 +56,12 @@ fn reject_message(reason: RejectReason) -> String {
     }
 }
 
-/// Why connect/probe failed (distinguishes rejection from transport trouble).
+/// Why connect/probe failed (distinguishes rejection from transport trouble). A host's own
+/// sentence knows more than its reason code, so it wins; it is empty when the host had none.
 fn connect_message(err: &PunktfunkError) -> String {
     match err {
-        PunktfunkError::Rejected(reason) => reject_message(*reason),
+        PunktfunkError::Rejected(_, said) if !said.trim().is_empty() => said.clone(),
+        PunktfunkError::Rejected(reason, _) => reject_message(*reason),
         PunktfunkError::Timeout => "The host didn't answer. Is it running and reachable?".into(),
         PunktfunkError::Io(e) => {
             format!("Couldn't reach the host ({e}) — TV and the host must be on the same network.")
@@ -91,4 +93,17 @@ pub fn access_message(err: &PunktfunkError) -> String {
 pub fn friendly(err: &anyhow::Error) -> String {
     err.downcast_ref::<PunktfunkError>()
         .map_or_else(|| format!("{err:#}"), connect_message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hosts_own_sentence_wins_over_the_reason_line() {
+        let said = PunktfunkError::Rejected(RejectReason::NoSeat, "Seat 2 is in use.".into());
+        assert_eq!(connect_message(&said), "Seat 2 is in use.");
+        let silent = PunktfunkError::Rejected(RejectReason::NoSeat, " ".into());
+        assert_eq!(connect_message(&silent), "All seats are taken.");
+    }
 }
