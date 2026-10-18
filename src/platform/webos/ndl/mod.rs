@@ -288,15 +288,16 @@ fn lock_ffi() -> MutexGuard<'static, ()> {
     FFI_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn unload_count() -> u64 {
+pub(crate) fn unload_count() -> u64 {
     UNLOAD_COMPLETED.count()
 }
 
-/// Lets the rejected audio-enabled load's callbacks land before the video-only retry is armed:
-/// waits for its `UNLOADCOMPLETED`, then a fixed settle for anything still in flight behind it.
-/// `unloads_before` is [`unload_count`] from before the rejected load was attempted: the caller's
-/// own teardown may have unloaded already, and a spent callback must not be waited out.
-fn settle_before_retry(unloads_before: u64) {
+/// Lets an unloaded load's callbacks land before the next load is armed: the video-only retry
+/// after a rejected audio-enabled load, or a reload for a new stream format. Waits for its
+/// `UNLOADCOMPLETED`, then a fixed settle for anything still in flight behind it.
+/// `unloads_before` is [`unload_count`] from before that load: the caller's own teardown may
+/// have unloaded already, and a spent callback must not be waited out.
+pub(crate) fn settle_before_retry(unloads_before: u64) {
     poll_until(CALLBACK_SETTLE, || UNLOAD_COMPLETED.count() != unloads_before);
     std::thread::sleep(CALLBACK_SETTLE);
 }

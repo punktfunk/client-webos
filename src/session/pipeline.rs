@@ -5,10 +5,11 @@
 //! and hands the result over; the pumps and stages above are written against `core::media`'s
 //! traits and never learn which decoder or which audio route they got.
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 use punktfunk_core::client::NativeClient;
+use punktfunk_core::session::Frame;
 
 use crate::core::media::{AudioPlane, AudioSink, VideoSink};
 use crate::platform::webos::device::{self, NdlGeneration};
@@ -21,8 +22,26 @@ use crate::session::pump::{spawn_audio_feed, video_pump};
 use crate::session::stage::{SinkConfig, VideoStage};
 use crate::session::StreamStats;
 
-/// The threads driving one session's pipeline. Dropping this does NOT stop them — the session's
-/// `stop` flag does, and [`Self::join`] waits them out.
+/// What every load of a session takes from the user's settings.
+#[derive(Clone, Copy)]
+pub(super) struct MediaParams {
+    pub audio_route: AudioRoutePref,
+    pub present_priority: pf_client_core::trust::PresentPriority,
+    pub display_hdr: punktfunk_core::quic::HdrMeta,
+}
+
+impl MediaParams {
+    pub(super) fn of(params: &ConnectParams) -> Self {
+        Self {
+            audio_route: params.audio_route,
+            present_priority: params.present_priority,
+            display_hdr: params.display_hdr,
+        }
+    }
+}
+
+/// The threads driving one load of a session's pipeline. Dropping this does NOT stop them —
+/// [`Self::join`] does, and waits them out.
 pub struct MediaPipeline {
     video_thread: std::thread::JoinHandle<()>,
     /// The audio pump, on the routes that own their sink. `None` on the software route, where the
@@ -31,6 +50,13 @@ pub struct MediaPipeline {
     /// The audio plane's keep-alive, on every V2 load that got a plane. `None` only when the load
     /// has no plane at all (V1, or a rejected audio load).
     clock_thread: Option<std::thread::JoinHandle<()>>,
+    /// This load's own stop, so a reload ends these threads and not the session.
+    stop: Arc<AtomicBool>,
+    /// The frame between two loads: the one the video pump starts on, then the one it ended on
+    /// because it opens a format this load does not decode.
+    reformat: Arc<Mutex<Option<Frame>>>,
+    /// NDL's unload count once this load was up, so a reload waits for this load's own unload.
+    unloads_at_load: u64,
 }
 
 impl MediaPipeline {
@@ -40,14 +66,17 @@ impl MediaPipeline {
     /// returns, because a detached thread still feeding NDL would outlive the error the caller
     /// sees and race the `ndl::quit()` that follows it.
     ///
-    /// Returns the pipeline and the route it settled on.
-    pub fn build(
-        params: &ConnectParams,
+    /// Returns the pipeline and the route it settled on. `first` is the frame the video pump
+    /// feeds before it pulls any.
+    pub(super) fn build(
+        params: &MediaParams,
         client: &Arc<NativeClient>,
-        stop: &Arc<AtomicBool>,
         stats: &Arc<StreamStats>,
+        first: Option<Frame>,
     ) -> Result<(Self, AudioRoutePref)> {
+        let stop = &Arc::new(AtomicBool::new(false));
         let (player, is_hdr) = load_player(client, params)?;
+        let unloads_at_load = crate::platform::webos::ndl::unload_count();
         // The prime rides any plane; the real stream only a proven one. Route is locked once running.
         let plane = player.audio_plane();
         let proven = plane.as_ref().is_some_and(|p| p.accepts_stream());
@@ -67,7 +96,17 @@ impl MediaPipeline {
             player.name(),
             client.audio_channels,
         );
-        let video_thread = spawn_video_thread(client, player, stop, stats, is_hdr, params.present_priority, route)?;
+        let reformat = Arc::new(Mutex::new(first));
+        let video_thread = spawn_video_thread(
+            client,
+            player,
+            &reformat,
+            stop,
+            stats,
+            is_hdr,
+            params.present_priority,
+            route,
+        )?;
         // Failing here after the video thread is already up would otherwise detach it.
         let (audio_thread, clock_thread) = match spawn_plane_threads(client, plane, stop, route) {
             Ok(handles) => handles,
@@ -82,15 +121,42 @@ impl MediaPipeline {
                 video_thread,
                 audio_thread,
                 clock_thread,
+                stop: stop.clone(),
+                reformat,
+                unloads_at_load,
             },
             route,
         ))
+    }
+
+    /// The frame that opens the host's new format, once the video pump has ended on it.
+    pub fn take_reformat(&self) -> Option<Frame> {
+        if !self.video_thread.is_finished() {
+            return None;
+        }
+        self.reformat.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
+    /// A load decodes one format: this one unloads and settles, and a load for the format
+    /// `first` opens takes over from that frame. The session, and the SDL audio, stay up.
+    pub(super) fn rebuild(
+        self,
+        first: Frame,
+        params: &MediaParams,
+        client: &Arc<NativeClient>,
+        stats: &Arc<StreamStats>,
+    ) -> Result<(Self, AudioRoutePref)> {
+        let unloads = self.unloads_at_load;
+        anyhow::ensure!(self.join(), "a decode thread outlived its join");
+        crate::platform::webos::ndl::settle_before_retry(unloads);
+        Self::build(params, client, stats, Some(first))
     }
 
     /// Wait the threads out, bounded. `false` means one is still running — it may still be inside
     /// an NDL call, so the caller must skip `ndl::quit()`, and these three are the threads that
     /// touch NDL, so a wedge also refuses new loads until it finishes.
     pub fn join(self) -> bool {
+        self.stop.store(true, Ordering::Relaxed);
         let mut clean = join_thread(self.video_thread, "video");
         if let Some(audio) = self.audio_thread {
             clean &= join_thread(audio, "audio");
@@ -125,16 +191,17 @@ fn plane_budget(pref: AudioRoutePref) -> std::time::Duration {
     }
 }
 
-/// Opens the decoder for the negotiated stream and hands it the colorimetry.
+/// Opens the decoder for the stream's live format and hands it the colorimetry.
 ///
 /// Returns the player and whether HDR mastering metadata is being applied — the answer the
 /// video pump needs to know whether to forward per-content metadata at all.
-fn load_player(client: &NativeClient, params: &ConnectParams) -> Result<(Box<dyn VideoSink>, bool)> {
+fn load_player(client: &NativeClient, params: &MediaParams) -> Result<(Box<dyn VideoSink>, bool)> {
     let panel = params.display_hdr;
     let resolved_mode = client.mode();
     let fps = resolved_mode.refresh_hz.max(1);
+    let format = client.video_format();
     let codec =
-        NdlCodec::from_wire(client.codec).with_context(|| format!("unsupported codec 0x{:02x}", client.codec))?;
+        NdlCodec::from_wire(format.codec).with_context(|| format!("unsupported codec 0x{:02x}", format.codec))?;
     let app_id = crate::platform::webos::ndl::app_id();
     let (width, height) = (resolved_mode.width as i32, resolved_mode.height as i32);
     let player: Box<dyn VideoSink> = match device::ndl_generation() {
@@ -167,18 +234,18 @@ fn load_player(client: &NativeClient, params: &ConnectParams) -> Result<(Box<dyn
     // HDR mastering metadata is applied only when the *negotiated* codec is HEVC: the
     // `NdlHdrInfo`/`setHdrInfo` fields are HEVC SEI syntax, and no other codec carries
     // HDR on this platform.
-    let host_hdr = client.color.is_hdr();
+    let host_hdr = format.color.is_hdr();
     let is_hdr = host_hdr && matches!(codec, NdlCodec::H265);
     // What the host signalled in `Welcome`, before the SDR colorimetry fix below acts on it.
     tracing::info!(
         "host colour info: hdr={host_hdr} apply_hdr={is_hdr} codec={codec:?} transfer={} primaries={} matrix={}",
-        client.color.transfer,
-        client.color.primaries,
-        client.color.matrix,
+        format.color.transfer,
+        format.color.primaries,
+        format.color.matrix,
     );
     // Colorimetry with mastering only on HDR streams: `NDL_DirectVideoSetHDRInfo` emits infoframes
     // on any call, and forcing HDR for SDR caused black 1440p120 on CX.
-    if let Err(e) = player.set_color(is_hdr.then_some(panel).as_ref(), client.color) {
+    if let Err(e) = player.set_color(is_hdr.then_some(panel).as_ref(), format.color) {
         tracing::warn!("NDL colour metadata failed: {e:#}");
     }
     Ok((player, is_hdr))
@@ -202,9 +269,11 @@ fn audio_path_label(pref: AudioRoutePref, route: AudioRoutePref, has_plane: bool
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_video_thread(
     client: &Arc<NativeClient>,
     player: Box<dyn VideoSink>,
+    reformat: &Arc<Mutex<Option<Frame>>>,
     stop: &Arc<AtomicBool>,
     stats: &Arc<StreamStats>,
     is_hdr: bool,
@@ -217,12 +286,12 @@ fn spawn_video_thread(
         present_priority,
     };
     let audio_rides_plane = route.on_ndl_plane();
-    let (client, stop, stats) = (client.clone(), stop.clone(), stats.clone());
+    let (client, reformat, stop, stats) = (client.clone(), reformat.clone(), stop.clone(), stats.clone());
     std::thread::Builder::new()
         .name("punktfunk-webos-video".into())
         .spawn(move || {
             let stage = VideoStage::new(player, stats.clone(), &cfg);
-            video_pump(client, stage, stop, stats, is_hdr, audio_rides_plane);
+            video_pump(client, stage, reformat, stop, stats, is_hdr, audio_rides_plane);
         })
         .context("spawn video thread")
 }
@@ -276,5 +345,18 @@ fn spawn_plane_threads(
             join_thread(clock_thread, "clock");
             Err(e).context("spawn audio pump thread")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reload asks for the route the connect settled on. Software must stay software even on a
+    /// proven plane: the SDL feed already drains the audio, and a second pump would split it.
+    #[test]
+    fn a_reload_keeps_the_software_route() {
+        assert_eq!(resolve_route(AudioRoutePref::Software, true), AudioRoutePref::Software);
+        assert_eq!(resolve_route(AudioRoutePref::NdlOpus, true), AudioRoutePref::NdlOpus);
     }
 }
