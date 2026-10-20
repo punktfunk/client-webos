@@ -56,6 +56,7 @@ pub(super) fn run(
         )),
         system_keyboard: false,
         tv: true,
+        spatial: false,
         // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
         fallback_ui: false,
         // NDL has no PyroWave; AV1 only where the Hello offers it (`VideoCaps::codec_prefs`).
