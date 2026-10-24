@@ -412,8 +412,9 @@ struct Stream {
     /// Remote-key presses, set by the event arm and consumed once a tick. SDL3 gives the colour
     /// keys no scancode; state-array bits latch for the session (see `RemoteKey`).
     green_pressed: bool,
-    yellow_pressed: bool,
     blue_pressed: bool,
+    /// Tapped, the log overlay; held, the dial. Fed every Yellow edge, the open dial's too.
+    yellow: crate::core::dial::TapHold,
     /// Off while webOS has another app or panel up: evdev reads the devices regardless.
     focused: bool,
     /// Whether last tick already released for the open dialog.
@@ -424,7 +425,8 @@ struct Stream {
     // ---- the dial and the stop dialog ---------------------------------------------------------
     /// "Stop streaming?" — 0 = "Disconnect" focused, 1 = "Cancel" (default on open — safer).
     disconnect: ConfirmDialog,
-    /// The quick-action dial: Select+A on the pad, drawn over the video (`core::dial`).
+    /// The quick-action dial: Select+A on the pad or a held Yellow, drawn over the video
+    /// (`core::dial`).
     ring: pf_console_ui::Ring,
     ring_was_open: bool,
     /// When the dial's facts were last pushed; `None` owes a push on the next tick.
