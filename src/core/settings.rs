@@ -70,7 +70,7 @@ pub trait TvSettings {
     /// says where they came from.
     fn set_hdr_display(&mut self, display: HdrDisplay, calibrated: bool);
     /// Normalise to what the active backend can present (`core::caps`), plus the one
-    /// cross-field rule: HDR needs HEVC. Called on load (`store::load`) and on every launch's
+    /// cross-field rule: HDR needs HEVC or AV1. Called on load (`store::load`) and on every launch's
     /// resolved settings (`store::shared::launch_settings`), so a profile override cannot carry
     /// a pick this TV cannot present onto the wire.
     fn clamp_to_caps(&mut self);
@@ -163,9 +163,9 @@ impl TvSettings for Settings {
             tracing::info!("settings: HDR isn't presentable on this video backend — turning it off");
             self.hdr_enabled = false;
         }
-        if self.hdr_enabled && self.codec_pref() == CodecPref::H264 {
+        if self.hdr_enabled && !self.codec_pref().allows_ten_bit() {
             // Mirrors `session::connect`'s own gate: a session pinned to H.264 never resolves HDR.
-            tracing::info!("settings: HDR needs HEVC — an explicit H.264 pick turns it off");
+            tracing::info!("settings: HDR needs HEVC or AV1 — an explicit H.264 pick turns it off");
             self.hdr_enabled = false;
         }
         let route = self.audio_route();

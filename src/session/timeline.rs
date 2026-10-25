@@ -3,15 +3,18 @@
 use pf_client_core::trust::PresentPriority;
 
 /// Correct clock offset and drift without replacing source cadence with arrival cadence.
-/// Smoothness reserves the selected number of stream periods on TOP of core's adaptive
-/// cushion; the default keeps the adaptive cushion alone. Neither mode delays compressed
-/// input in a Rust queue.
+/// Smoothness adds its periods on TOP of core's adaptive cushion and snaps pictures to
+/// [`SlotGrid`]; the default keeps source cadence. Neither queues compressed input in Rust.
 pub struct Pacing {
     clock: punktfunk_core::phase::CadenceClock,
     /// Source period, and the ceiling core clamps its own adaptive cushion to.
     source_interval_ns: i64,
     /// Extra lead Smoothness adds over the adaptive cushion; `0` under the latency intent.
     smooth_cushion_ns: i64,
+    /// Smoothness only.
+    grid: Option<SlotGrid>,
+    /// Latency intent on a decoder that holds to its stamp (AV1): stamp on arrival instead.
+    arrival: bool,
     /// Backward timestamps can make NDL rewind and mute output; keep the floor across recovery.
     last_base_ns: u64,
     /// Repeated source stamps provide no cadence observation and must not train clock drift.
@@ -34,7 +37,7 @@ impl Pacing {
     ///
     /// ⚠ This client reads frame count as EXTRA (core clamps adaptive to 1 period, making
     /// one-frame budget unreachable); the honest fix needs additive semantics in core.
-    pub fn new(source_interval_ns: u64, priority: PresentPriority) -> Self {
+    pub fn new(source_interval_ns: u64, priority: PresentPriority, holds_pts: bool) -> Self {
         let interval = i64::try_from(source_interval_ns).unwrap_or(i64::MAX).max(1);
         // `fifo_capacity` is core's own reading of the enum: 0 means the latency intent, and
         // `PresentPriority::resolve` has already clamped the buffer to 1–3.
@@ -47,6 +50,8 @@ impl Pacing {
             clock: punktfunk_core::phase::CadenceClock::new(punktfunk_core::phase::CadenceTuning::snapping()),
             source_interval_ns: interval,
             smooth_cushion_ns,
+            grid: (frames > 0).then(|| SlotGrid::new(interval, i64::from(frames))),
+            arrival: frames == 0 && holds_pts,
             last_base_ns: 0,
             last_host_pts_ns: None,
             late_stamps: 0,
@@ -67,7 +72,8 @@ impl Pacing {
         let due = if repeated {
             self.clock.note_off_cadence(ready, self.source_interval_ns)
         } else {
-            self.clock.due_ns(host_pts_ns, ready, self.source_interval_ns)
+            let due = self.clock.due_ns(host_pts_ns, ready, self.source_interval_ns);
+            self.on_grid(host_pts_ns, due)
         };
         // Keep the three series aligned: excluded frames can't be counted in one and not others.
         // Without this, src/due/assigned count different frames and their MADs don't compare.
@@ -76,21 +82,32 @@ impl Pacing {
             .note_source(self.last_host_pts_ns, host_pts_ns, self.source_interval_ns);
         self.last_host_pts_ns = Some(host_pts_ns);
         let due = due.saturating_add(self.smooth_cushion_ns);
-        let base = u64::try_from(due).unwrap_or(0).max(self.last_base_ns);
-        // Round up to integer ms; NDL truncates so rounding down wastes cushion.
-        let base = base.div_ceil(1_000_000) * 1_000_000;
+        let base = if self.arrival {
+            // At or behind the clock, 1 ms past the last: presents on arrival.
+            (player_clock_ns / 1_000_000 * 1_000_000).max(self.last_base_ns + 1_000_000)
+        } else {
+            // Round up to integer ms; NDL truncates so rounding down wastes cushion.
+            u64::try_from(due)
+                .unwrap_or(0)
+                .max(self.last_base_ns)
+                .div_ceil(1_000_000)
+                * 1_000_000
+        };
         self.last_base_ns = base;
         self.trace.mapped += 1;
-        if base <= player_clock_ns {
-            self.late_stamps += 1;
-            self.trace.late_stamps += 1;
+        // An arrival stamp is at or behind the clock by design: no lateness to account.
+        if !self.arrival {
+            if base <= player_clock_ns {
+                self.late_stamps += 1;
+                self.trace.late_stamps += 1;
+            }
+            let stamp_slack_us = saturating_us(i64::try_from(base).unwrap_or(i64::MAX) - ready);
+            self.trace.min_stamp_slack_us = Some(
+                self.trace
+                    .min_stamp_slack_us
+                    .map_or(stamp_slack_us, |m| m.min(stamp_slack_us)),
+            );
         }
-        let stamp_slack_us = saturating_us(i64::try_from(base).unwrap_or(i64::MAX) - ready);
-        self.trace.min_stamp_slack_us = Some(
-            self.trace
-                .min_stamp_slack_us
-                .map_or(stamp_slack_us, |m| m.min(stamp_slack_us)),
-        );
         // Store previous values on every frame, excluded or not. Clearing on exclusion broke
         // the next frame's delta — skipped gap then normal frame gave src=100, due=0.
         if usable {
@@ -109,6 +126,16 @@ impl Pacing {
         base
     }
 
+    /// The clock folds the real PTS, so offset/skew/jitter see the true source; only the stamp moves.
+    fn on_grid(&mut self, host_pts_ns: u64, due: i64) -> i64 {
+        let Some(grid) = self.grid.as_mut() else {
+            return due;
+        };
+        let (shift, clamped) = grid.slot(host_pts_ns, self.clock.health().reanchors);
+        self.trace.grid_clamps += u64::from(clamped);
+        due.saturating_add(shift)
+    }
+
     /// Take the window's cadence figures, arming the next one — the take IS the re-arm, exactly
     /// like [`Self::take_min_slack_us`].
     pub fn take_trace(&mut self) -> CadenceTrace {
@@ -125,6 +152,9 @@ impl Pacing {
             let span_us = i64::try_from(player_clock_ns.saturating_sub(mapped_at)).unwrap_or(i64::MAX) / 1_000;
             let span_us = u32::try_from(span_us).unwrap_or(u32::MAX);
             self.trace.max_au_span_us = self.trace.max_au_span_us.max(span_us);
+        }
+        if self.arrival {
+            return;
         }
         if pts_ns / 1_000_000 <= player_clock_ns / 1_000_000 {
             self.trace.late_submissions += 1;
@@ -145,6 +175,7 @@ impl Pacing {
     /// Re-anchor after loss while preserving timestamp monotonicity: recovery does
     /// not flush NDL, so its previous timestamps remain live.
     pub fn reset(&mut self) {
+        // The clock re-anchors on the next frame, which restarts the grid too.
         self.clock.reset();
         self.last_host_pts_ns = None;
         // The timeline jumped, so the first delta after it is not a cadence observation.
@@ -157,7 +188,12 @@ impl Pacing {
         let h = self.clock.health();
         PacingHealth {
             jitter_ns: h.jitter_ns,
-            cushion_ns: h.cushion_ns.saturating_add(self.smooth_cushion_ns),
+            // Arrival stamps hold nothing, whatever the clock sizes.
+            cushion_ns: if self.arrival {
+                0
+            } else {
+                h.cushion_ns.saturating_add(self.smooth_cushion_ns)
+            },
             late_stamps: self.late_stamps,
             reanchors: h.reanchors,
         }
@@ -237,6 +273,8 @@ pub struct CadenceTrace {
     pub gaps: u64,
     /// Pictures mapped in this window, including excluded ones.
     pub mapped: u64,
+    /// Pictures sharing their predecessor's slot: source ran ahead past the Smoothness budget.
+    pub grid_clamps: u64,
     /// Mapped pictures already at or past the player clock.
     pub late_stamps: u64,
     /// Complete AUs timed in this window; separate denominator (timing is gated).
@@ -278,6 +316,56 @@ impl CadenceTrace {
 /// Source interval past which the trace reads a stall instead of a frame time: 10 fps.
 const STALL_GAP_NS: i64 = 100_000_000;
 
+/// Smoothness grid: each picture takes the nominal slot nearest its capture, never its
+/// predecessor's.
+///
+/// Capture jitter (`src` ~5/~12 ms min/max at 120 Hz) lets a 5 ms pair share a refresh and leave
+/// the next empty: drop, then repeat, judder on pans. Real gaps still skip.
+///
+/// Slots count in HOST time so the clock's skew carries them; a PLAYER-time grid walks off the
+/// clock. Shifts at most half a period earlier, inside the budget. Kept here, not in core's
+/// `CadenceClock`, so it restarts by watching the clock's re-anchor count.
+struct SlotGrid {
+    interval_ns: i64,
+    /// Slots past nominal before sharing one; bounds latency when the source runs ahead.
+    max_ahead: i64,
+    anchor_pts_ns: Option<i64>,
+    last_slot: i64,
+    /// The clock's re-anchor count this anchor belongs to.
+    reanchors: u64,
+}
+
+impl SlotGrid {
+    fn new(interval_ns: i64, max_ahead: i64) -> Self {
+        Self {
+            interval_ns,
+            max_ahead,
+            anchor_pts_ns: None,
+            last_slot: 0,
+            reanchors: 0,
+        }
+    }
+
+    /// Shift from capture to slot (ns), and whether it shares the previous slot.
+    fn slot(&mut self, host_pts_ns: u64, reanchors: u64) -> (i64, bool) {
+        let pts = i64::try_from(host_pts_ns).unwrap_or(i64::MAX);
+        let anchor = match self.anchor_pts_ns {
+            Some(anchor) if pts >= anchor && reanchors == self.reanchors => anchor,
+            _ => {
+                self.anchor_pts_ns = Some(pts);
+                self.reanchors = reanchors;
+                self.last_slot = 0;
+                return (0, false);
+            }
+        };
+        let nominal = (pts - anchor + self.interval_ns / 2) / self.interval_ns;
+        let slot = punktfunk_core::phase::pace_slot(nominal, Some(self.last_slot), self.max_ahead);
+        let clamped = slot <= self.last_slot;
+        self.last_slot = self.last_slot.max(slot);
+        (anchor + slot * self.interval_ns - pts, clamped)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct PacingHealth {
     /// Measured clock residual (mean absolute deviation), independent of the chosen cushion.
@@ -316,7 +404,7 @@ mod tests {
     #[test]
     fn every_cadence_series_counts_the_same_intervals() {
         const I: u64 = 16_666_666;
-        let mut p = Pacing::new(I, PresentPriority::Latency);
+        let mut p = Pacing::new(I, PresentPriority::Latency, false);
         let mut pts = 0u64;
         let mut now = 0u64;
         let feed = |p: &mut Pacing, pts: u64, now: u64| {
@@ -366,7 +454,7 @@ mod tests {
     #[test]
     fn a_gap_does_not_suppress_the_next_intervals_mapped_delta() {
         const I: u64 = 8_333_333;
-        let mut p = Pacing::new(I, PresentPriority::Latency);
+        let mut p = Pacing::new(I, PresentPriority::Latency, false);
         let (mut pts, mut now) = (0u64, 0u64);
         for i in 0..100 {
             let step = if i % 2 == 0 { 15 * I } else { I };
@@ -378,5 +466,19 @@ mod tests {
         assert_eq!(t.source.n, t.due.n);
         assert_eq!(t.source.n, t.assigned.n);
         assert!(t.source.n > 0, "every regular interval was excluded");
+    }
+
+    /// Jitter: own slots. Gap: skips. Burst past budget: shares.
+    #[test]
+    fn the_grid_gives_each_picture_one_slot() {
+        const I: i64 = 8_333_333;
+        const MS: u64 = 1_000_000;
+        let mut g = SlotGrid::new(I, 1);
+        let pts = [0, 5, 17, 25, 50, 51, 52].map(|ms: u64| ms * MS);
+        let slots: Vec<(i64, bool)> = pts.iter().map(|&p| g.slot(p, 0)).collect();
+        let index: Vec<i64> = pts.iter().zip(&slots).map(|(&p, &(s, _))| (p as i64 + s) / I).collect();
+        assert_eq!(index, [0, 1, 2, 3, 6, 7, 7]);
+        let clamped: Vec<bool> = slots.iter().map(|&(_, c)| c).collect();
+        assert_eq!(clamped, [false, false, false, false, false, false, true]);
     }
 }

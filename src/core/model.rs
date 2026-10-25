@@ -190,6 +190,14 @@ pub enum CodecPref {
     Av1,
 }
 
+impl CodecPref {
+    /// Can stream 10-bit, so HDR too. Automatic defers to the negotiated codec
+    /// (`NdlCodec::carries_hdr`, the same rule on the decoder side).
+    pub fn allows_ten_bit(self) -> bool {
+        self != Self::H264
+    }
+}
+
 /// Where a session's audio is decoded and played — the two routes this client can build,
 /// selectable in Settings and swappable without touching the pipeline.
 ///

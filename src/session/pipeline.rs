@@ -231,11 +231,9 @@ fn load_player(client: &NativeClient, params: &MediaParams) -> Result<(Box<dyn V
         resolved_mode.height,
     );
 
-    // HDR mastering metadata is applied only when the *negotiated* codec is HEVC: the
-    // `NdlHdrInfo`/`setHdrInfo` fields are HEVC SEI syntax, and no other codec carries
-    // HDR on this platform.
+    // `NdlHdrInfo` is ST 2086 units, the same for HEVC and AV1 host metadata.
     let host_hdr = format.color.is_hdr();
-    let is_hdr = host_hdr && matches!(codec, NdlCodec::H265);
+    let is_hdr = host_hdr && codec.carries_hdr();
     // What the host signalled in `Welcome`, before the SDR colorimetry fix below acts on it.
     tracing::info!(
         "host colour info: hdr={host_hdr} apply_hdr={is_hdr} codec={codec:?} transfer={} primaries={} matrix={}",

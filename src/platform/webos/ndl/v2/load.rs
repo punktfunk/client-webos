@@ -138,7 +138,6 @@ impl NdlVideo {
             pending_hdr: Mutex::new(None),
             applied_hdr: Mutex::new(None),
             av1: video.kind == NdlCodec::Av1.ndl_type(),
-            last_av1_pts_ms: AtomicI64::new(0),
         })
     }
 

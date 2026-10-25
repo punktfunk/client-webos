@@ -133,7 +133,7 @@ impl VideoStage {
             }
             p => p,
         };
-        let pacing = Pacing::new(1_000_000_000 / u64::from(stream_hz), priority);
+        let pacing = Pacing::new(1_000_000_000 / u64::from(stream_hz), priority, caps.holds_pts);
         let timing = FeedTiming::new(cfg.report_decode_latency);
         let recovery = Recovery::new(Arc::clone(&stats));
         tracing::info!(?priority, stream_hz, "video presentation");
@@ -443,6 +443,7 @@ mod tests {
                 pts: true,
                 partial_au: true,
                 flush: false,
+                holds_pts: false,
             }
         }
         fn feed(&self, _au: &[u8], _pts_ns: u64) -> anyhow::Result<()> {

@@ -62,6 +62,11 @@ impl NdlCodec {
         }
     }
 
+    /// NDL takes HDR mastering metadata for this codec (`CodecPref::allows_ten_bit` on the wire).
+    pub fn carries_hdr(self) -> bool {
+        self != Self::H264
+    }
+
     pub fn from_wire(codec: u8) -> Option<Self> {
         match codec {
             punktfunk_core::quic::CODEC_H264 => Some(Self::H264),
