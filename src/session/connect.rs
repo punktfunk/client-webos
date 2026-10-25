@@ -242,14 +242,11 @@ impl Negotiated {
         } else {
             codecs[0]
         };
-        // HDR only ever applies to HEVC. An explicit H.264 or AV1 pick streams 8-bit SDR; on
-        // Automatic the caps are still advertised and the host resolves the codec, with
-        // application gated on the *negotiated* codec being HEVC in `load_player`.
-        let hevc_able = matches!(codec_pref, CodecPref::Auto | CodecPref::Hevc);
-        let hdr = params.hdr_enabled && caps.hdr && hevc_able;
+        // Automatic still advertises HDR; `load_player` gates metadata on the negotiated codec.
+        let hdr = params.hdr_enabled && caps.hdr && codec_pref.allows_ten_bit();
         // Same codec rule as HDR. NDL decodes Main10 from the SPS, and HDR metadata keys on the
         // host's colour, not the depth, so an SDR Main10 stream never flips the panel.
-        let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && hevc_able;
+        let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && codec_pref.allows_ten_bit();
         Self {
             audio_channels,
             // VIDEO_CAP_CHACHA20: unconditional — armv7 has no hardware AES, so ChaCha20 is

@@ -38,6 +38,8 @@ pub struct VideoSinkCaps {
     pub partial_au: bool,
     /// Decoder has a droppable render queue.
     pub flush: bool,
+    /// Decoder holds each frame until its stamp (NDL AV1); others present on arrival whatever the stamp.
+    pub holds_pts: bool,
 }
 
 impl VideoSinkCaps {
@@ -46,6 +48,7 @@ impl VideoSinkCaps {
         pts: false,
         partial_au: false,
         flush: false,
+        holds_pts: false,
     };
 }
 

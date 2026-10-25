@@ -69,7 +69,7 @@ struct VideoPump {
     /// app, so the capture-to-decoded figure is a lower bound on glass latency, never an estimate
     /// of it.
     hud: Arc<punktfunk_core::hud::Stats>,
-    /// Whether to drain host HDR metadata (false for SDR or non-HEVC).
+    /// Whether to drain host HDR metadata (false for SDR or H.264).
     is_hdr: bool,
     /// True when real audio rides the NDL plane; false when the plane is left on its prime, or there
     /// is none.
@@ -323,7 +323,7 @@ impl VideoPump {
             // `out` irregular where `src` is clean is ours. Events are apart from the deltas because
             // a gap or a repeat is not a short frame.
             tracing::debug!(
-                "cadence[{:.1}s]: src={} due={} assigned={} repeats={} regressions={} gaps={}",
+                "cadence[{:.1}s]: src={} due={} assigned={} repeats={} regressions={} gaps={} grid_clamps={}",
                 window.as_secs_f32(),
                 fmt_deltas(&cadence.source),
                 fmt_deltas(&cadence.due),
@@ -331,6 +331,7 @@ impl VideoPump {
                 cadence.repeats,
                 cadence.regressions,
                 cadence.gaps,
+                cadence.grid_clamps,
             );
             // On the SAME 2s window as the cadence above, because that is how a stutter report is
             // read: a plane lead sagging towards zero is what NDL stops pacing the picture on

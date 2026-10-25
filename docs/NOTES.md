@@ -327,7 +327,8 @@ Video feed copy-free — core reassembles contiguous `Vec` (NDL requires), sink 
 
 Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone. No rate term — free-run crystals walked lead away over minutes, 4ms jitter margin (below link spread). CX 1440p120: ~17% frames late vs loop's ~7%. "Stutters here, smooth on host monitor" report.
 
-- ⚠ **Smooths offset, never timestamps.** Game at 45fps stays irregular (core `preserves_source_cadence`). Only transport removed.
+- ⚠ **Lowest latency smooths offset, never timestamps.** Game at 45fps stays irregular (core `preserves_source_cadence`). Only transport removed.
+- **Smoothness re-times onto a host-time slot grid** (`timeline::SlotGrid`). Capture stamps jitter (1440p120 Wi-Fi `src` ~5-17 ms); a 5 ms pair shares a refresh: drop, then repeat, judder on pans. Each picture takes its nearest nominal slot, never its predecessor's; real gaps skip. Host-time slots ride the clock's skew; a player-time grid walks off it (why the earlier grid was rejected). Shifts at most half a period earlier. Source over `buffer` slots ahead shares a slot (`grid_clamps=` on `cadence:`). Proof: `assigned` MAD nears the 0.44 ms floor, `src` unchanged.
 - Can't fix: stream rate ≠ panel rate or divisor. 60 on 120 OK; 50 on 60 arithmetic.
 - **Smoothness preference** (`PresentPriority`): **adds** 1-3 source periods on adaptive cushion. Needs timestamp clock+accepted v2 audio plane, else fallback+warning.
   ⚠ Used to SUBSTITUTE fixed for adaptive (no-op at ceiling — 120Hz >~4ms MAD = most). Additive now; every step worth period. Only way past core's one-period cap.
@@ -377,7 +378,7 @@ Burst 320 Mbps / 3s (not 3 Gbps / 5s) — 3-core A9 UI starves on unbounded. 320
 
 NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` mutex (not thread-safe per header).
 
-AV1 is v2 type 4, as in moonlight-tv and aurora-tv. HEVC presents on arrival; AV1 waits for its PTS, so `NdlVideo::av1_pts_ms` stamps "now". Fed 120 fps, AV1 is reported shown at 60 (aurora-tv on a C5, moonlight-tv #529 on a G4); unmeasured here. LG's browser has a Starfish-only 120 fps AV1 game mode (`enableGameLimitedAV1Fps120`, `externalVideoEncodingInfo`), so the limit looks like NDL's, not the decoder's. SDR only. Plain `strings` hides the impl's 3-letter `VP9`/`AV1`; use `strings -n 3`.
+AV1 is v2 type 4, as in moonlight-tv and aurora-tv. HEVC presents on arrival; AV1 waits for its PTS (`VideoSinkCaps::holds_pts`), so Lowest latency stamps "now" (`Pacing`'s arrival stamp); Smoothness keeps the mapped stamp, lining up the buffer, slot grid and the plane's extra audio lead. Unverified on glass. Fed 120 fps, AV1 is reported shown at 60 (aurora-tv on a C5, moonlight-tv #529 on a G4); unmeasured here. LG's browser has a Starfish-only 120 fps AV1 game mode (`enableGameLimitedAV1Fps120`, `externalVideoEncodingInfo`), so the limit looks like NDL's, not the decoder's. HDR/10-bit as HEVC; unverified on glass. Plain `strings` hides the impl's 3-letter `VP9`/`AV1`; use `strings -n 3`.
 
 Backpressure: pump samples `render_buffer_length` every 500ms; two ≥8-frame samples freeze+keyframe request (loss path, no flush — kills audio). Measured 0-1, fires decoder stall only.
 
