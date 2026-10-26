@@ -15,6 +15,7 @@
 use std::ops::ControlFlow;
 
 use super::*;
+use crate::core::dial::Press;
 use crate::platform::webos::input::{WEBOS_EXIT_SCANCODE, WEBOS_HOME_SCANCODE};
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
 use punktfunk_core::hud::StatsVerbosity;
@@ -197,8 +198,8 @@ impl App {
             home_held: key_down(WEBOS_HOME_SCANCODE),
             exit_held: key_down(WEBOS_EXIT_SCANCODE),
             green_pressed: false,
-            yellow_pressed: false,
             blue_pressed: false,
+            yellow: Default::default(),
             focused: true,
             input_suspended: false,
             tap_up: None,
@@ -345,6 +346,22 @@ impl Stream {
             self.cursor.disable_sdl_relative(cx.window);
             self.cursor.flush(cx.window, events);
         }
+    }
+
+    /// Opens the dial at screen centre, or closes it if open.
+    pub(super) fn toggle_ring(&mut self, cx: &mut Cx<'_>) {
+        self.ring.set_facts(&ring_facts(
+            cx.settings,
+            cx.connected,
+            self.hud.tier(),
+            self.native_mode,
+            !cx.pads.is_empty(),
+            self.kind_setting,
+        ));
+        self.ring.input(RingInput::Toggle {
+            x: cx.display.0 as f32 / 2.0,
+            y: cx.display.1 as f32 / 2.0,
+        });
     }
 
     /// The dial: hand the pads over on its open/close edge, keep its facts current, and act on
@@ -527,9 +544,18 @@ impl Stream {
         if (std::mem::take(&mut self.green_pressed) && !dialog_open) | std::mem::take(&mut self.ring_stats) {
             self.hud.cycle_stats();
         }
-        if std::mem::take(&mut self.yellow_pressed) && !dialog_open {
-            cycle_log_overlay();
-            self.hud.redraw_now(); // with the new state
+        // The dialog takes the remote: a press it swallowed must not act once it closes.
+        if dialog_open {
+            self.yellow.clear();
+        }
+        match self.yellow.poll(Instant::now()) {
+            // The open dial swallows a tap.
+            Some(Press::Tap) if !self.ring.open() => {
+                cycle_log_overlay();
+                self.hud.redraw_now(); // with the new state
+            }
+            Some(Press::Hold) => self.toggle_ring(cx),
+            _ => {}
         }
         // Blue raises the IME, so a game needing text (chat, a search box) doesn't require
         // dropping back to the menu.
@@ -643,6 +669,8 @@ impl Stream {
 
     /// Lets go of everything the host holds from this client, and forgets it here too: for when
     /// the matching releases will not arrive (the dial took input, or focus left the app).
+    /// `remote_keys` stays: its releases still arrive under the dial, focus loss resets it on its
+    /// own, and a key forgotten while held would take its next auto-repeat for a fresh press.
     pub(super) fn release_all(&mut self, cx: &mut Cx<'_>) {
         for slot in cx.pads.iter_mut() {
             slot.chord.clear();
@@ -650,7 +678,6 @@ impl Stream {
         }
         cx.connected.release_input();
         self.buttons.release_held(|ev| cx.connected.send_input(ev));
-        self.remote_keys.reset();
     }
 }
 

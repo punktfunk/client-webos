@@ -6,7 +6,6 @@ use std::ops::ControlFlow;
 use super::*;
 use crate::core::dial::PadRoute;
 use crate::runtime::overlay::ConfirmAction;
-use pf_client_core::ring::RingInput;
 use sdl3::event::Event;
 
 impl Stream {
@@ -52,6 +51,11 @@ impl Stream {
         let key_admitted = !hid_owned_key && self.remote_gate.admits(&event, now);
         let remote = self.remote_keys.edge(&event, key_admitted);
         let remote_press = remote.and_then(|(key, down)| down.then_some(key));
+        // Read before the routing below: the open dial swallows remote keys, and a hold that
+        // opened it must still see its own release.
+        if let Some((RemoteKey::Yellow, down)) = remote {
+            self.yellow.edge(down, now);
+        }
         match event {
             Event::Quit { .. } => {
                 cx.connected.disconnect_quit();
@@ -66,6 +70,8 @@ impl Stream {
                 tracing::debug!("focus lost — releasing held input");
                 self.focused = false;
                 self.release_all(cx);
+                // Its release goes to whoever took focus; held, it would open the dial here.
+                self.yellow.clear();
             }
             Event::Window {
                 win_event: sdl3::event::WindowEvent::FocusGained,
@@ -163,7 +169,6 @@ impl Stream {
                     // dropped leaves the host holding the button down.
                     RemoteKey::Red => self.buttons.red(down, |ev| cx.connected.send_input(ev)),
                     RemoteKey::Green if down => self.green_pressed = true,
-                    RemoteKey::Yellow if down => self.yellow_pressed = true,
                     RemoteKey::Blue if down => self.blue_pressed = true,
                     _ => {}
                 }
@@ -199,20 +204,7 @@ impl Stream {
                     PadRoute::Forward => {
                         cx.connected.send_input(&gamepad::bit_event(bit, down, slot.index));
                     }
-                    PadRoute::Open => {
-                        self.ring.set_facts(&live::ring_facts(
-                            cx.settings,
-                            cx.connected,
-                            self.hud.tier(),
-                            self.native_mode,
-                            true,
-                            self.kind_setting,
-                        ));
-                        self.ring.input(RingInput::Toggle {
-                            x: cx.display.0 as f32 / 2.0,
-                            y: cx.display.1 as f32 / 2.0,
-                        });
-                    }
+                    PadRoute::Open => self.toggle_ring(cx),
                     PadRoute::Menu(ev) => {
                         self.ring.menu(ev);
                     }

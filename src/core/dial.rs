@@ -1,12 +1,15 @@
 //! The in-stream quick-action dial's pad side, in wire bits so it tests without SDL.
 //!
-//! Select+A opens the dial: A never reaches the host, and neither does its release. Opening
+//! Select+A opens the dial, and so does a held Yellow on the remote ([`TapHold`]), for a stream
+//! with no pad on this TV. A never reaches the host, and neither does its release. Opening
 //! releases whatever the host still holds, and while the dial is open every press drives it
 //! instead. Buttons still down when it closes stay the dial's until they release, so the B that
 //! closed it never lands in the game.
 //!
 //! A, B and Y here are labels (`face`): the wire bits stay positional, the dial reads like the
 //! menus do.
+
+use std::time::{Duration, Instant};
 
 use pf_client_core::menu_nav::{ring_sector, MenuDir, MenuEvent};
 use punktfunk_core::input::gamepad::{
@@ -139,9 +142,92 @@ impl PadDial {
     }
 }
 
+/// How long Yellow is held to open the dial. A shorter press keeps the key's tap action.
+const YELLOW_HOLD: Duration = Duration::from_millis(600);
+
+/// What a [`TapHold`] key did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// Released before the hold threshold.
+    Tap,
+    /// Still down at the threshold.
+    Hold,
+}
+
+/// One remote key that taps one action and holds another. The hold fires while the key is still
+/// down, so its release is not also a tap; the tap waits for the release, since only then is it
+/// known not to be a hold.
+#[derive(Debug, Default)]
+pub struct TapHold {
+    /// When the key went down; `None` when up, or once the hold fired.
+    since: Option<Instant>,
+    tapped: bool,
+}
+
+impl TapHold {
+    /// One edge of the key.
+    pub fn edge(&mut self, down: bool, now: Instant) {
+        if down {
+            self.since = Some(now);
+        } else if self.since.take().is_some() {
+            self.tapped = true;
+        }
+    }
+
+    /// Reports the press once: a tap after its release, a hold once [`YELLOW_HOLD`] has passed.
+    pub fn poll(&mut self, now: Instant) -> Option<Press> {
+        if std::mem::take(&mut self.tapped) {
+            return Some(Press::Tap);
+        }
+        let since = self.since?;
+        (now.duration_since(since) >= YELLOW_HOLD).then(|| {
+            self.since = None;
+            Press::Hold
+        })
+    }
+
+    /// Forgets the key, for when its release will not arrive.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_press_taps_on_release() {
+        let t = Instant::now();
+        let mut k = TapHold::default();
+        k.edge(true, t);
+        assert_eq!(k.poll(t + YELLOW_HOLD / 2), None);
+        k.edge(false, t + YELLOW_HOLD / 2);
+        assert_eq!(k.poll(t + YELLOW_HOLD), Some(Press::Tap));
+        assert_eq!(k.poll(t + YELLOW_HOLD * 2), None, "once");
+    }
+
+    #[test]
+    fn a_hold_fires_while_down_and_its_release_is_no_tap() {
+        let t = Instant::now();
+        let mut k = TapHold::default();
+        k.edge(true, t);
+        assert_eq!(k.poll(t + YELLOW_HOLD), Some(Press::Hold));
+        assert_eq!(k.poll(t + YELLOW_HOLD * 2), None, "once");
+        k.edge(false, t + YELLOW_HOLD * 3);
+        assert_eq!(k.poll(t + YELLOW_HOLD * 3), None);
+    }
+
+    #[test]
+    fn a_cleared_key_neither_holds_nor_taps() {
+        let t = Instant::now();
+        let mut k = TapHold::default();
+        k.edge(true, t);
+        k.clear();
+        assert_eq!(k.poll(t + YELLOW_HOLD), None);
+        k.edge(false, t + YELLOW_HOLD);
+        assert_eq!(k.poll(t + YELLOW_HOLD), None);
+    }
 
     #[test]
     fn select_then_a_opens_and_keeps_both_a_edges() {
