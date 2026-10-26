@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_console_ui::{
-    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, PairStatus, RequestKey,
-    SpeedPhase, Stale, WakeStatus,
+    ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, PairStatus, ProfilesAnswer,
+    RequestKey, SpeedPhase, Stale, WakeStatus,
 };
 use punktfunk_core::client::NativeClient;
 
@@ -29,7 +29,7 @@ use crate::services::logs::{upload_to_host, HostTarget};
 use crate::services::power::{self, PowerRights};
 use crate::services::store::console::ConsoleStore;
 use crate::services::store::{self, shared, ExitAction};
-use crate::services::{budget, wol};
+use crate::services::{budget, profiles, wol};
 
 /// How often every row is re-probed for its presence pip. Ten seconds is the desktop's
 /// cadence; this `SoC` probes sequentially on one thread rather than in parallel, so the sweep
@@ -407,6 +407,9 @@ impl Service {
             } => self.bind_host_profile(&key, profile_id),
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
+            ConsoleCmd::FetchProfiles { addr, mgmt, fp_hex } => self.fetch_profiles(addr, mgmt, fp_hex),
+            ConsoleCmd::WakeProfile { addr, mgmt, fp_hex, id } => self.wake_profile(addr, mgmt, &fp_hex, id),
+            ConsoleCmd::SetProfile { key, profile } => self.set_profile(&key, profile),
             // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -418,17 +421,12 @@ impl Service {
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
-            // - `FetchProfiles`, `WakeProfile`, `SetProfile`: the profile picker is off here
-            //   (`ConsoleOptions::profiles`), so the shell sends none of them.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PadTest { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
-            | ConsoleCmd::Install { .. }
-            | ConsoleCmd::FetchProfiles { .. }
-            | ConsoleCmd::WakeProfile { .. }
-            | ConsoleCmd::SetProfile { .. } => {}
+            | ConsoleCmd::Install { .. } => {}
         }
     }
 
@@ -465,6 +463,53 @@ impl Service {
     /// A pinned card on or off, through the shared edit; the carousel re-reads on a change.
     fn set_pin(&self, key: &str, profile_id: String, pin: bool) {
         self.store.edit(|state| shared::set_pin(state, key, profile_id, pin));
+    }
+
+    /// The host profile this TV plays as on a saved host, through the shared edit.
+    fn set_profile(&self, key: &str, profile: Option<pf_client_core::profiles::ProfilePick>) {
+        self.store.edit(|state| shared::set_profile(state, key, profile));
+    }
+
+    /// The box's profiles for the picker, answered under its pin off the menu thread. The shell
+    /// asks again every 2 s while a seat comes up.
+    fn fetch_profiles(&self, addr: String, mgmt: u16, fp_hex: String) {
+        let console = self.handles.console.clone();
+        // The shell asks paired hosts only. Unpinned, this TV's certificate goes to anyone.
+        let Some(pin) = shared::parse_fp(&fp_hex) else {
+            console.set_profiles(&fp_hex, ProfilesAnswer::Failed(LibraryError::NotPaired.phrase()));
+            return;
+        };
+        let identity = self.identity.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-profiles".into())
+            .spawn(move || {
+                let answer = match profiles::fetch(&addr, mgmt, &identity, pin) {
+                    Ok(Some(listed)) => ProfilesAnswer::Listed(listed),
+                    Ok(None) => ProfilesAnswer::NoProfiles,
+                    Err(e) => {
+                        tracing::info!(%addr, error = ?e, "console: profile list did not load");
+                        ProfilesAnswer::Failed(e.phrase())
+                    }
+                };
+                console.set_profiles(&fp_hex, answer);
+            })
+            .ok();
+    }
+
+    /// Start a profile's stopped seat. No answer: the shell polls the list until it is up.
+    fn wake_profile(&self, addr: String, mgmt: u16, fp_hex: &str, id: String) {
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            return;
+        };
+        let identity = self.identity.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-wakeseat".into())
+            .spawn(move || {
+                if let Err(e) = profiles::wake(&addr, mgmt, &identity, pin, &id) {
+                    tracing::info!(%addr, %id, error = ?e, "console: profile seat did not wake");
+                }
+            })
+            .ok();
     }
 
     /// Drop the pinned certificate and keep the record: the next connect asks for a PIN

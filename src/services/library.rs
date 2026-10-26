@@ -69,6 +69,18 @@ impl std::fmt::Display for LibraryError {
     }
 }
 
+impl LibraryError {
+    /// The sentence as the tail of another: `Couldn't load the profiles — the host isn't answering`.
+    pub fn phrase(&self) -> String {
+        let line = self.to_string();
+        let line = line.strip_suffix('.').unwrap_or(&line);
+        let mut chars = line.chars();
+        chars
+            .next()
+            .map_or_else(String::new, |c| c.to_lowercase().chain(chars).collect())
+    }
+}
+
 /// `https://addr:port`, IPv6 literals bracketed.
 pub(crate) fn base_url(addr: &str, mgmt_port: u16) -> String {
     if addr.contains(':') {
@@ -484,6 +496,18 @@ mod tests {
             classify(ureq::Error::Io(refused)),
             LibraryError::Unreachable(_)
         ));
+    }
+
+    #[test]
+    fn a_phrase_reads_as_the_tail_of_a_sentence() {
+        assert_eq!(
+            LibraryError::Unreachable(String::new()).phrase(),
+            "the host isn't answering"
+        );
+        assert_eq!(
+            LibraryError::PinMismatch.phrase(),
+            "host certificate changed — re-pair with a PIN"
+        );
     }
 
     #[test]

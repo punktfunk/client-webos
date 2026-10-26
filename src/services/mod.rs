@@ -11,5 +11,6 @@ pub mod paths;
 pub mod pcm_write;
 pub mod pinned_tls;
 pub mod power;
+pub mod profiles;
 pub mod store;
 pub mod wol;
