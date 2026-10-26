@@ -51,12 +51,8 @@ const WAKE_RESEND_EVERY: Duration = Duration::from_secs(6);
 struct PairOutcome {
     /// The `Pair` or `RequestAccess` this answers.
     req: RequestKey,
-    name: String,
     addr: String,
     port: u16,
-    mgmt_port: Option<u16>,
-    mac: Vec<String>,
-    os: String,
     result: Result<[u8; 32], String>,
 }
 
@@ -95,7 +91,8 @@ pub(crate) struct Service {
     identity: (String, String),
     /// `None` if the mDNS daemon would not start — the carousel then shows saved hosts only.
     discovery: Option<Discovery>,
-    /// Live adverts, one per `addr:port`.
+    /// Live adverts, one per `addr:port`, each dropped once a settled re-browse no longer
+    /// finds it.
     discovered: Vec<DiscoveredHost>,
     /// Row key → last probe answer, and what that host offers. Both survive a sweep so a pip
     /// does not blink off while the next round runs.
@@ -111,7 +108,8 @@ pub(crate) struct Service {
     games: Option<(RequestKey, Receiver<GamesLoaded>)>,
     /// Covers as they arrive, encoded — see [`spawn_art`].
     art: Option<ArtReceiver>,
-    pair: Option<Receiver<PairOutcome>>,
+    /// Every ceremony still running: a second one must not orphan the first one's answer.
+    pair: Vec<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
 }
@@ -137,7 +135,7 @@ impl Service {
             rows_dirty: true,
             games: None,
             art: None,
-            pair: None,
+            pair: Vec::new(),
             wake_cancel: None,
         }
     }
@@ -161,13 +159,18 @@ impl Service {
 
     /// The background's answers, on the service cadence: adverts, sweeps, games, art, pairing.
     fn service(&mut self) {
-        if let Some(discovery) = &mut self.discovery {
-            for host in discovery.poll() {
-                self.rows_dirty = true;
-                self.discovered
-                    .retain(|d| !(d.addr == host.addr && d.port == host.port));
-                self.discovered.push(host);
-            }
+        for host in self.discovery.as_mut().map(Discovery::poll).unwrap_or_default() {
+            self.rows_dirty = true;
+            self.learn_from_advert(&host);
+            self.discovered
+                .retain(|d| !(d.addr == host.addr && d.port == host.port));
+            self.discovered.push(host);
+        }
+        // A sleeping box sends no goodbye. One a settled re-browse has not found is gone.
+        if let Some(since) = self.discovery.as_ref().and_then(Discovery::settled_browse) {
+            let before = self.discovered.len();
+            self.discovered.retain(|d| d.seen >= since);
+            self.rows_dirty |= self.discovered.len() != before;
         }
         self.drain_sweep();
         self.drain_games();
@@ -261,7 +264,7 @@ impl Service {
     fn saved_row(&self, h: &KnownHost) -> HostRow {
         let key = shared::known_host_key(h);
         let advert = self.discovered.iter().find(|d| same_host(h, d));
-        let online = advert.is_some() || self.reachable.get(&key).copied().unwrap_or(false);
+        let online = self.online(&key, advert.is_some());
         HostRow {
             // The store record's own id, which is what the shell's default host names.
             id: h.id.clone(),
@@ -602,7 +605,7 @@ impl Service {
                 return;
             }
         };
-        self.note_reachable(&loaded.host, loaded.port, true);
+        self.note_reachable(loaded.fingerprint, &loaded.host, loaded.port, true);
         self.handles.library.set_games(&req, to_model(&games));
         self.handles.library.set_stale(Stale::No);
         self.art = Some(spawn_art(
@@ -630,21 +633,6 @@ impl Service {
 
     // ---- pairing -----------------------------------------------------------------------
 
-    /// What a new record learns from the row and the advert: name, management port, MACs, OS.
-    fn advert_facts(&self, addr: &str, port: u16) -> (String, Option<u16>, Vec<String>, String) {
-        let name = self
-            .rows()
-            .into_iter()
-            .find(|r| r.addr == addr && r.port == port)
-            .map_or_else(|| addr.to_string(), |r| r.name);
-        let advert = self.discovered.iter().find(|d| d.addr == addr && d.port == port);
-        let (mgmt_port, mac, os) = advert.map_or_else(
-            || (None, Vec::new(), String::new()),
-            |d| (d.mgmt_port, d.mac.clone(), d.os.clone()),
-        );
-        (name, mgmt_port, mac, os)
-    }
-
     /// Run one pairing on its own thread: `ask` is the PIN ceremony or a request for access.
     /// Reports Busy under `req` now; [`Self::drain_pair`] reports Paired or Failed.
     fn start_pair(
@@ -654,13 +642,12 @@ impl Service {
         req: RequestKey,
         ask: impl FnOnce(&str, u16, &(String, String)) -> Result<[u8; 32], String> + Send + 'static,
     ) {
-        let (name, mgmt_port, mac, os) = self.advert_facts(&addr, port);
         self.handles.console.set_pair(PairStatus {
             req: req.clone(),
             phase: PairPhase::Busy,
         });
         let (tx, rx) = std::sync::mpsc::channel();
-        self.pair = Some(rx);
+        self.pair.push(rx);
         let identity = self.identity.clone();
         std::thread::Builder::new()
             .name("punktfunk-webos-console-pair".into())
@@ -669,12 +656,8 @@ impl Service {
                 // A failed send just means the ceremony was cancelled and nobody is listening.
                 let _ = tx.send(PairOutcome {
                     req,
-                    name,
                     addr,
                     port,
-                    mgmt_port,
-                    mac,
-                    os,
                     result,
                 });
             })
@@ -682,9 +665,20 @@ impl Service {
     }
 
     fn drain_pair(&mut self) {
-        let Some(rx) = &self.pair else { return };
-        let Ok(outcome) = rx.try_recv() else { return };
-        self.pair = None;
+        let mut done = Vec::new();
+        self.pair.retain(|rx| match rx.try_recv() {
+            Ok(outcome) => {
+                done.push(outcome);
+                false
+            }
+            Err(e) => e == std::sync::mpsc::TryRecvError::Empty,
+        });
+        for outcome in done {
+            self.finish_pair(outcome);
+        }
+    }
+
+    fn finish_pair(&mut self, outcome: PairOutcome) {
         let req = outcome.req.clone();
         let fingerprint = match &outcome.result {
             Ok(fp) => *fp,
@@ -701,20 +695,26 @@ impl Service {
         self.handles.console.set_pair(PairStatus { req, phase });
     }
 
-    /// Save a host this TV just paired with, returning its row key.
+    /// Save a host this TV just paired with, returning its row key. The advert it learns from is
+    /// the one carrying the pin it answered with: at a shared address, the other OS's is not it.
     fn remember_paired(&mut self, outcome: PairOutcome, fingerprint: [u8; 32]) -> String {
-        let key = shared::host_key(&shared::hex(fingerprint), &outcome.addr, outcome.port);
+        let fp_hex = shared::hex(fingerprint);
+        let key = shared::host_key(&fp_hex, &outcome.addr, outcome.port);
+        let advert = self.discovered.iter().find(|d| {
+            pf_client_core::trust::same_pin(&d.fp_hex, &fp_hex)
+                .unwrap_or(d.addr == outcome.addr && d.port == outcome.port)
+        });
         self.store.edit(|state| {
             // Only reaches a genuinely new host — `upsert_known_host` keeps an existing
-            // record's bindings and collections.
+            // record's name, bindings and collections.
             let mut record = KnownHost {
                 shared: pf_client_core::trust::KnownHost {
-                    name: outcome.name,
+                    name: advert.map_or_else(|| outcome.addr.clone(), |d| d.name.clone()),
                     addr: outcome.addr,
                     port: outcome.port,
-                    mgmt_port: outcome.mgmt_port,
-                    mac: outcome.mac,
-                    os: outcome.os,
+                    mgmt_port: advert.and_then(|d| d.mgmt_port),
+                    mac: advert.map(|d| d.mac.clone()).unwrap_or_default(),
+                    os: advert.map(|d| d.os.clone()).unwrap_or_default(),
                     ..Default::default()
                 },
                 ..KnownHost::default()
@@ -734,9 +734,13 @@ impl Service {
 
     fn save_host(&mut self, name: String, addr: String, port: u16) {
         self.store.edit(|state| {
-            // Keyed by address, not fingerprint: a hand-typed host has none yet, so an
-            // fp-keyed upsert would collide every one of them onto the same record.
-            if let Some(h) = state.known_hosts.iter_mut().find(|h| h.addr == addr && h.port == port) {
+            // A hand-typed host has no pin, so only the unpinned placeholder at its address takes
+            // the edit: a record pinned there may be the other OS of a dual-boot box.
+            if let Some(h) = state
+                .known_hosts
+                .iter_mut()
+                .find(|h| h.fp_hex.is_empty() && h.addr == addr && h.port == port)
+            {
                 if !name.is_empty() {
                     h.name = name;
                 }
@@ -842,7 +846,10 @@ impl Service {
             .name("punktfunk-webos-console-sweep".into())
             .spawn(move || {
                 for t in targets {
-                    let online = punktfunk_core::client::NativeClient::probe(&t.addr, t.port, budget::PROBE);
+                    // Who answers, not whether anything does: a stranger on a sleeping host's lease,
+                    // or the other OS of a dual-boot box, is not this host.
+                    let answered = NativeClient::probe_identity(&t.addr, t.port, budget::PROBE);
+                    let online = answered.is_some() && t.fingerprint.is_none_or(|fp| answered == Some(fp));
                     // Only a paired host that answered has anything to say about power, and
                     // only that pairing's own access mask decides it.
                     let rights = (online && t.fingerprint.is_some())
@@ -892,20 +899,57 @@ impl Service {
     /// Whether this host answered its last check. Unknown counts as down: a host that has never
     /// been probed must not cost the exit budget on a connection that cannot complete.
     pub(crate) fn is_online(&self, h: &KnownHost) -> bool {
-        self.discovered.iter().any(|d| same_host(h, d))
-            || self.reachable.get(&shared::known_host_key(h)).copied().unwrap_or(false)
+        self.online(
+            &shared::known_host_key(h),
+            self.discovered.iter().any(|d| same_host(h, d)),
+        )
+    }
+
+    /// The sweep's handshake decides once it has answered for `key`. A live advert stands in only
+    /// before then: a box that went to sleep keeps advertising in the cache, never in a handshake.
+    fn online(&self, key: &str, advertised: bool) -> bool {
+        self.reachable.get(key).copied().unwrap_or(advertised)
     }
 
     /// Record what some other exchange already proved about a host, so the pip never sits
     /// behind evidence the app has in hand.
-    fn note_reachable(&mut self, addr: &str, port: u16, online: bool) {
+    fn note_reachable(&mut self, fingerprint: Option<[u8; 32]>, addr: &str, port: u16, online: bool) {
         let state = self.store.snapshot();
-        let key = state
-            .known_hosts
-            .iter()
-            .find(|h| h.addr == addr && h.port == port)
-            .map_or_else(|| shared::host_key("", addr, port), shared::known_host_key);
+        let fp_hex = fingerprint.map(shared::hex).unwrap_or_default();
+        let key = crate::core::model::resolve_known(&state.known_hosts, &fp_hex, addr, port).map_or_else(
+            || shared::host_key(&fp_hex, addr, port),
+            |i| shared::known_host_key(&state.known_hosts[i]),
+        );
         self.rows_dirty |= self.reachable.insert(key, online) != Some(online);
+    }
+
+    /// What a pinned advert says about its saved host: a management port, MACs or an OS chain
+    /// the record lacks or has stale. A host added by address and paired while silent has no
+    /// MAC, so it could never be woken until an advert taught it one.
+    fn learn_from_advert(&self, d: &DiscoveredHost) {
+        self.store.edit(|state| {
+            let Some(h) = state
+                .known_hosts
+                .iter_mut()
+                .find(|h| pf_client_core::trust::same_pin(&h.fp_hex, &d.fp_hex) == Some(true))
+            else {
+                return false;
+            };
+            let mut changed = false;
+            if !d.mac.is_empty() && h.mac != d.mac {
+                h.mac.clone_from(&d.mac);
+                changed = true;
+            }
+            if !d.os.is_empty() && h.os != d.os {
+                h.os.clone_from(&d.os);
+                changed = true;
+            }
+            if d.mgmt_port.is_some() && h.mgmt_port != d.mgmt_port {
+                h.mgmt_port = d.mgmt_port;
+                changed = true;
+            }
+            changed
+        });
     }
 
     /// Reports each tick under `req`, onto the card the shell raised as it sent the `Wake`.
@@ -1031,15 +1075,14 @@ impl Service {
     }
 }
 
-/// Whether a saved record and a live advert are the same host.
-///
-/// A function rather than the comparison written out at each of its three call sites: the two
-/// types carry the address under different names (`KnownHost::host`, `DiscoveredHost::addr`),
-/// and inline that mismatch reads as a copy-paste slip to a human and to clippy alike.
+/// Whether a saved record and a live advert are the same host: two pins decide alone
+/// (`trust::same_pin`), and the address only when a side has none. Both OS installs of a
+/// dual-boot box advertise at one address with a certificate each.
 fn same_host(h: &KnownHost, d: &DiscoveredHost) -> bool {
     // Compared as pairs, not as two `&&`-ed equalities: with the address fields spelled
     // differently on the two types, that shape reads as a typo to `suspicious_operation_groupings`.
-    (h.addr.as_str(), h.port) == (d.addr.as_str(), d.port)
+    pf_client_core::trust::same_pin(&h.fp_hex, &d.fp_hex)
+        .unwrap_or((h.addr.as_str(), h.port) == (d.addr.as_str(), d.port))
 }
 
 /// The two power rows this client renders, from the rights the host reported.

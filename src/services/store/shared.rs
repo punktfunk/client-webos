@@ -205,13 +205,15 @@ mod tests {
 /// point every launch goes through.
 pub fn launch_settings(
     state: &Persisted,
+    fp_hex: &str,
     addr: &str,
     port: u16,
     launch: Option<&str>,
     one_off: Option<&str>,
 ) -> Settings {
     let id = launch.unwrap_or(DESKTOP_PIN_ID);
-    let host = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
+    // By pin: at a shared address, the other OS of a dual-boot box has bindings of its own.
+    let host = crate::core::model::resolve_known(&state.known_hosts, fp_hex, addr, port).map(|i| &state.known_hosts[i]);
     let per_title = host.and_then(|h| h.game_profile(id));
     let bound = host.and_then(|h| h.preset_id.as_deref());
     let catalog = presets::PresetsFile {
@@ -410,16 +412,16 @@ mod launch_tests {
         state.known_hosts[0].preset_id = Some(hid);
         state.settings.set_cursor_capture(true);
 
-        let doom = launch_settings(&state, "10.0.0.2", 47989, Some("doom"), None);
+        let doom = launch_settings(&state, "", "10.0.0.2", 47989, Some("doom"), None);
         assert_eq!(doom.bitrate_kbps, 12_000);
-        let other = launch_settings(&state, "10.0.0.2", 47989, Some("quake"), None);
+        let other = launch_settings(&state, "", "10.0.0.2", 47989, Some("quake"), None);
         assert_eq!(other.bitrate_kbps, 34_000, "the host default covers an unbound title");
-        let desktop = launch_settings(&state, "10.0.0.2", 47989, None, None);
+        let desktop = launch_settings(&state, "", "10.0.0.2", 47989, None, None);
         assert!(!desktop.cursor_capture(), "the desktop card streams with capture off");
         assert!(other.cursor_capture(), "a game keeps the global capture");
 
         state.known_hosts[0].bind_game_preset("doom", Some("gone"));
-        let dangling = launch_settings(&state, "10.0.0.2", 47989, Some("doom"), None);
+        let dangling = launch_settings(&state, "", "10.0.0.2", 47989, Some("doom"), None);
         assert_eq!(
             dangling.bitrate_kbps, 34_000,
             "a dangling title binding falls back to the host default"

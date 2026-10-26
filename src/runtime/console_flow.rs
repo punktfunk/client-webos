@@ -572,12 +572,13 @@ fn start_launch(
         profile,
     } = want;
     let state = store.snapshot();
-    let known = state.known_hosts.iter().find(|h| h.addr == addr && h.port == port);
+    let known =
+        crate::core::model::resolve_known(&state.known_hosts, &fp_hex, &addr, port).map(|i| &state.known_hosts[i]);
     let fingerprint = known
         .and_then(crate::core::model::KnownHost::fingerprint)
         .or_else(|| shared::parse_fp(&fp_hex))
         .context("that host isn't paired with this TV yet")?;
-    let mut settings = shared::launch_settings(&state, &addr, port, launch.as_deref(), preset.as_deref());
+    let mut settings = shared::launch_settings(&state, &fp_hex, &addr, port, launch.as_deref(), preset.as_deref());
     let gamepad_auto = settings.gamepad_type() == store::GamepadType::Auto;
     settings = resolve_gamepad_type(settings, game_controller);
     let target = ConnectTarget {

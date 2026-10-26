@@ -109,37 +109,56 @@ impl KnownHost {
     }
 }
 
-/// Upserts by `(addr, port)`, keeping the existing pin if the new record is unpaired (a fresh
-/// mDNS discovery shouldn't clobber a paired host) — same reasoning for `mac` and `os`,
-/// learned separately. The record's id, its profile bindings, its pins, `wol_auto` and the
-/// exit action are *always* kept from the existing record: only their own screens change them, so no add/edit/re-pair flow may clobber any.
+/// The record a dial, launch or pairing is about, by the rule every punktfunk client keeps
+/// (`trust::KnownHosts::resolve_index`). With a pin: the record pinned to it, else the unpinned
+/// placeholder at `addr:port`, never a record pinned to another fingerprint (at a shared address
+/// that is the other OS of a dual-boot box). Without one: the record at `addr:port`, pinned first.
+pub fn resolve_known(hosts: &[KnownHost], fp_hex: &str, addr: &str, port: u16) -> Option<usize> {
+    let at = |h: &KnownHost| h.addr == addr && h.port == port;
+    if fp_hex.is_empty() {
+        return hosts
+            .iter()
+            .position(|h| at(h) && h.is_paired())
+            .or_else(|| hosts.iter().position(at));
+    }
+    hosts
+        .iter()
+        .position(|h| pf_client_core::trust::same_pin(&h.fp_hex, fp_hex) == Some(true))
+        .or_else(|| hosts.iter().position(|h| at(h) && h.fp_hex.is_empty()))
+}
+
+/// Upserts the record [`resolve_known`] names for `new`, or appends it. A merge keeps the record
+/// and moves only what a pairing learns: the address, the pin, and a management port, MACs or
+/// OS chain `new` carries. A name lands only on a record still named after its address. The id,
+/// bindings, pins, host profile and power behaviour stay: only their own screens change them.
 ///
 /// Returns the inserted record when it was genuinely new, so the caller can seed what a first
 /// sighting gets ([`seed_new_host_profiles`]) without looking it up again. `None` for a merge:
 /// re-adding or re-pairing a host must not re-seed anything.
-pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, mut new: KnownHost) -> Option<&mut KnownHost> {
-    let Some(at) = hosts.iter().position(|h| h.addr == new.addr && h.port == new.port) else {
+pub fn upsert_known_host(hosts: &mut Vec<KnownHost>, new: KnownHost) -> Option<&mut KnownHost> {
+    let Some(at) = resolve_known(hosts, &new.fp_hex, &new.addr, new.port) else {
         hosts.push(new);
         return hosts.last_mut();
     };
-    let existing = &mut hosts[at];
-    if !new.is_paired() {
-        new.fp_hex.clone_from(&existing.fp_hex);
-        new.paired = existing.paired;
+    let h = &mut hosts[at];
+    if h.name.is_empty() || h.name == h.addr {
+        h.name.clone_from(&new.name);
     }
-    if new.mac.is_empty() {
-        new.mac.clone_from(&existing.mac);
+    h.addr.clone_from(&new.addr);
+    h.port = new.port;
+    if new.is_paired() {
+        h.fp_hex.clone_from(&new.fp_hex);
+        h.paired = true;
     }
-    if new.os.is_empty() {
-        new.os.clone_from(&existing.os);
+    if new.mgmt_port.is_some() {
+        h.mgmt_port = new.mgmt_port;
     }
-    new.id.clone_from(&existing.id);
-    new.preset_id.clone_from(&existing.preset_id);
-    new.pinned_presets.clone_from(&existing.pinned_presets);
-    new.game_presets.clone_from(&existing.game_presets);
-    new.wol_auto = existing.wol_auto;
-    new.exit_action = existing.exit_action;
-    *existing = new;
+    if !new.mac.is_empty() {
+        h.mac.clone_from(&new.mac);
+    }
+    if !new.os.is_empty() {
+        h.os.clone_from(&new.os);
+    }
     None
 }
 
@@ -676,5 +695,43 @@ mod tests {
         assert!(hosts[0].is_paired() && hosts[0].wol_auto);
         assert_eq!(hosts[0].id, h.id);
         assert_eq!(hosts[0].game_profile("doom"), Some("p1"));
+    }
+
+    /// The other OS of a dual-boot box answers at the same address with its own certificate:
+    /// pairing it adds a record, and re-pairing either one finds its own.
+    #[test]
+    fn a_second_pin_at_one_address_is_a_second_host() {
+        let paired = |name: &str, fp: u8| {
+            let mut h = KnownHost {
+                shared: pf_client_core::trust::KnownHost {
+                    name: name.into(),
+                    addr: "10.0.0.2".into(),
+                    port: 47_989,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            h.set_fingerprint([fp; 32]);
+            h
+        };
+        let mut windows = paired("windows", 0x11);
+        windows.bind_game_preset("doom", Some("p1"));
+        let mut hosts = vec![windows];
+        assert!(upsert_known_host(&mut hosts, paired("bazzite", 0x22)).is_some());
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].fingerprint(), Some([0x11; 32]), "the first OS keeps its pin");
+        assert_eq!(hosts[0].name, "windows");
+
+        let mut moved = paired("ignored", 0x11);
+        moved.addr = "10.0.0.9".into();
+        assert!(upsert_known_host(&mut hosts, moved).is_none());
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(
+            (hosts[0].addr.as_str(), hosts[0].name.as_str()),
+            ("10.0.0.9", "windows")
+        );
+        assert_eq!(hosts[0].game_profile("doom"), Some("p1"));
+        assert_eq!(resolve_known(&hosts, &"22".repeat(32), "10.0.0.2", 47_989), Some(1));
+        assert_eq!(resolve_known(&hosts, &"33".repeat(32), "10.0.0.2", 47_989), None);
     }
 }

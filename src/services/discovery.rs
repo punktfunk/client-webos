@@ -18,6 +18,8 @@ pub struct DiscoveredHost {
     /// The advertised certificate fingerprint, lowercase hex; empty without one. An advert is
     /// unauthenticated: only the host's approval of this TV makes it a pairing.
     pub fp_hex: String,
+    /// When this advert last resolved — see [`Discovery::settled_browse`].
+    pub seen: std::time::Instant,
 }
 
 /// IPv4 address and short instance name from a resolved record. IPv4 only (same as other
@@ -102,6 +104,7 @@ fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
         mac,
         os,
         fp_hex: advertised_fp(props.get_property_val_str("fp")),
+        seen: std::time::Instant::now(),
     })
 }
 
@@ -110,6 +113,10 @@ fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
 /// packet can leave the list empty for minutes. Restarting resets that backoff, but also its
 /// traffic-quieting — hence this long, not shorter.
 const REBROWSE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a fresh browse gets before a host it has not found counts as gone: mdns-sd has
+/// queried four times by then (1 s, 2 s, 4 s, 8 s).
+const BROWSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A running browse for punktfunk hosts, drained from the menu tick. No thread of its own —
 /// mdns-sd's daemon already runs one. That daemon re-queries on its own timers, so what keeps
@@ -171,6 +178,12 @@ impl Discovery {
             self.rebrowse();
         }
         found
+    }
+
+    /// When the current browse started, once it has had [`BROWSE_SETTLE`] to find every host
+    /// that is up. An advert last seen before then belongs to a host that has gone quiet.
+    pub fn settled_browse(&self) -> Option<std::time::Instant> {
+        (self.last_browse.elapsed() >= BROWSE_SETTLE).then_some(self.last_browse)
     }
 
     fn rebrowse(&mut self) {
