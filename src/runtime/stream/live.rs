@@ -659,6 +659,8 @@ impl Stream {
         // of a frozen picture — end it here instead.
         if !cx.connected.tend_media() {
             tracing::error!("decoder failed for good — returning to the menu");
+            // The notice says the session ended; without the quit code the host holds it open.
+            cx.connected.disconnect_quit();
             self.notice = Some("Video decoder failed — session ended".to_string());
             return ControlFlow::Break(StreamOutcome::ReturnToMenu);
         }
