@@ -250,13 +250,17 @@ impl App {
         connected.release_input();
         stream.text_input.stop(&self.window);
 
-        // Hand the Bluetooth links back to the TV's sniff policy.
-        drop(pad_link);
+        // Hand the Bluetooth links back to the TV's sniff policy, off this thread: each pad's
+        // reply can take a Luna timeout when the Bluetooth service stalls.
+        let _ = std::thread::Builder::new()
+            .name("pad-link-release".into())
+            .spawn(move || drop(pad_link));
         // Trigger resistance is firmware state that outlives the session — hand every pad back
-        // first or a game that ended with R2 stiff leaves it stiff on the TV home screen. Dropping
-        // the extras also stops each wired card writer. Rumble is likewise pad state.
+        // or a game that ended with R2 stiff leaves it stiff on the TV home screen. Retiring the
+        // extras also stops each wired card writer, on threads of their own. Rumble is likewise
+        // pad state.
         for slot in self.pads.iter_mut() {
-            slot.extras = pad_session::Extras::default();
+            slot.extras.retire();
             if slot.rumble() {
                 let _ = slot.pad.set_rumble(0, 0, 0);
             }
