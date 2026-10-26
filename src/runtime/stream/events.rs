@@ -39,15 +39,13 @@ impl Stream {
             }
             None => (false, false, false),
         };
-        // Preserve HID ownership: outside local overlays its scancode events
-        // must not consume a remote press. All other events visit the gate once.
+        // Preserve HID ownership: outside local overlays its scancode presses must not consume
+        // a remote press. Releases and all other events visit the gate once, so its held set
+        // never keeps a key the host let go of.
         let hid_owned_key = hid_keys
             && !self.disconnect.is_open()
             && !self.ring.open()
-            && matches!(
-                event,
-                Event::KeyDown { scancode: Some(_), .. } | Event::KeyUp { scancode: Some(_), .. }
-            );
+            && matches!(event, Event::KeyDown { scancode: Some(_), .. });
         let key_admitted = !hid_owned_key && self.remote_gate.admits(&event, now);
         let remote = self.remote_keys.edge(&event, key_admitted);
         let remote_press = remote.and_then(|(key, down)| down.then_some(key));
@@ -187,7 +185,9 @@ impl Stream {
                     cx.connected.send_input(&ev);
                 }
             }
-            Event::KeyUp { scancode: Some(sc), .. } if !hid_keys && (key_admitted || osk) => {
+            // Ungated: the held-input ledger drops a release this loop never pressed, and a gate
+            // that changed between the two edges would leave the key down on the host.
+            Event::KeyUp { scancode: Some(sc), .. } => {
                 if let Some(ev) = keyboard::key_event(sc, false) {
                     cx.connected.send_input(&ev);
                 }
@@ -264,7 +264,8 @@ impl Stream {
                     cx.connected.send_input(&ev);
                 }
             }
-            Event::MouseButtonUp { mouse_btn, .. } if !hid_clicks => {
+            // Ungated, as `KeyUp`: a HID mouse that appeared mid-press must not strand the button.
+            Event::MouseButtonUp { mouse_btn, .. } => {
                 if let Some(ev) = mouse::button_event(mouse_btn, false) {
                     cx.connected.send_input(&ev);
                 }
