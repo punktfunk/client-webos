@@ -813,7 +813,10 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
                     }
                 }
                 Err(e) => {
+                    // Once per run of failures: a one-shot change (a trigger let go) must not be
+                    // lost to one refused send, and a dead pad must not respawn senders forever.
                     if !failing {
+                        pending.retry(state);
                         tracing::warn!("DualSense feedback send failed (further errors quiet): {e}");
                         failing = true;
                     }
