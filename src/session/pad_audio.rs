@@ -372,6 +372,11 @@ fn pump(client: &NativeClient, stop: &AtomicBool, envelopes: &Envelopes) -> Resu
     let mut pcm = vec![0f32; MAX_FRAME_SAMPLES];
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = client.next_pad_audio(Duration::from_millis(50)) else {
+            // `None` is a timeout or the plane's end, and an ended plane answers at once: without
+            // this the loop spins a core until teardown sets `stop`.
+            if client.is_session_ended() {
+                break;
+            }
             continue;
         };
         let Some(envelope) = envelopes.get(frame.pad) else {
