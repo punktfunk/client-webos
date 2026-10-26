@@ -408,7 +408,7 @@ fn scan(
             // Opened and isn't ours — settled until the node goes away.
             Probe::Skip => seen.push((path, ino)),
             // Not marked seen: an unopenable node (`ENXIO`) looks like a not-yet-plugged
-            // dongle, so the next rescan retries it.
+            // dongle, so the rescan a device arriving triggers retries it.
             Probe::Unopenable => {}
         }
     }
@@ -783,6 +783,16 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
     }
 }
 
+/// `/proc/bus/input/devices`, hashed: it changes on every add and removal, including a device
+/// that binds a node `/dev/input` already listed, which leaves the directory's mtime alone.
+fn devices_digest() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    devices.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 // Probing empty webOS nodes can take tens of milliseconds each. Keep it off the input reader.
 fn scan_loop(
     shared: &Shared,
@@ -793,7 +803,7 @@ fn scan_loop(
     let mut seen = Vec::new();
     // Instant underflows shortly after boot; use is_none_or.
     let mut last_scan: Option<Instant> = None;
-    let mut dir_mtime = None;
+    let mut dir_marks = (None, None);
     let mut next_source = 1;
     let mut pending = None;
     while !shared.stop.load(Ordering::Relaxed) {
@@ -801,10 +811,14 @@ fn scan_loop(
         if pending.is_none() && due {
             let first = last_scan.is_none();
             last_scan = Some(Instant::now());
-            // 20 empty nodes × 40ms each; gate on mtime.
-            let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
-            if first || mtime != dir_mtime {
-                dir_mtime = mtime;
+            // 20 empty nodes × 40ms each, so gated: on a new node, or on a device binding a node
+            // the directory already listed, which only the kernel's device list shows.
+            let marks = (
+                std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok(),
+                devices_digest(),
+            );
+            if first || marks != dir_marks {
+                dir_marks = marks;
                 let found = scan(&mut seen, shared, remote_gone, &mut next_source);
                 if first && found.is_empty() {
                     tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
@@ -834,8 +848,8 @@ fn scan_loop(
         match removed.recv_timeout(idle) {
             Ok(path) => {
                 seen.retain(|(p, _)| *p != path);
-                // Freed node worth re-probing; reset mtime.
-                dir_mtime = None;
+                // Freed node worth re-probing; forget the marks so the next pass scans.
+                dir_marks = (None, None);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
