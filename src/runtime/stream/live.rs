@@ -636,7 +636,9 @@ impl Stream {
                     disconnect.draw(f);
                 },
             );
-            self.hud.drawn(frame);
+            if !self.hud.drawn(frame) {
+                self.disconnect.redraw_owed();
+            }
         } else if !shown && animating {
             // Close-fade just finished. Confirmed Disconnect: end now, nothing to wipe
             // since the pre-stream UI takes the canvas next.
@@ -644,7 +646,7 @@ impl Stream {
                 return ControlFlow::Break(outcome);
             }
             // Cancel/Back: wipe the last frame so it doesn't stick over the video.
-            self.hud.wipe(cx);
+            let _ = self.hud.wipe(cx);
         }
         ControlFlow::Continue(shown)
     }
