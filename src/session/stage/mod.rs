@@ -590,12 +590,15 @@ mod tests {
 
     /// A loss hold lifts on a reanchor alone. Its frames never reach NDL, so an intra-refresh
     /// wave cannot heal the picture NDL would resume on; an IDR or an RFI anchor predicts only
-    /// from pictures NDL still holds.
+    /// from pictures NDL still holds. The gap's RFI goes first; a keyframe is asked only once the
+    /// throttle runs out with no anchor.
     #[test]
     fn a_loss_hold_lifts_on_a_reanchor_alone() {
         let mut s = stage(None);
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
+        s.recovery.clear_keyframe_throttle();
         assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
+            s.submit(&frame(2, None, false, false)),
             SinkResult::NeedKeyframe
         ));
         for index in 2..40 {
@@ -619,10 +622,7 @@ mod tests {
     #[test]
     fn the_resume_keyframe_keeps_its_au_open() {
         let mut s = stage(None);
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         assert!(s.holding());
         // Throttle expired by host keyframe arrival.
         s.recovery.clear_keyframe_throttle();
@@ -654,10 +654,7 @@ mod tests {
             broken: Arc::clone(&broken),
             ..FakeSink::default()
         });
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         broken.store(true, Ordering::Relaxed);
         assert!(
             matches!(s.submit(&frame(2, None, true, false)), SinkResult::Held),
@@ -680,10 +677,7 @@ mod tests {
     #[test]
     fn only_a_fed_picture_counts() {
         let mut s = stage(None);
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         assert_eq!(s.frames(), 0, "held on arrival");
         assert!(matches!(
             s.submit(&frame(2, None, true, false)),
@@ -766,10 +760,7 @@ mod tests {
             SinkResult::Presented { .. }
         ));
         assert_eq!(h.clock.maps(), 1);
-        assert!(matches!(
-            h.stage.submit(&frame(2, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(h.stage.submit(&frame(2, None, false, true)), SinkResult::Held));
         for index in 3..20 {
             h.clock.set(u64::from(index) * 16_666_667);
             assert!(!matches!(
@@ -800,10 +791,7 @@ mod tests {
             h.clock.set(u64::from(index) * 16_666_667);
             let _ = h.stage.submit(&frame(index, None, index == 1, false));
         }
-        assert!(matches!(
-            h.stage.submit(&frame(6, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(h.stage.submit(&frame(6, None, false, true)), SinkResult::Held));
         // The host's capture clock jumps backwards on the re-anchor; the player clock does not.
         h.clock.set(6 * 16_666_667);
         let _ = h.stage.submit(&WireFrame {

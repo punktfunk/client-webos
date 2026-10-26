@@ -68,8 +68,9 @@ the NDL plane.
 - **Decouple decode dimensions from punch-through rect** — else a 1080p stream on a 4K panel
   punches only the top-left quarter.
 - **Loss recovery required** — no periodic IDRs in the stream. `session::pump::video_pump` calls
-  `note_frame_index()` every frame (throttled RFI on gaps) plus a `request_keyframe()` backstop
-  when `frames_dropped()` climbs.
+  `note_frame_index()` every frame (throttled RFI on gaps). A gap starts the keyframe throttle,
+  so `request_keyframe()` is the backstop for an anchor that hasn't come within 100 ms: an IDR
+  request sent beside the RFI would clear it in core.
 - **Freeze-until-reanchor adapted for NDL**: NDL does decode+present in one opaque call (no split),
   so the client reimplements the skip-until-reanchor subset. A forward gap arms `holding`; frames
   are withheld until one arrives with `FLAG_SOF` (IDR) or a recovery anchor.
@@ -381,7 +382,7 @@ NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` m
 
 AV1 is v2 type 4, as in moonlight-tv and aurora-tv. HEVC presents on arrival; AV1 waits for its PTS (`VideoSinkCaps::holds_pts`), so Lowest latency stamps "now" (`Pacing`'s arrival stamp); Smoothness keeps the mapped stamp, lining up the buffer, slot grid and the plane's extra audio lead. Unverified on glass. Fed 120 fps, AV1 is reported shown at 60 (aurora-tv on a C5, moonlight-tv #529 on a G4); unmeasured here. LG's browser has a Starfish-only 120 fps AV1 game mode (`enableGameLimitedAV1Fps120`, `externalVideoEncodingInfo`), so the limit looks like NDL's, not the decoder's. HDR/10-bit as HEVC; unverified on glass. Plain `strings` hides the impl's 3-letter `VP9`/`AV1`; use `strings -n 3`.
 
-Backpressure: pump samples `render_buffer_length` every 500ms; two ≥8-frame samples freeze+keyframe request (loss path, no flush — kills audio). Measured 0-1, fires decoder stall only.
+Backpressure: pump samples `render_buffer_length` every 500ms for the heartbeat only. It used to freeze on two ≥8-frame samples; smooth and stuttery sessions both read 0-1, so nothing steers on it.
 
 SMP (Starfish Media Pipeline) for webOS 3.5-4.x built+removed (#164): never verified real hardware, C++ shim, ACB sink, Settings row for NDL v1. Those TVs get NDL v1 (H.264/SDR).
 

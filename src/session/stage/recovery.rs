@@ -46,6 +46,8 @@ pub(super) struct Recovery {
 
 impl Recovery {
     pub(super) fn new(stats: Arc<StreamStats>) -> Self {
+        // The stats outlive a decoder reload; a hold the old stage never lifted is not this one's.
+        stats.holding.store(false, Ordering::Relaxed);
         Self {
             stats,
             hold_started: None,
@@ -98,6 +100,9 @@ impl Recovery {
             self.begin_hold();
             if newly_holding {
                 tracing::warn!("loss (frame {}) — freezing", flags.index);
+                // `note_frame_index` already sent the gap's RFI, and an IDR ask clears it in core.
+                // Starting the throttle here makes the IDR the backstop for a late anchor.
+                self.last_keyframe_request = Some(Instant::now());
             }
             // NO FLUSH on the loss hold — this is the last structural difference from `ss4s`, which
             // never flushes mid-stream (its only recovery is unload+load) and does not lose its
