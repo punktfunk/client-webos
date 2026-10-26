@@ -358,7 +358,11 @@ pub struct LeakGuard(());
 
 impl Drop for LeakGuard {
     fn drop(&mut self) {
+        // The teardown that poisoned skipped `quit`, and a warm NDL breaks the next load. Loads
+        // stay suspended until it has run.
+        let _held = suspend_loads();
         if LEAKED_THREADS.fetch_sub(1, Ordering::SeqCst) == 1 {
+            quit();
             tracing::info!(
                 "NDL recovered: the wedged decode thread finished and unloaded cleanly — streaming re-enabled"
             );
