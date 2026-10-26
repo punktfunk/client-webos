@@ -769,6 +769,9 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
         // build will land, so stop writing rather than spend the bus on reports that all fail.
         if bus.as_ref().is_some_and(ls2::Bus::device_unavailable) {
             tracing::info!("DualSense feedback: set has no HID write path for the pad; lane off");
+            if let Some(envelope) = &lane {
+                envelope.disown_coils();
+            }
             break;
         }
         let now = Instant::now();
