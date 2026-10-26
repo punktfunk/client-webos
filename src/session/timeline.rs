@@ -172,6 +172,19 @@ impl Pacing {
         self.min_slack_us.take()
     }
 
+    /// Follow a new source period on the same load. The monotonic floor stays and the clock
+    /// re-anchors on the next frame, as after a loss.
+    pub fn set_source_interval(&mut self, source_interval_ns: u64) {
+        let interval = i64::try_from(source_interval_ns).unwrap_or(i64::MAX).max(1);
+        let frames = self.grid.as_ref().map_or(0, |g| g.max_ahead);
+        self.source_interval_ns = interval;
+        self.smooth_cushion_ns = interval.saturating_mul(frames);
+        if let Some(grid) = &mut self.grid {
+            *grid = SlotGrid::new(interval, frames);
+        }
+        self.reset();
+    }
+
     /// Re-anchor after loss while preserving timestamp monotonicity: recovery does
     /// not flush NDL, so its previous timestamps remain live.
     pub fn reset(&mut self) {
@@ -466,6 +479,29 @@ mod tests {
         assert_eq!(t.source.n, t.due.n);
         assert_eq!(t.source.n, t.assigned.n);
         assert!(t.source.n > 0, "every regular interval was excluded");
+    }
+
+    /// A refresh change re-paces in place: the grid and cushion follow the new period, and no
+    /// stamp goes back, since NDL still holds the old ones.
+    #[test]
+    fn a_new_source_rate_repaces_without_rewinding() {
+        const SIXTY: u64 = 16_666_667;
+        const ONE_TWENTY: u64 = 8_333_333;
+        let mut p = Pacing::new(SIXTY, PresentPriority::Smooth { buffer: 2 }, false);
+        let mut last = 0;
+        for i in 0..10 {
+            last = p.map(i * SIXTY, i * SIXTY);
+        }
+        p.set_source_interval(ONE_TWENTY);
+        assert_eq!(p.source_interval_ns, ONE_TWENTY as i64);
+        assert_eq!(p.smooth_cushion_ns, 2 * ONE_TWENTY as i64);
+        assert_eq!(p.grid.as_ref().map(|g| g.interval_ns), Some(ONE_TWENTY as i64));
+        let base = 10 * SIXTY;
+        for i in 0..10 {
+            let stamp = p.map(base + i * ONE_TWENTY, base + i * ONE_TWENTY);
+            assert!(stamp >= last, "stamp {i} went back after the retime");
+            last = stamp;
+        }
     }
 
     /// Jitter: own slots. Gap: skips. Burst past budget: shares.

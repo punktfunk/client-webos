@@ -101,6 +101,11 @@ pub struct VideoStage {
     stats: Arc<StreamStats>,
     /// NDL host-PTS→player-clock mapping — see `session::timeline::Pacing`.
     pacing: Pacing,
+    /// The intent the pacing runs, after the unpaced fallback.
+    priority: PresentPriority,
+    /// The extra lead the audio plane holds. Only ever raised: monotonic stamps cannot give depth
+    /// back once taken.
+    plane_lead_ms: i64,
     /// AU's mapped timestamp, held open across its pieces. Mapped once per AU; repeated mapping
     /// per piece teaches the mapping the AU's tail arrival and inflates jitter.
     au_base_ns: Option<u64>,
@@ -144,6 +149,9 @@ impl VideoStage {
             audio_plane,
             stats,
             pacing,
+            priority,
+            // What `pipeline` gave a plane carrying the stream's audio.
+            plane_lead_ms: crate::session::timeline::smooth_cushion_ms(stream_hz, cfg.present_priority),
             au_base_ns: None,
             recovery,
             backlog_sampled: None,
@@ -206,6 +214,22 @@ impl VideoStage {
     /// belongs on the heartbeat next to the slack figure and nowhere else.
     pub fn take_cadence_trace(&mut self) -> CadenceTrace {
         self.pacing.take_trace()
+    }
+
+    /// The host now delivers `stream_hz` on this load: the dial's Refresh row changes the rate
+    /// without a new format, so nothing reloads. Re-paces the video and, for a plane carrying the
+    /// stream's audio, raises its lead to the new Smoothness budget when that is larger.
+    pub fn set_stream_hz(&mut self, stream_hz: u32, audio_rides_plane: bool) {
+        let stream_hz = stream_hz.max(1);
+        self.pacing.set_source_interval(1_000_000_000 / u64::from(stream_hz));
+        tracing::info!(stream_hz, "video presentation re-paced");
+        let lead = crate::session::timeline::smooth_cushion_ms(stream_hz, self.priority);
+        if let Some(plane) = self.audio_plane.as_deref().filter(|_| audio_rides_plane) {
+            if lead > self.plane_lead_ms {
+                plane.set_extra_lead_ms(lead);
+                self.plane_lead_ms = lead;
+            }
+        }
     }
 
     /// Audio plane queue depth (ms). Published here because plane depth paces the video.
