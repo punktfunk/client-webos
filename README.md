@@ -62,8 +62,8 @@ This repo is only the webOS-specific client: a host for punktfunk's shared contr
 - **DualSense** — adaptive triggers, lightbar, player LEDs, touchpad, gyro, speakers and haptics over
   Bluetooth and wired (see the note below).
 - **Hosts** — LAN discovery (mDNS) or add a host by IP; PIN pairing with persisted trust, per-host settings.
-- **Host power** — Wake-on-LAN starts a sleeping host from the TV, and a paired host can be put to
-  sleep or shut down on exit when it grants those rights.
+- **Host power** — Wake-on-LAN starts a sleeping host from the TV, and a paired host that grants
+  those rights can be put to sleep or shut down from its card.
 
 > **Controller advanced features need newer webOS version.** Haptics, triggers, speakers, touchpad, and
 > lightbar all rely on the kernel's `hid-playstation` driver, which LG ships only on webOS versions 10+.

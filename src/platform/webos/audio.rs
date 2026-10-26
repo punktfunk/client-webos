@@ -65,17 +65,16 @@ fn ring_capacity(device_samples: u32, channels: u8) -> usize {
 /// It is the right one on the merits rather than by convenience — `AAudio` hands the client a raw
 /// callback and makes it own the buffer, and Wi-Fi power-save bunching lands as underruns, which is
 /// exactly this TV's situation on a radio `docs/NOTES.md` measures with 10-29 s black-hole stalls
-/// on new flows. It is also, field for field, what this client's own local preset used to be
-/// (`base 25 / max 90 / headroom 40 / cap 120`), with the old `deprime_after: 5` **callbacks** now
-/// expressed as `deprime_ms: 60` — core moved that fuse to milliseconds precisely because a
-/// callback count means a different span of time on every device. So there is nothing left for a
-/// local copy to say, and a preset that tracks upstream is one fewer thing to re-tune by hand.
+/// on new flows. It is this client's old local preset (`base 25 / max 90 / headroom 40`) with a
+/// higher hard cap (240 ms, was 120), and `deprime_after: 5` **callbacks** expressed as
+/// `deprime_ms: 60` — a callback count is a different span of time on every device. A preset that
+/// tracks upstream is one fewer thing to re-tune by hand.
 ///
 /// Two invariants worth re-checking if it is ever forked, both of which the parent programme
 /// shipped broken once:
 /// * The smooth shed must fire strictly below the hard trim, or drift correction is dead code.
 ///   `shed_excess_ms()` is `max(headroom/2, 2 × FRAME_MS)` = 20 ms, so the shed point is
-///   target+20 = 45 ms against a trim at `min(target+40, 120)` = 65 ms. 45 < 65. ✓
+///   target+20 = 45 ms against a trim at `min(target+40, hard_cap)` = 65 ms. 45 < 65. ✓
 /// * The base target must clear the device floor. `effective_target` floors at `want + FRAME_MS`;
 ///   at [`DEVICE_BUFFER_FRAMES`] that is 10.67 + 5 = 15.7 ms, under the 25 ms base — so the ring
 ///   cannot oscillate prime → dropout → re-prime. ✓

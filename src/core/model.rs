@@ -26,10 +26,11 @@ pub struct ConnectTarget {
 pub struct KnownHost {
     #[serde(flatten)]
     pub shared: pf_client_core::trust::KnownHost,
-    /// Wake this host when it is picked and found asleep.
+    /// Nothing in this client sets or reads it; it round-trips so the record keeps it.
     pub wol_auto: bool,
-    /// What to do to this host when the app exits (per-host, off by default; sits under
-    /// `wol_auto` in Host power settings — the two are the same switch pointing opposite ways).
+    /// What to do to this host when the app exits, off by default. No row sets it: only a
+    /// document written by an older build carries one. `exit_plan` runs it for the host the last
+    /// stream launched on.
     pub exit_action: ExitAction,
 }
 

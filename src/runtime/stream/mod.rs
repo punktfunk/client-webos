@@ -249,8 +249,9 @@ enum DialWait {
     Quit,
 }
 
-/// Waits for a reconnect's handshake with the toast up, reading input meanwhile. The worker
-/// runs to completion and drops what it built on a give-up, which is the cancel: nothing joins it.
+/// Waits for a reconnect's handshake with the toast up, reading input meanwhile. A give-up drops
+/// the `PendingConnect`, which cancels the attempt and leaves a joiner to tear down whatever it
+/// built.
 fn wait_for_dial(handle: &PendingConnect, events: &mut sdl3::EventPump) -> DialWait {
     let mut exit_held = key_down(WEBOS_EXIT_SCANCODE);
     let mut remote_keys = RemoteKeys::default();
