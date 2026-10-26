@@ -358,7 +358,7 @@ impl Stream {
             cx.connected,
             self.hud.tier(),
             self.native_mode,
-            !cx.pads.is_empty(),
+            pad_mask(cx.pads),
             self.kind_setting,
         ));
         self.ring.input(RingInput::Toggle {
@@ -398,7 +398,7 @@ impl Stream {
                 cx.connected,
                 self.hud.tier(),
                 self.native_mode,
-                !cx.pads.is_empty(),
+                pad_mask(cx.pads),
                 self.kind_setting,
             ));
         }
@@ -456,7 +456,7 @@ impl Stream {
                 self.tap_up = Some((bit, pad, Instant::now() + TAP_PRESS));
             }
             RingCommand::CyclePadMouse => {
-                if let Err(e) = cx.connected.client.cycle_pad_mouse(u16::from(!cx.pads.is_empty())) {
+                if let Err(e) = cx.connected.client.cycle_pad_mouse(pad_mask(cx.pads)) {
                     tracing::warn!("dial: controller mouse: {e}");
                 }
             }
@@ -688,13 +688,21 @@ impl Stream {
 /// within this.
 const RING_FACTS_EVERY: Duration = Duration::from_millis(100);
 
-/// What the dial's slots read this frame. Controller mouse targets pad 0.
+/// Every pad in the session as the wire's pad mask: the controller mouse steps them together.
+/// Indices are lowest-free, so pad 0 may be gone while pad 1 plays.
+pub(super) fn pad_mask(pads: &pads::Pads) -> u16 {
+    pads.iter().fold(0, |mask, slot| {
+        mask | 1u16.checked_shl(u32::from(slot.index)).unwrap_or(0)
+    })
+}
+
+/// What the dial's slots read this frame. The controller mouse targets `pads` ([`pad_mask`]).
 pub(super) fn ring_facts(
     settings: &store::Settings,
     connected: &session::Connected,
     stats: StatsVerbosity,
     native: punktfunk_core::config::Mode,
-    pad: bool,
+    pads: u16,
     pad_type: store::GamepadType,
 ) -> RingFacts {
     let c = &connected.client;
@@ -702,8 +710,8 @@ pub(super) fn ring_facts(
     RingFacts {
         overlay_actions: settings.overlay_actions.clone(),
         stats_tier: stats.label().into(),
-        pad_mouse_target: u16::from(pad),
-        pad_mouse: c.pad_mouse_mode(u16::from(pad)),
+        pad_mouse_target: pads,
+        pad_mouse: c.pad_mouse_mode(pads),
         invert_scroll: c.invert_scroll(),
         pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
         pad_type: pad_type.to_core(),
