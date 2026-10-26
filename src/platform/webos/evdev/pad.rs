@@ -13,7 +13,7 @@ use std::os::unix::io::RawFd;
 
 use punktfunk_core::quic::RichInput;
 
-use super::{abs_range, abs_resolution, bit, device_vendor, events, ABS_X, EV_ABS, EV_SYN, SYN_REPORT};
+use super::{abs_range, abs_resolution, bit, device_vendor, events, ABS_X, EV_ABS, EV_SYN, SYN_DROPPED, SYN_REPORT};
 use crate::platform::webos::gamepad::SONY_VID;
 
 /// A claimed pad node, decoded. Never both at once — they are separate nodes — which is why this
@@ -139,6 +139,8 @@ pub(super) struct Touchpad {
     /// `(min, max)` of `ABS_MT_POSITION_X` / `_Y`, for the 0..=65535 normalization.
     x_range: (i32, i32),
     y_range: (i32, i32),
+    /// After a `SYN_DROPPED`, until the `SYN_REPORT` that sends its lifts.
+    resyncing: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -245,6 +247,7 @@ impl Touchpad {
             fingers: [Finger::default(); 2],
             x_range: abs_range(fd, ABS_MT_POSITION_X),
             y_range: abs_range(fd, ABS_MT_POSITION_Y),
+            resyncing: false,
         }
     }
 }
@@ -268,7 +271,20 @@ fn normalize(x: i32, y: i32, x_range: (i32, i32), y_range: (i32, i32)) -> Option
 /// datagrams at all.
 fn read_touch(pad: &mut Touchpad, buf: &[u8], sink: &impl Fn(RichInput)) {
     for ev in events(buf) {
+        if pad.resyncing && (ev.kind, ev.code) != (EV_SYN, SYN_REPORT) {
+            continue;
+        }
+        pad.resyncing = false;
         match (ev.kind, ev.code) {
+            // Events were lost, a lift possibly among them: lift every finger at the next report.
+            // One still down comes back with its next touch.
+            (EV_SYN, SYN_DROPPED) => {
+                for finger in &mut pad.fingers {
+                    finger.active = false;
+                    finger.dirty = true;
+                }
+                pad.resyncing = true;
+            }
             // A slot the wire can't carry is parked on the last finger, where its coordinates are
             // simply overwritten by a contact that does fit — the pad only ever reports two.
             (EV_ABS, ABS_MT_SLOT) => pad.slot = (ev.value.max(0) as usize).min(pad.fingers.len() - 1),
