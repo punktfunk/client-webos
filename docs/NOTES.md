@@ -157,11 +157,12 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - **The gamepad shortcut is a 1s hold of L1+R1+Start+Select** (`runtime::input::DisconnectChord`), every client's escape chord. It opens disconnect and is also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
 - **Hidden window gets no pointer input.** Keep mapped, fully transparent `RGBA(0,0,0,0)` so NDL shows through (not `.hide()`).
 - **Two independent cursors** — webOS + host over network. Three levers (order matters): `EVIOCGRAB` on evdev (starves compositor), `SDL_webOSCursorVisibility`, `show_cursor`.
-  - **Compositor repaints lazy both ways.** Visibility branches: visible synthesizes event, invisible marks only. Under grab no event arrives; arrow stuck on screen. `Cursor::flush` warps (center when captured, else position). Timer-based workarounds gone.
+  - **Compositor repaints lazy both ways.** Visibility branches: visible synthesizes event, invisible marks only. Under grab no event arrives; arrow stuck on screen. `Cursor::flush` warps (center when hidden, else position). Timer-based workarounds gone.
+  - **webOS 24+ never hides it** (`cursor::can_hide`, `webos_release` ≥ 9). Moving the Magic Remote under a hidden client cursor breaks the pointer TV-wide, past exit, until ~5 min of standby (moonlight-tv#466, same fix there). Capture there keeps the arrow visible and the remote absolute; the TV hides the arrow ~5 s after the remote rests. Not reproduced on the G5 (webOS 11.2) by injecting into the remote's evdev node.
   - **`WEBOS_CURSOR_TIMEOUT=0`** disables compositor auto-hide.
   - **Don't guard `is_cursor_showing()`.** `SDL_ShowCursor` cached; repeat hide is no-op, query wrong while arrow displays.
   - Motion unscaled; damping only masked evdev jitter.
-- **Absolute pointer bounded by panel; capture needs relative.** webOS pointer can't leave screen. Capture switches SDL to relative, warps to centre each motion (`wl_starfish_pointer_set_cursor_position`). `SDL_SetRelativeMouseMode` always returns 0.
+- **Absolute pointer bounded by panel; capture needs relative.** webOS pointer can't leave screen. Capture switches SDL to relative, warps to centre each motion (`wl_starfish_pointer_set_cursor_position`), except on webOS 24+ (above). `SDL_SetRelativeMouseMode` always returns 0.
 - **Real HID mouse bypasses SDL** via `/dev/input/event*` (readable in jail). SDL motion from compositor (smoothed/resampled for remote), jitters in games. `platform::webos::evdev` reads direct. Constraints learned hard way:
   - **Keyboards grabbed both modes, mice only under Capture.** Ungrabbed reaches surface-manager, modifier+click warps to centre. Grabbing fixes it. TV pointer needed for desktop mode.
   - **Grab per node, not event type.** Combo nodes forward pointer too.

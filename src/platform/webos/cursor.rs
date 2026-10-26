@@ -39,6 +39,8 @@ pub struct Cursor {
     mouse: MouseUtil,
     captured: bool,
     sdl_relative: bool,
+    /// See [`can_hide`].
+    may_hide: bool,
     /// Whether the last [`set_compositor_visible`] was actually honoured — see [`Self::flush`].
     compositor_layer: bool,
 }
@@ -49,6 +51,7 @@ impl Cursor {
             mouse,
             captured: false,
             sdl_relative: true,
+            may_hide: can_hide(),
             compositor_layer: false,
         }
     }
@@ -64,6 +67,7 @@ impl Cursor {
     /// Capture the pointer for the host — hidden on both layers, and SDL switched to
     /// relative mode so motion arrives as unbounded deltas instead of coordinates that
     /// stop at the panel edge. Uncaptured is the menu/desktop state: visible, absolute.
+    /// Where the TV can't take a hidden cursor ([`can_hide`]), captured stays visible and absolute.
     pub fn set_captured(&mut self, captured: bool, window: &Window) {
         self.captured = captured;
         self.apply(window);
@@ -76,11 +80,20 @@ impl Cursor {
     /// SDL3 scopes relative mode per window.
     fn apply(&mut self, window: &Window) {
         let _ = OWNER_THREAD.set(std::thread::current().id());
-        self.mouse.show_cursor(!self.captured);
-        self.mouse
-            .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
-        self.compositor_layer = set_compositor_visible(!self.captured);
-        COMPOSITOR_HIDDEN.store(self.captured, Ordering::Relaxed);
+        let hide = self.hidden();
+        self.mouse.show_cursor(!hide);
+        self.mouse.set_relative_mouse_mode(window, self.relative());
+        self.compositor_layer = set_compositor_visible(!hide);
+        COMPOSITOR_HIDDEN.store(hide, Ordering::Relaxed);
+    }
+
+    fn hidden(&self) -> bool {
+        self.captured && self.may_hide
+    }
+
+    /// The fork's relative mode re-centres the pointer per motion, which only a hidden arrow can take.
+    fn relative(&self) -> bool {
+        self.hidden() && self.sdl_relative
     }
 
     /// Nudges the compositor into acting on the last visibility change by warping its pointer —
@@ -89,8 +102,8 @@ impl Cursor {
     /// warp because the fork implements it *as* a warp per motion, and SDL swallows an explicit
     /// one while it is on.
     ///
-    /// Captured, the destination is free (relative mode re-centres anyway) so it is the centre.
-    /// Uncaptured the pointer is the user's again and must not jump, so the warp is to where it
+    /// Hidden, the destination is free (relative mode re-centres anyway) so it is the centre.
+    /// Visible, the pointer is the user's and must not jump, so the warp is to where it
     /// already is — a null move still counts as the event the compositor is waiting for. That
     /// second case is also why an unseen pointer is left alone: SDL reports the origin until a
     /// motion event arrives, and warping there would fling a pointer the TV is drawing mid-screen
@@ -105,7 +118,7 @@ impl Cursor {
         if !self.compositor_layer {
             return;
         }
-        let (x, y) = if self.captured {
+        let (x, y) = if self.hidden() {
             let (w, h) = window.size();
             (w as f32 / 2.0, h as f32 / 2.0)
         } else {
@@ -117,9 +130,27 @@ impl Cursor {
         };
         self.mouse.set_relative_mouse_mode(window, false);
         self.mouse.warp_mouse_in_window(window, x, y);
-        self.mouse
-            .set_relative_mouse_mode(window, self.captured && self.sdl_relative);
+        self.mouse.set_relative_mouse_mode(window, self.relative());
     }
+}
+
+/// Whether this TV takes a hidden client cursor. From webOS 24 (`webos_release` 9) on, moving the
+/// Magic Remote under one breaks the pointer TV-wide, past this app's exit, until the TV sleeps.
+/// There the arrow stays the TV's: aimed absolutely, and hidden by the TV a few seconds after the
+/// remote rests. Pads and a grabbed mouse never move it.
+pub fn can_hide() -> bool {
+    static CAN: OnceLock<bool> = OnceLock::new();
+    *CAN.get_or_init(|| {
+        let webos_major = super::device::webos_major();
+        let can = hides_on(webos_major);
+        tracing::info!(?webos_major, can, "client cursor hide");
+        can
+    })
+}
+
+/// An unread release keeps the hide.
+fn hides_on(webos_major: Option<u32>) -> bool {
+    webos_major.is_none_or(|major| major < 9)
 }
 
 fn set_compositor_visible(visible: bool) -> bool {
@@ -151,4 +182,17 @@ pub fn restore_on_exit() {
         return;
     }
     set_compositor_visible(true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hides_on;
+
+    #[test]
+    fn webos_24_and_later_keep_the_arrow() {
+        assert!(hides_on(Some(8)));
+        assert!(!hides_on(Some(9)));
+        assert!(!hides_on(Some(11)));
+        assert!(hides_on(None));
+    }
 }

@@ -239,10 +239,13 @@ impl Stream {
                 // SDL3 gives f32; wire and injector take whole pixels.
                 let (x, y) = (x as i32, y as i32);
                 if !hid_motion {
-                    // Relative only for the remote alone: SDL's warp emulation is off
-                    // whenever the evdev reader owns motion, so the remote sends
-                    // absolute — also the better fit for a device the user aims.
-                    let relative = cx.settings.cursor_capture() && !self.hid_device_seen;
+                    // Relative only for the remote alone, under a hidden arrow: SDL's warp
+                    // emulation is off whenever the evdev reader owns motion or the arrow
+                    // stays up (`cursor::can_hide`). Otherwise the remote sends absolute —
+                    // also the better fit for a device the user aims.
+                    let relative = cx.settings.cursor_capture()
+                        && !self.hid_device_seen
+                        && crate::platform::webos::cursor::can_hide();
                     let (xrel, yrel) = if relative {
                         self.relative_motion.take(xrel, yrel)
                     } else {
