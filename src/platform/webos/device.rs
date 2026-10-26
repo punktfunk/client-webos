@@ -72,6 +72,13 @@ fn parse_sdk_version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// The webOS release's major from `os_info.json` (`9` = webOS 24).
+pub fn webos_major() -> Option<u32> {
+    json_str_field(os_info(), "webos_release")
+        .and_then(|v| parse_sdk_version(&v))
+        .map(|(major, _)| major)
+}
+
 /// One cached `os_info.json` text — it can't change under a running app.
 fn os_info() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
@@ -330,9 +337,7 @@ pub fn video_caps() -> VideoCaps {
 impl DeviceInfo {
     pub fn detect() -> Self {
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        let webos_major = json_str_field(os_info(), "webos_release")
-            .and_then(|v| parse_sdk_version(&v))
-            .map(|(major, _)| major);
+        let webos_major = webos_major();
         let model = std::fs::read_to_string(DEVICE_INFO)
             .ok()
             .and_then(|t| json_str_field(&t, "product_id"));

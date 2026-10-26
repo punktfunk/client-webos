@@ -71,8 +71,8 @@ impl App {
         // Cosmetic like every overlay frame: a TV panel up at this moment must not end the app.
         // A wipe that could not draw stays owed (`hud::Hud`'s `was_active`).
         let initial_wipe = overlay::wipe(&mut self.console_gl, &self.window, &self.fonts);
-        // Local pointer hidden unless "Cursor capture" is off — otherwise it and the host's own
-        // forwarded-position cursor read as "the pointer doesn't match the mouse".
+        // Local pointer hidden while "Cursor capture" is on, where the TV allows it — otherwise it
+        // and the host's own forwarded-position cursor read as "the pointer doesn't match the mouse".
         let mut cursor = cursor::Cursor::new(self.sdl.mouse());
         cursor.set_captured(settings.cursor_capture(), &self.window);
         cursor.flush(&self.window, &self.events);
