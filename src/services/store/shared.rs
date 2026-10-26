@@ -275,6 +275,21 @@ pub fn set_pin(state: &mut Persisted, key: &str, profile_id: String, pin: bool) 
     true
 }
 
+/// Save (`None` clears) the host profile this TV plays as on a host. A seat profile on the box,
+/// not a settings profile from the catalog. Reports whether it changed.
+pub fn set_profile(state: &mut Persisted, key: &str, profile: Option<pf_client_core::profiles::ProfilePick>) -> bool {
+    let Some(i) = find_known(&state.known_hosts, key) else {
+        tracing::warn!(%key, "profile pick for an unknown host");
+        return false;
+    };
+    let host = &mut state.known_hosts[i];
+    if host.profile == profile {
+        return false;
+    }
+    host.profile = profile;
+    true
+}
+
 /// Drop one profile and every binding or pin that named it: the record never names a profile
 /// nothing resolves. Reports whether it changed.
 pub fn delete_profile(state: &mut Persisted, id: &str) -> bool {
@@ -338,6 +353,24 @@ mod launch_tests {
         assert_eq!(state.known_hosts[0].preset_id.as_deref(), Some(pid.as_str()));
         assert!(bind_host_profile(&mut state, &key, None));
         assert!(!set_pin(&mut state, "10.9.9.9:1", pid, true), "unknown host");
+    }
+
+    /// The picker's save writes the record once, through a card key too; `None` clears it.
+    #[test]
+    fn a_profile_pick_writes_the_record_once() {
+        let mut state = state_with(StreamPreset::new("Work"), |_| {});
+        let key = known_host_key(&state.known_hosts[0]);
+        let pick = Some(pf_client_core::profiles::ProfilePick {
+            id: "kid".into(),
+            display_name: "Kid".into(),
+            remember: true,
+        });
+        assert!(set_profile(&mut state, &format!("{key}\0p1"), pick.clone()));
+        assert!(!set_profile(&mut state, &key, pick.clone()), "a repeat is a no-op");
+        assert_eq!(state.known_hosts[0].profile, pick);
+        assert!(set_profile(&mut state, &key, None));
+        assert!(state.known_hosts[0].profile.is_none());
+        assert!(!set_profile(&mut state, "10.9.9.9:1", pick), "unknown host");
     }
 
     /// Deleting a profile takes its default bind, title bind and pin with it; an unknown id

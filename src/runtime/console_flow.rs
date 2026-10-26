@@ -68,8 +68,8 @@ pub(super) fn run(
         platform: Platform::WebOS,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
         screen: None,
-        // No profile list here yet: a connect names no profile and the host picks.
-        profiles: false,
+        // The host's profile picker: `Service` answers its list, wake and pick.
+        profiles: true,
     };
     // Land back on the shelf the last stream was launched from (`selected_host`). The shell
     // sends that shelf's fetch itself.
