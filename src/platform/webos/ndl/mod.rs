@@ -428,7 +428,7 @@ pub fn ensure_not_poisoned() -> Result<()> {
 const NDK_ROLE_TEMPLATE: &str = "/usr/share/rolegen/templates/NDK.json";
 const MEDIA_PLAYER_BUS: &str = "com.webos.media.smp.";
 
-/// Refuses a connect this install's bus role cannot play. A role is written at install, and a
+/// Refuses a load this install's bus role cannot play. A role is written at install, and a
 /// firmware update that moves the player onto `com.webos.media.smp.*` leaves an older role
 /// without that name: `NDL_DirectMediaLoad` then never returns. Only a reinstall rewrites it.
 /// Probed once a run.
