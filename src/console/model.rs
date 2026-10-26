@@ -249,16 +249,12 @@ impl Service {
         saved
     }
 
-    /// The row for the host the document last had selected, if it is still known and paired —
+    /// The row for the host the last stream was launched on, if it is still known and paired —
     /// what the console enters on.
     pub(crate) fn selected_row(&self) -> Option<HostRow> {
         let state = self.store.snapshot();
-        let (host, port) = state.selected_host.clone()?;
-        let known = state
-            .known_hosts
-            .iter()
-            .find(|h| h.addr == host && h.port == port && h.is_paired())?;
-        Some(self.saved_row(known))
+        let known = &state.known_hosts[shared::find_known(&state.known_hosts, state.last_host_key.as_deref()?)?];
+        known.is_paired().then(|| self.saved_row(known))
     }
 
     fn saved_row(&self, h: &KnownHost) -> HostRow {
@@ -790,15 +786,12 @@ impl Service {
             let Some(i) = shared::find_known(&state.known_hosts, key) else {
                 return false;
             };
-            gone = Some(state.known_hosts.remove(i));
+            let removed = state.known_hosts.remove(i);
             // A host the list no longer shows must not stay selected.
-            if state
-                .selected_host
-                .as_ref()
-                .is_some_and(|(h, p)| gone.as_ref().is_some_and(|g| g.addr == *h && g.port == *p))
-            {
-                state.selected_host = None;
+            if state.last_host_key.as_deref() == Some(shared::known_host_key(&removed).as_str()) {
+                state.last_host_key = None;
             }
+            gone = Some(removed);
             true
         });
         let Some(gone) = gone else {

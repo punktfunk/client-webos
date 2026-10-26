@@ -556,9 +556,11 @@ impl HdrDisplay {
 pub struct Persisted {
     pub settings: pf_client_core::trust::Settings,
     pub known_hosts: Vec<KnownHost>,
-    /// The host the user last had active — so relaunching lands back on its library.
-    /// `(host, port)`, not an index: `known_hosts` order isn't stable across a forget/re-add.
-    pub selected_host: Option<(String, u16)>,
+    /// The row key (`shared::host_key`) of the host the last stream was launched on: the menu
+    /// opens on its shelf and its exit action runs on quit. A key, not `addr:port`: both OS
+    /// installs of a dual-boot box share an address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_host_key: Option<String>,
     /// The app version that last wrote this document (`core::VERSION`). `None` means it
     /// was written before versioning existed — the only signal a future migration gets about
     /// which shape it is reading. `store::load` stamps it on first sight.
@@ -580,7 +582,7 @@ impl Default for Persisted {
         Self {
             settings: crate::core::settings::default_document(),
             known_hosts: Vec::new(),
-            selected_host: None,
+            last_host_key: None,
             version: None,
             profiles: Vec::new(),
         }

@@ -71,8 +71,8 @@ pub(super) fn run(
         // The host's profile picker: `Service` answers its list, wake and pick.
         profiles: true,
     };
-    // Land back on the shelf the last stream was launched from (`selected_host`). The shell
-    // sends that shelf's fetch itself.
+    // Land back on the shelf the last stream was launched from (`Persisted::last_host_key`).
+    // The shell sends that shelf's fetch itself.
     let entry = service
         .selected_row()
         .map_or(ConsoleEntry::Home, |row| ConsoleEntry::Library(Box::new(row)));
@@ -589,18 +589,26 @@ fn start_launch(
         profile,
     };
     let handle = spawn_connect(identity.clone(), target.clone(), settings.clone())?;
+    // The menu reopens on this host's shelf, and its exit action is the one a quit runs.
+    if let Some(key) = known.map(shared::known_host_key) {
+        store.edit(|s| {
+            let changed = s.last_host_key.as_ref() != Some(&key);
+            s.last_host_key = Some(key);
+            changed
+        });
+    }
     Ok((handle, target, settings, gamepad_auto))
 }
 
-/// What to do to the selected host on the way out: the selected host only, and only one that answered its last reachability check — a host already down
-/// costs the whole budget on a connection that cannot complete.
+/// What to do on the way out to the host the last stream was launched on: that host only, and
+/// only if it answered its last reachability check — a host already down costs the whole budget
+/// on a connection that cannot complete.
 fn exit_plan(service: &Service, identity: &(String, String)) -> Option<crate::services::power::ExitPlan> {
     let state = service.store.snapshot();
-    let (host, port) = state.selected_host.clone()?;
-    let known = state.known_hosts.iter().find(|h| h.addr == host && h.port == port)?;
+    let known = &state.known_hosts[shared::find_known(&state.known_hosts, state.last_host_key.as_deref()?)?];
     known.exit_action.action_id()?;
     if !service.is_online(known) {
-        tracing::debug!("exit action skipped: {host} was not reachable");
+        tracing::debug!("exit action skipped: {} was not reachable", known.addr);
         return None;
     }
     Some(crate::services::power::ExitPlan {
