@@ -1,7 +1,7 @@
 //! The in-stream quick-action dial's pad side, in wire bits so it tests without SDL.
 //!
-//! Select+A opens the dial, and so does holding the remote's Yellow key ([`TapHold`]) — for a pad
-//! whose Select cannot be pressed with A. A never reaches the host, and neither does its release. Opening
+//! Select+A opens the dial, and so does a held Yellow on the remote ([`TapHold`]), for a stream
+//! with no pad on this TV. A never reaches the host, and neither does its release. Opening
 //! releases whatever the host still holds, and while the dial is open every press drives it
 //! instead. Buttons still down when it closes stay the dial's until they release, so the B that
 //! closed it never lands in the game.
@@ -143,7 +143,7 @@ impl PadDial {
 }
 
 /// How long Yellow is held to open the dial. A shorter press keeps the key's tap action.
-pub const YELLOW_HOLD: Duration = Duration::from_millis(600);
+const YELLOW_HOLD: Duration = Duration::from_millis(600);
 
 /// What a [`TapHold`] key did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,13 +174,13 @@ impl TapHold {
         }
     }
 
-    /// Reports the press once: a tap after its release, a hold once `hold` has passed.
-    pub fn poll(&mut self, now: Instant, hold: Duration) -> Option<Press> {
+    /// Reports the press once: a tap after its release, a hold once [`YELLOW_HOLD`] has passed.
+    pub fn poll(&mut self, now: Instant) -> Option<Press> {
         if std::mem::take(&mut self.tapped) {
             return Some(Press::Tap);
         }
         let since = self.since?;
-        (now.duration_since(since) >= hold).then(|| {
+        (now.duration_since(since) >= YELLOW_HOLD).then(|| {
             self.since = None;
             Press::Hold
         })
@@ -201,10 +201,10 @@ mod tests {
         let t = Instant::now();
         let mut k = TapHold::default();
         k.edge(true, t);
-        assert_eq!(k.poll(t + YELLOW_HOLD / 2, YELLOW_HOLD), None);
+        assert_eq!(k.poll(t + YELLOW_HOLD / 2), None);
         k.edge(false, t + YELLOW_HOLD / 2);
-        assert_eq!(k.poll(t + YELLOW_HOLD, YELLOW_HOLD), Some(Press::Tap));
-        assert_eq!(k.poll(t + YELLOW_HOLD * 2, YELLOW_HOLD), None, "once");
+        assert_eq!(k.poll(t + YELLOW_HOLD), Some(Press::Tap));
+        assert_eq!(k.poll(t + YELLOW_HOLD * 2), None, "once");
     }
 
     #[test]
@@ -212,10 +212,10 @@ mod tests {
         let t = Instant::now();
         let mut k = TapHold::default();
         k.edge(true, t);
-        assert_eq!(k.poll(t + YELLOW_HOLD, YELLOW_HOLD), Some(Press::Hold));
-        assert_eq!(k.poll(t + YELLOW_HOLD * 2, YELLOW_HOLD), None, "once");
+        assert_eq!(k.poll(t + YELLOW_HOLD), Some(Press::Hold));
+        assert_eq!(k.poll(t + YELLOW_HOLD * 2), None, "once");
         k.edge(false, t + YELLOW_HOLD * 3);
-        assert_eq!(k.poll(t + YELLOW_HOLD * 3, YELLOW_HOLD), None);
+        assert_eq!(k.poll(t + YELLOW_HOLD * 3), None);
     }
 
     #[test]
@@ -224,9 +224,9 @@ mod tests {
         let mut k = TapHold::default();
         k.edge(true, t);
         k.clear();
-        assert_eq!(k.poll(t + YELLOW_HOLD, YELLOW_HOLD), None);
+        assert_eq!(k.poll(t + YELLOW_HOLD), None);
         k.edge(false, t + YELLOW_HOLD);
-        assert_eq!(k.poll(t + YELLOW_HOLD, YELLOW_HOLD), None);
+        assert_eq!(k.poll(t + YELLOW_HOLD), None);
     }
 
     #[test]

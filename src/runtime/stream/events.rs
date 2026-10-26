@@ -204,7 +204,7 @@ impl Stream {
                     PadRoute::Forward => {
                         cx.connected.send_input(&gamepad::bit_event(bit, down, slot.index));
                     }
-                    PadRoute::Open => self.toggle_ring(cx, true),
+                    PadRoute::Open => self.toggle_ring(cx),
                     PadRoute::Menu(ev) => {
                         self.ring.menu(ev);
                     }

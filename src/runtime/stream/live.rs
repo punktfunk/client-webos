@@ -348,15 +348,14 @@ impl Stream {
         }
     }
 
-    /// Opens the dial at screen centre, or closes it if open. `pad` is whether a pad is there to
-    /// drive it, for the slots that act on one.
-    pub(super) fn toggle_ring(&mut self, cx: &mut Cx<'_>, pad: bool) {
+    /// Opens the dial at screen centre, or closes it if open.
+    pub(super) fn toggle_ring(&mut self, cx: &mut Cx<'_>) {
         self.ring.set_facts(&ring_facts(
             cx.settings,
             cx.connected,
             self.hud.tier(),
             self.native_mode,
-            pad,
+            !cx.pads.is_empty(),
             self.kind_setting,
         ));
         self.ring.input(RingInput::Toggle {
@@ -549,13 +548,13 @@ impl Stream {
         if dialog_open {
             self.yellow.clear();
         }
-        match self.yellow.poll(Instant::now(), crate::core::dial::YELLOW_HOLD) {
-            // The open dial swallowed a lone Yellow before the hold existed; it still does.
+        match self.yellow.poll(Instant::now()) {
+            // The open dial swallows a tap.
             Some(Press::Tap) if !self.ring.open() => {
                 cycle_log_overlay();
                 self.hud.redraw_now(); // with the new state
             }
-            Some(Press::Hold) => self.toggle_ring(cx, !cx.pads.is_empty()),
+            Some(Press::Hold) => self.toggle_ring(cx),
             _ => {}
         }
         // Blue raises the IME, so a game needing text (chat, a search box) doesn't require
@@ -670,6 +669,8 @@ impl Stream {
 
     /// Lets go of everything the host holds from this client, and forgets it here too: for when
     /// the matching releases will not arrive (the dial took input, or focus left the app).
+    /// `remote_keys` stays: its releases still arrive under the dial, focus loss resets it on its
+    /// own, and a key forgotten while held would take its next auto-repeat for a fresh press.
     pub(super) fn release_all(&mut self, cx: &mut Cx<'_>) {
         for slot in cx.pads.iter_mut() {
             slot.chord.clear();
@@ -677,7 +678,6 @@ impl Stream {
         }
         cx.connected.release_input();
         self.buttons.release_held(|ev| cx.connected.send_input(ev));
-        self.remote_keys.reset();
     }
 }
 
