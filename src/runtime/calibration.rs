@@ -295,6 +295,11 @@ pub(super) fn run(
         }
         for event in events.poll_iter() {
             use sdl3::event::Event;
+            note_focus(&event);
+            // A thumb resting on a pad's touchpad must not confirm a step.
+            if crate::platform::webos::mouse::is_touch_emulated(&event) {
+                continue;
+            }
             let remote = remote_keys.press(&event);
             let ev = match event {
                 Event::Quit { .. } => break 'screen StreamOutcome::Quit,

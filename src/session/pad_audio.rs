@@ -98,7 +98,8 @@ pub struct Envelope {
     /// Milliseconds since `epoch` of the last speaker frame; `u64::MAX` before the first.
     last_speaker_ms: AtomicU64,
     /// Set by the sender once it has a bus: from then on the coils play the lane and the motor
-    /// envelope stays idle. Never cleared — a bus that opened does not go away mid-session.
+    /// envelope stays idle. Cleared when the set refuses the pad's write path or the wired card
+    /// closes, so the motors take the lane back.
     coils_owned: AtomicBool,
     /// Coil PCM at full rate, for a wired pad. Its card takes 48 kHz on all four channels, so the
     /// 3 kHz decimation the `0x32` report needs would only throw the lane away.
@@ -229,6 +230,11 @@ impl Envelope {
     /// Release USB audio; revert to motor-envelope rumble.
     pub fn release_usb(&self) {
         self.usb_pcm.store(false, Ordering::Relaxed);
+        self.disown_coils();
+    }
+
+    /// The lane's transport is gone: the motor envelope plays the coil frames again.
+    pub fn disown_coils(&self) {
         self.applied.store(0, Ordering::Relaxed);
         self.applied_at_ms.store(u64::MAX, Ordering::Relaxed);
         self.coils_owned.store(false, Ordering::Relaxed);
@@ -366,6 +372,11 @@ fn pump(client: &NativeClient, stop: &AtomicBool, envelopes: &Envelopes) -> Resu
     let mut pcm = vec![0f32; MAX_FRAME_SAMPLES];
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = client.next_pad_audio(Duration::from_millis(50)) else {
+            // `None` is a timeout or the plane's end, and an ended plane answers at once: without
+            // this the loop spins a core until teardown sets `stop`.
+            if client.is_session_ended() {
+                break;
+            }
             continue;
         };
         let Some(envelope) = envelopes.get(frame.pad) else {

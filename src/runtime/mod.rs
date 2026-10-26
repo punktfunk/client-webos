@@ -355,7 +355,7 @@ enum UiOutcome {
     /// A launch was committed; the stream loop takes it from here. Boxed: the shared settings
     /// document inside is hundreds of bytes and the other two arms carry almost nothing.
     Launch(Box<ConnectOutcome>),
-    /// The user (or the OS) asked to close the app, carrying the selected host's exit action
+    /// The user (or the OS) asked to close the app, carrying the last launched host's exit action
     /// UNFIRED — see [`ConnectOutcome::exit_plan`] for why nothing runs it here.
     Quit(Option<crate::services::power::ExitPlan>),
     /// The remote's Blue key: run HDR calibration, then re-enter the menu. Carries the exit

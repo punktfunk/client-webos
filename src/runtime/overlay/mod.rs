@@ -438,6 +438,11 @@ impl ConfirmDialog {
         animating
     }
 
+    /// The last frame did not draw: the next tick draws it again, whatever changed.
+    pub(super) fn redraw_owed(&mut self) {
+        self.last_visual = None;
+    }
+
     pub(super) fn redraw_due(&mut self, animating: bool) -> bool {
         let Some((focus, _, closing)) = self.frame() else {
             return false;

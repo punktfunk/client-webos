@@ -26,7 +26,7 @@ pub struct StreamStats {
     /// `Pacing::note_submitted`. Legitimately negative (that is the whole point), so it carries no
     /// sentinel; `i32::MIN` is "not sampled this window".
     pub pacing_min_slack_us: AtomicI32,
-    /// Audio-plane queue depth in ms (`NdlVideo::audio_plane_lead_ms`). A video figure as much as
+    /// Audio-plane queue depth in ms (`VideoStage::audio_plane_lead_ms`). A video figure as much as
     /// an audio one — NDL paces the picture on this — and can legitimately be negative, so there
     /// is no sentinel: the overlay prints it only on a route that has a plane.
     pub audio_plane_lead_ms: AtomicI32,

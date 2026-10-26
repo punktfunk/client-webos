@@ -169,10 +169,11 @@ impl NdlVideo {
     }
 
     pub fn flush(&self) -> Result<()> {
-        // Never pre-LOADCOMPLETED: flush silently kills audio plane (see NotReady), no buffer
-        // to discard yet. Sink's loss path flushes before play, so guard must live here.
-        // Check feed_unblocked (PIPELINE gate), not plane_ready: video-only load has buffer.
-        if !self.feed_unblocked.load(Ordering::Relaxed) && !LOAD_COMPLETED.fired() {
+        // Never pre-LOADCOMPLETED with a plane: flush silently kills it (see NotReady), and the
+        // feed-anyway latch does not make it safe. Sink's loss path flushes before play, so the
+        // guard lives here. A video-only load has a buffer once its feed is unblocked.
+        let ready = LOAD_COMPLETED.fired() || (!self.audio && self.feed_unblocked.load(Ordering::Relaxed));
+        if !ready {
             return Ok(());
         }
         let _ffi = lock_ffi();

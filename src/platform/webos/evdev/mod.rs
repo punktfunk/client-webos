@@ -65,6 +65,9 @@ const EV_ABS: u16 = 0x03;
 /// End of one report — every `EV_ABS` since the last one describes the same instant, so [`pad`]
 /// only sends contacts and motion samples here.
 const SYN_REPORT: u16 = 0x00;
+/// The kernel's per-client ring overflowed and dropped events, a release possibly among them.
+/// Everything up to the next [`SYN_REPORT`] is a partial report.
+const SYN_DROPPED: u16 = 0x03;
 
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
@@ -328,6 +331,8 @@ struct Device {
     pad: Option<Pad>,
     /// The pad's `Uniq` (its MAC), read once when [`Self::pad`] is claimed.
     uniq: Option<String>,
+    /// After a [`SYN_DROPPED`], until the next [`SYN_REPORT`] ends the broken report.
+    resyncing: bool,
 }
 
 impl Drop for Device {
@@ -403,7 +408,7 @@ fn scan(
             // Opened and isn't ours — settled until the node goes away.
             Probe::Skip => seen.push((path, ino)),
             // Not marked seen: an unopenable node (`ENXIO`) looks like a not-yet-plugged
-            // dongle, so the next rescan retries it.
+            // dongle, so the rescan a device arriving triggers retries it.
             Probe::Unopenable => {}
         }
     }
@@ -449,6 +454,7 @@ fn open_hid(path: &Path, grab_mouse: bool) -> Probe {
         keyboard: false,
         pad: None,
         uniq: None,
+        resyncing: false,
     };
     let rel = event_bits(fd, EV_REL);
     let abs = event_bits(fd, EV_ABS);
@@ -777,6 +783,16 @@ fn reader_loop(sink: &impl Fn(HidReport), shared: &Arc<Shared>) {
     }
 }
 
+/// `/proc/bus/input/devices`, hashed: it changes on every add and removal, including a device
+/// that binds a node `/dev/input` already listed, which leaves the directory's mtime alone.
+fn devices_digest() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    devices.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 // Probing empty webOS nodes can take tens of milliseconds each. Keep it off the input reader.
 fn scan_loop(
     shared: &Shared,
@@ -787,7 +803,7 @@ fn scan_loop(
     let mut seen = Vec::new();
     // Instant underflows shortly after boot; use is_none_or.
     let mut last_scan: Option<Instant> = None;
-    let mut dir_mtime = None;
+    let mut dir_marks = (None, None);
     let mut next_source = 1;
     let mut pending = None;
     while !shared.stop.load(Ordering::Relaxed) {
@@ -795,10 +811,14 @@ fn scan_loop(
         if pending.is_none() && due {
             let first = last_scan.is_none();
             last_scan = Some(Instant::now());
-            // 20 empty nodes × 40ms each; gate on mtime.
-            let mtime = std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok();
-            if first || mtime != dir_mtime {
-                dir_mtime = mtime;
+            // 20 empty nodes × 40ms each, so gated: on a new node, or on a device binding a node
+            // the directory already listed, which only the kernel's device list shows.
+            let marks = (
+                std::fs::metadata("/dev/input").and_then(|m| m.modified()).ok(),
+                devices_digest(),
+            );
+            if first || marks != dir_marks {
+                dir_marks = marks;
                 let found = scan(&mut seen, shared, remote_gone, &mut next_source);
                 if first && found.is_empty() {
                     tracing::info!("no HID mouse/keyboard on /dev/input yet — using SDL input until one appears");
@@ -828,8 +848,8 @@ fn scan_loop(
         match removed.recv_timeout(idle) {
             Ok(path) => {
                 seen.retain(|(p, _)| *p != path);
-                // Freed node worth re-probing; reset mtime.
-                dir_mtime = None;
+                // Freed node worth re-probing; forget the marks so the next pass scans.
+                dir_marks = (None, None);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -896,7 +916,19 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
 /// Decodes one read burst off a mouse/keyboard node — see [`read_device`] for the drain.
 fn decode_hid(dev: &mut Device, buf: &[u8], sink: &impl Fn(HidReport), keys: &KeyActivity) {
     for ev in events(buf) {
+        if dev.resyncing {
+            dev.resyncing = !(ev.kind == EV_SYN && ev.code == SYN_REPORT);
+            continue;
+        }
         match ev.kind {
+            // A reader that fell behind lost events, and a lost release would leave the host
+            // holding it: let go of all this node holds. A key still down returns on its repeat.
+            EV_SYN if ev.code == SYN_DROPPED => {
+                dev.dx = 0;
+                dev.dy = 0;
+                sink(HidReport::Release(dev.source));
+                dev.resyncing = true;
+            }
             EV_REL if dev.mouse => match ev.code {
                 REL_X | REL_Y => {
                     if ev.code == REL_X {
@@ -969,7 +1001,63 @@ fn button_code(code: u16) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_tv_remote_node, RemoteNode};
+    use super::*;
+
+    fn raw(kind: u16, code: u16, value: i32) -> Vec<u8> {
+        let ev = InputEventRaw {
+            time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+            kind,
+            code,
+            value,
+        };
+        // SAFETY: plain `repr(C)` integers, read back as the bytes `events` parses.
+        unsafe { std::slice::from_raw_parts((&raw const ev).cast::<u8>(), std::mem::size_of::<InputEventRaw>()) }
+            .to_vec()
+    }
+
+    /// A dropped report lets go of everything the node held and skips the rest of that report.
+    #[test]
+    fn a_dropped_report_releases_the_node() {
+        // SAFETY: a plain open of a path with no interior NUL; `Device` closes it.
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(fd >= 0);
+        let mut dev = Device {
+            fd,
+            source: 7,
+            path: PathBuf::from("/dev/input/event9"),
+            dx: 0,
+            dy: 0,
+            grabbed: false,
+            grab_warned_for: None,
+            mouse: true,
+            keyboard: false,
+            pad: None,
+            uniq: None,
+            resyncing: false,
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let sink = |report: HidReport| {
+            seen.borrow_mut().push(match report {
+                HidReport::Input(_, ev) => format!(
+                    "down={}",
+                    matches!(ev.kind, punktfunk_core::input::InputKind::MouseButtonDown)
+                ),
+                HidReport::Release(source) => format!("release {source}"),
+                HidReport::Rich(..) => "rich".into(),
+            });
+        };
+        let buf = [
+            raw(EV_KEY, BTN_LEFT, 1),
+            raw(EV_SYN, SYN_REPORT, 0),
+            raw(EV_SYN, SYN_DROPPED, 0),
+            raw(EV_KEY, BTN_RIGHT, 1),
+            raw(EV_SYN, SYN_REPORT, 0),
+            raw(EV_KEY, BTN_RIGHT, 0),
+        ]
+        .concat();
+        decode_hid(&mut dev, &buf, &sink, &KeyActivity::new());
+        assert_eq!(*seen.borrow(), ["down=true", "release 7", "down=false"]);
+    }
 
     #[test]
     fn a_dropped_remote_node_hands_its_path_back_to_the_scanner() {

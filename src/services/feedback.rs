@@ -104,8 +104,43 @@ impl<T: Copy + PartialEq> Pending<T> {
         Some(value)
     }
 
+    /// Puts back a value whose send failed, unless a newer one is already waiting. It goes out
+    /// after the interval `take_due` started.
+    pub fn retry(&mut self, value: T) {
+        if self.value.is_none() {
+            self.offer(value);
+        }
+    }
+
     pub fn sent(&mut self, value: T, now: Instant) {
         self.sent = Some(value);
         self.next_send = Some(now + self.interval);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed send is retried after the interval, and loses to a newer state.
+    #[test]
+    fn a_failed_send_is_retried_once_unless_superseded() {
+        let t0 = Instant::now();
+        let mut p = Pending::new(Duration::from_millis(10));
+        p.offer(1u8);
+        assert_eq!(p.take_due(t0), Some(1));
+        p.retry(1);
+        assert_eq!(p.take_due(t0), None, "the retry waits out the interval");
+        assert_eq!(p.take_due(t0 + Duration::from_millis(10)), Some(1));
+
+        p.offer(2);
+        assert_eq!(p.take_due(t0 + Duration::from_millis(20)), Some(2));
+        p.offer(3);
+        p.retry(2);
+        assert_eq!(
+            p.take_due(t0 + Duration::from_millis(30)),
+            Some(3),
+            "the newer state wins"
+        );
     }
 }

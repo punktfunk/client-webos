@@ -31,7 +31,10 @@ use anyhow::{bail, Result};
 
 use crate::core::media::{VideoSink, VideoSinkCaps};
 
-use super::{arm_load, ensure_init, ensure_not_poisoned, ffi, lock_ffi, mark_frame_fed_logged, NdlCodec, PLAYING};
+use super::{
+    arm_load, ensure_init, ensure_media_role, ensure_not_poisoned, ffi, lock_ffi, mark_frame_fed_logged, NdlCodec,
+    PLAYING,
+};
 use crate::platform::webos::device;
 
 /// The v1 video plane's fixed size, regardless of panel resolution (see the module docs).
@@ -77,6 +80,7 @@ pub struct NdlV1Video {
 impl NdlV1Video {
     /// Open the v1 video plane for a `width`x`height` H.264 stream.
     pub fn load(app_id: &str, width: i32, height: i32, codec: NdlCodec) -> Result<Self> {
+        ensure_media_role()?;
         ensure_not_poisoned()?;
         // Guard against non-H.264: HEVC to v1 is black screen, not error.
         if codec != NdlCodec::H264 {

@@ -200,7 +200,9 @@ impl App {
             green_pressed: false,
             blue_pressed: false,
             yellow: Default::default(),
-            focused: true,
+            // The menu drains the focus edges before this loop exists: Home pressed while
+            // connecting must not start the stream captured under the launcher.
+            focused: window_focused(),
             input_suspended: false,
             tap_up: None,
             disconnect: ConfirmDialog::new(
@@ -248,13 +250,17 @@ impl App {
         connected.release_input();
         stream.text_input.stop(&self.window);
 
-        // Hand the Bluetooth links back to the TV's sniff policy.
-        drop(pad_link);
+        // Hand the Bluetooth links back to the TV's sniff policy, off this thread: each pad's
+        // reply can take a Luna timeout when the Bluetooth service stalls.
+        let _ = std::thread::Builder::new()
+            .name("pad-link-release".into())
+            .spawn(move || drop(pad_link));
         // Trigger resistance is firmware state that outlives the session — hand every pad back
-        // first or a game that ended with R2 stiff leaves it stiff on the TV home screen. Dropping
-        // the extras also stops each wired card writer. Rumble is likewise pad state.
+        // or a game that ended with R2 stiff leaves it stiff on the TV home screen. Retiring the
+        // extras also stops each wired card writer, on threads of their own. Rumble is likewise
+        // pad state.
         for slot in self.pads.iter_mut() {
-            slot.extras = pad_session::Extras::default();
+            slot.extras.retire();
             if slot.rumble() {
                 let _ = slot.pad.set_rumble(0, 0, 0);
             }
@@ -313,6 +319,7 @@ impl Stream {
         let osk = self.text_input.is_shown(cx.window);
         self.text_input.release_if_dismissed(osk, cx.window);
         for event in events.poll_iter() {
+            note_focus(&event);
             self.handle_event(cx, event, now, osk)?;
         }
         self.tick_ring(cx)?;
@@ -355,7 +362,7 @@ impl Stream {
             cx.connected,
             self.hud.tier(),
             self.native_mode,
-            !cx.pads.is_empty(),
+            pad_mask(cx.pads),
             self.kind_setting,
         ));
         self.ring.input(RingInput::Toggle {
@@ -395,7 +402,7 @@ impl Stream {
                 cx.connected,
                 self.hud.tier(),
                 self.native_mode,
-                !cx.pads.is_empty(),
+                pad_mask(cx.pads),
                 self.kind_setting,
             ));
         }
@@ -453,7 +460,7 @@ impl Stream {
                 self.tap_up = Some((bit, pad, Instant::now() + TAP_PRESS));
             }
             RingCommand::CyclePadMouse => {
-                if let Err(e) = cx.connected.client.cycle_pad_mouse(u16::from(!cx.pads.is_empty())) {
+                if let Err(e) = cx.connected.client.cycle_pad_mouse(pad_mask(cx.pads)) {
                     tracing::warn!("dial: controller mouse: {e}");
                 }
             }
@@ -629,7 +636,9 @@ impl Stream {
                     disconnect.draw(f);
                 },
             );
-            self.hud.drawn(frame);
+            if !self.hud.drawn(frame) {
+                self.disconnect.redraw_owed();
+            }
         } else if !shown && animating {
             // Close-fade just finished. Confirmed Disconnect: end now, nothing to wipe
             // since the pre-stream UI takes the canvas next.
@@ -637,7 +646,7 @@ impl Stream {
                 return ControlFlow::Break(outcome);
             }
             // Cancel/Back: wipe the last frame so it doesn't stick over the video.
-            self.hud.wipe(cx);
+            let _ = self.hud.wipe(cx);
         }
         ControlFlow::Continue(shown)
     }
@@ -650,6 +659,8 @@ impl Stream {
         // of a frozen picture — end it here instead.
         if !cx.connected.tend_media() {
             tracing::error!("decoder failed for good — returning to the menu");
+            // The notice says the session ended; without the quit code the host holds it open.
+            cx.connected.disconnect_quit();
             self.notice = Some("Video decoder failed — session ended".to_string());
             return ControlFlow::Break(StreamOutcome::ReturnToMenu);
         }
@@ -685,13 +696,21 @@ impl Stream {
 /// within this.
 const RING_FACTS_EVERY: Duration = Duration::from_millis(100);
 
-/// What the dial's slots read this frame. Controller mouse targets pad 0.
+/// Every pad in the session as the wire's pad mask: the controller mouse steps them together.
+/// Indices are lowest-free, so pad 0 may be gone while pad 1 plays.
+pub(super) fn pad_mask(pads: &pads::Pads) -> u16 {
+    pads.iter().fold(0, |mask, slot| {
+        mask | 1u16.checked_shl(u32::from(slot.index)).unwrap_or(0)
+    })
+}
+
+/// What the dial's slots read this frame. The controller mouse targets `pads` ([`pad_mask`]).
 pub(super) fn ring_facts(
     settings: &store::Settings,
     connected: &session::Connected,
     stats: StatsVerbosity,
     native: punktfunk_core::config::Mode,
-    pad: bool,
+    pads: u16,
     pad_type: store::GamepadType,
 ) -> RingFacts {
     let c = &connected.client;
@@ -699,8 +718,8 @@ pub(super) fn ring_facts(
     RingFacts {
         overlay_actions: settings.overlay_actions.clone(),
         stats_tier: stats.label().into(),
-        pad_mouse_target: u16::from(pad),
-        pad_mouse: c.pad_mouse_mode(u16::from(pad)),
+        pad_mouse_target: pads,
+        pad_mouse: c.pad_mouse_mode(pads),
         invert_scroll: c.invert_scroll(),
         pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
         pad_type: pad_type.to_core(),

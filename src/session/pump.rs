@@ -74,8 +74,10 @@ struct VideoPump {
     /// True when real audio rides the NDL plane; false when the plane is left on its prime, or there
     /// is none.
     audio_rides_plane: bool,
-    /// The pipeline's frame between loads — see `MediaPipeline::reformat`.
+    /// The pipeline's frame between loads — see `MediaPipeline`'s `reformat` field.
     reformat: Arc<Mutex<Option<punktfunk_core::session::Frame>>>,
+    /// The rate the stage paces for — compared against `client.mode()` on every frame.
+    stream_hz: u32,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
     /// Frame-index gaps pre-cover the reassembler's delayed drop accounting.
@@ -104,7 +106,9 @@ impl VideoPump {
         // `slack +0.0 ms` for the two seconds it takes one to arrive.
         stats.pacing_min_slack_us.store(i32::MIN, Ordering::Relaxed);
         let hud = client.hud_shared();
+        let stream_hz = client.mode().refresh_hz;
         Self {
+            stream_hz,
             client,
             stage,
             stats,
@@ -168,6 +172,12 @@ impl VideoPump {
     }
 
     fn on_frame(&mut self, frame: &punktfunk_core::session::Frame) {
+        // Core points `mode()` at a delivered switch before that switch's first frame reaches us.
+        let hz = self.client.mode().refresh_hz;
+        if hz != self.stream_hz {
+            self.stream_hz = hz;
+            self.stage.set_stream_hz(hz, self.audio_rides_plane);
+        }
         // Everything wire-shaped, and nothing else: whether this delivery is decodable at all,
         // and how one AU's pieces fit together, is the stage's bookkeeping.
         let wire = WireFrame {

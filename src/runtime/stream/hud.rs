@@ -149,10 +149,13 @@ impl Hud {
         overlay::drawn(result, &mut self.warned)
     }
 
-    /// Clears the window, so a frame that is done does not stick over the video.
+    /// Clears the window, so a frame that is done does not stick over the video. One that could
+    /// not draw stays owed: [`Self::draw`] retries it while nothing else is shown.
     pub(super) fn wipe(&mut self, cx: &mut Cx<'_>) -> bool {
         let wipe = overlay::wipe(cx.gl, cx.window, cx.fonts);
-        self.drawn(wipe)
+        let wiped = self.drawn(wipe);
+        self.was_active |= !wiped;
+        wiped
     }
 
     /// The overlays' pass, while the stop dialog has no frame of its own on screen

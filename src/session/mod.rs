@@ -11,8 +11,8 @@
 //! stream overlays (Skia on a GL context).
 //!
 //! The module is split by phase: `connect` runs the handshake, `pipeline` builds the decode path
-//! it settled on, `pump` keeps it fed, and `probe` holds the two handshake-only connections
-//! (pairing, speed test). `stage`, `timeline` and `stats` are the shared pieces underneath;
+//! it settled on, `pump` keeps it fed, and `probe` holds the speed test's handshake-only
+//! connection. `stage`, `timeline` and `stats` are the shared pieces underneath;
 //! the bounded teardown join is `services::join`, shared with the platform layer.
 //!
 //! Nothing here touches SDL: the pad-feedback drain, which does, lives with the loop that owns

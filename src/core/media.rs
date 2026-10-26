@@ -152,7 +152,7 @@ pub trait AudioPlane: AudioSink {
     /// feed path. Blocks; caller provides thread. `route` labels the log line.
     fn run_keepalive(&self, stop: &AtomicBool, route: &'static str);
 
-    /// Hold extra queue depth (ms) to pace picture against presentation cushion. FIXED per session;
+    /// Hold extra queue depth (ms) to pace picture against presentation cushion. Raise only:
     /// monotonic stamps can't give depth back once taken. No-op if plane has no lead to move.
     fn set_extra_lead_ms(&self, _ms: i64) {}
 

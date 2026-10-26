@@ -101,6 +101,11 @@ pub struct VideoStage {
     stats: Arc<StreamStats>,
     /// NDL host-PTS→player-clock mapping — see `session::timeline::Pacing`.
     pacing: Pacing,
+    /// The intent the pacing runs, after the unpaced fallback.
+    priority: PresentPriority,
+    /// The extra lead the audio plane holds. Only ever raised: monotonic stamps cannot give depth
+    /// back once taken.
+    plane_lead_ms: i64,
     /// AU's mapped timestamp, held open across its pieces. Mapped once per AU; repeated mapping
     /// per piece teaches the mapping the AU's tail arrival and inflates jitter.
     au_base_ns: Option<u64>,
@@ -144,6 +149,9 @@ impl VideoStage {
             audio_plane,
             stats,
             pacing,
+            priority,
+            // What `pipeline` gave a plane carrying the stream's audio.
+            plane_lead_ms: crate::session::timeline::smooth_cushion_ms(stream_hz, cfg.present_priority),
             au_base_ns: None,
             recovery,
             backlog_sampled: None,
@@ -206,6 +214,22 @@ impl VideoStage {
     /// belongs on the heartbeat next to the slack figure and nowhere else.
     pub fn take_cadence_trace(&mut self) -> CadenceTrace {
         self.pacing.take_trace()
+    }
+
+    /// The host now delivers `stream_hz` on this load: the dial's Refresh row changes the rate
+    /// without a new format, so nothing reloads. Re-paces the video and, for a plane carrying the
+    /// stream's audio, raises its lead to the new Smoothness budget when that is larger.
+    pub fn set_stream_hz(&mut self, stream_hz: u32, audio_rides_plane: bool) {
+        let stream_hz = stream_hz.max(1);
+        self.pacing.set_source_interval(1_000_000_000 / u64::from(stream_hz));
+        tracing::info!(stream_hz, "video presentation re-paced");
+        let lead = crate::session::timeline::smooth_cushion_ms(stream_hz, self.priority);
+        if let Some(plane) = self.audio_plane.as_deref().filter(|_| audio_rides_plane) {
+            if lead > self.plane_lead_ms {
+                plane.set_extra_lead_ms(lead);
+                self.plane_lead_ms = lead;
+            }
+        }
     }
 
     /// Audio plane queue depth (ms). Published here because plane depth paces the video.
@@ -590,12 +614,15 @@ mod tests {
 
     /// A loss hold lifts on a reanchor alone. Its frames never reach NDL, so an intra-refresh
     /// wave cannot heal the picture NDL would resume on; an IDR or an RFI anchor predicts only
-    /// from pictures NDL still holds.
+    /// from pictures NDL still holds. The gap's RFI goes first; a keyframe is asked only once the
+    /// throttle runs out with no anchor.
     #[test]
     fn a_loss_hold_lifts_on_a_reanchor_alone() {
         let mut s = stage(None);
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
+        s.recovery.clear_keyframe_throttle();
         assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
+            s.submit(&frame(2, None, false, false)),
             SinkResult::NeedKeyframe
         ));
         for index in 2..40 {
@@ -619,10 +646,7 @@ mod tests {
     #[test]
     fn the_resume_keyframe_keeps_its_au_open() {
         let mut s = stage(None);
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         assert!(s.holding());
         // Throttle expired by host keyframe arrival.
         s.recovery.clear_keyframe_throttle();
@@ -654,10 +678,7 @@ mod tests {
             broken: Arc::clone(&broken),
             ..FakeSink::default()
         });
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         broken.store(true, Ordering::Relaxed);
         assert!(
             matches!(s.submit(&frame(2, None, true, false)), SinkResult::Held),
@@ -680,10 +701,7 @@ mod tests {
     #[test]
     fn only_a_fed_picture_counts() {
         let mut s = stage(None);
-        assert!(matches!(
-            s.submit(&frame(1, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(s.submit(&frame(1, None, false, true)), SinkResult::Held));
         assert_eq!(s.frames(), 0, "held on arrival");
         assert!(matches!(
             s.submit(&frame(2, None, true, false)),
@@ -766,10 +784,7 @@ mod tests {
             SinkResult::Presented { .. }
         ));
         assert_eq!(h.clock.maps(), 1);
-        assert!(matches!(
-            h.stage.submit(&frame(2, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(h.stage.submit(&frame(2, None, false, true)), SinkResult::Held));
         for index in 3..20 {
             h.clock.set(u64::from(index) * 16_666_667);
             assert!(!matches!(
@@ -800,10 +815,7 @@ mod tests {
             h.clock.set(u64::from(index) * 16_666_667);
             let _ = h.stage.submit(&frame(index, None, index == 1, false));
         }
-        assert!(matches!(
-            h.stage.submit(&frame(6, None, false, true)),
-            SinkResult::NeedKeyframe
-        ));
+        assert!(matches!(h.stage.submit(&frame(6, None, false, true)), SinkResult::Held));
         // The host's capture clock jumps backwards on the re-anchor; the player clock does not.
         h.clock.set(6 * 16_666_667);
         let _ = h.stage.submit(&WireFrame {

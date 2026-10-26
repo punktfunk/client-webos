@@ -4,7 +4,7 @@
 //! through `com.webos.service.bluetooth2`, which a USB pad is not on — it has no Bluetooth link to
 //! address, even though `hid-playstation` still publishes its MAC as `U: Uniq=` (see
 //! `dualsense::bluetooth_address`). The kernel's hidraw node is what reaches a wired pad, and it needs no
-//! service, no CRC and no sniff: one 48-byte `0x02` report per write.
+//! service, no CRC and no sniff: one 63-byte `0x02` report per write (`dualsense::USB_REPORT_LEN`).
 //!
 //! **The node exists, contrary to what this client used to record.** An earlier probe concluded
 //! the jail had no hidraw at all; it ran with no pad plugged in, and `hid-playstation` only creates

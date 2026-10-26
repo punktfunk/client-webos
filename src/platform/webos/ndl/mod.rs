@@ -358,7 +358,11 @@ pub struct LeakGuard(());
 
 impl Drop for LeakGuard {
     fn drop(&mut self) {
+        // The teardown that poisoned skipped `quit`, and a warm NDL breaks the next load. Loads
+        // stay suspended until it has run.
+        let _held = suspend_loads();
         if LEAKED_THREADS.fetch_sub(1, Ordering::SeqCst) == 1 {
+            quit();
             tracing::info!(
                 "NDL recovered: the wedged decode thread finished and unloaded cleanly — streaming re-enabled"
             );
@@ -428,7 +432,7 @@ pub fn ensure_not_poisoned() -> Result<()> {
 const NDK_ROLE_TEMPLATE: &str = "/usr/share/rolegen/templates/NDK.json";
 const MEDIA_PLAYER_BUS: &str = "com.webos.media.smp.";
 
-/// Refuses a connect this install's bus role cannot play. A role is written at install, and a
+/// Refuses a load this install's bus role cannot play. A role is written at install, and a
 /// firmware update that moves the player onto `com.webos.media.smp.*` leaves an older role
 /// without that name: `NDL_DirectMediaLoad` then never returns. Only a reinstall rewrites it.
 /// Probed once a run.

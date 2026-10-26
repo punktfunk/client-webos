@@ -18,8 +18,8 @@ fn button_code(button: MouseButton) -> Option<u32> {
 }
 
 /// Whether this is a mouse event synthesized from a touch device (`which` is
-/// `SDL_TOUCH_MOUSEID`) rather than one a real pointer reported. Dropped at the head of both of
-/// `runtime`'s event loops, so nothing downstream has to know the difference.
+/// `SDL_TOUCH_MOUSEID`) rather than one a real pointer reported. Dropped at the head of every
+/// `runtime` loop that reads the pointer, so nothing downstream has to know the difference.
 ///
 /// A `DualSense` publishes its touchpad as its own absolute/multitouch evdev node, which the
 /// compositor picks up as a touch device; the emulation then holds the left button down for as

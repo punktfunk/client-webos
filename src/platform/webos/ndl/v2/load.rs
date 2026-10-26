@@ -12,8 +12,8 @@ use anyhow::{bail, Result};
 use crate::core::media::NotReady;
 
 use super::super::{
-    arm_load, ensure_init, ensure_not_poisoned, ffi, lock_ffi, settle_before_retry, wait_load_completed, NdlCodec,
-    AUDIO_PRIME_BUDGET, AUDIO_PROVE_BUDGET, LOAD_COMPLETED, LOAD_COMPLETE_TIMEOUT,
+    arm_load, ensure_init, ensure_media_role, ensure_not_poisoned, ffi, lock_ffi, settle_before_retry,
+    wait_load_completed, NdlCodec, AUDIO_PRIME_BUDGET, AUDIO_PROVE_BUDGET, LOAD_COMPLETED, LOAD_COMPLETE_TIMEOUT,
 };
 use super::plane::{plane_config, silence, PRIME_LEAD, PRIME_PACKET_MS, PRIME_RETRY};
 use super::NdlVideo;
@@ -56,6 +56,8 @@ impl NdlVideo {
         audio: Option<Duration>,
         plane_channels: u8,
     ) -> Result<Self> {
+        // Every load, not only a connect's: a stale role hangs the load itself.
+        ensure_media_role()?;
         ensure_not_poisoned()?;
         let fns = ffi::v2()?;
         ensure_init(app_id, true)?;

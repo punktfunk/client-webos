@@ -68,8 +68,9 @@ the NDL plane.
 - **Decouple decode dimensions from punch-through rect** — else a 1080p stream on a 4K panel
   punches only the top-left quarter.
 - **Loss recovery required** — no periodic IDRs in the stream. `session::pump::video_pump` calls
-  `note_frame_index()` every frame (throttled RFI on gaps) plus a `request_keyframe()` backstop
-  when `frames_dropped()` climbs.
+  `note_frame_index()` every frame (throttled RFI on gaps). A gap starts the keyframe throttle,
+  so `request_keyframe()` is the backstop for an anchor that hasn't come within 100 ms: an IDR
+  request sent beside the RFI would clear it in core.
 - **Freeze-until-reanchor adapted for NDL**: NDL does decode+present in one opaque call (no split),
   so the client reimplements the skip-until-reanchor subset. A forward gap arms `holding`; frames
   are withheld until one arrives with `FLAG_SOF` (IDR) or a recovery anchor.
@@ -82,7 +83,7 @@ the NDL plane.
 
 ## DualSense feedback: hidraw when wired, the Bluetooth service otherwise
 
-**Wired pad gets `/dev/hidraw0`**, `root:jailer` read-write (verified non-rooted G5, webOS 10.3). No `/sys/class/hidraw` in jail; identify by `HIDIOCGRAWINFO`. Wired pad: 48-byte `0x02`, no CRC, one syscall/write; same 47-byte block as Bluetooth `0x31`, so all effects work. Bluetooth: needs `0x31` framing+CRC, so `hidraw.rs` claims `BUS_USB` only.
+**Wired pad gets `/dev/hidraw0`**, `root:jailer` read-write (verified non-rooted G5, webOS 10.3). No `/sys/class/hidraw` in jail; identify by `HIDIOCGRAWINFO`. Wired pad: 63-byte `0x02` (shorter is dropped silently), no CRC, one syscall/write; same 47-byte block as Bluetooth `0x31`, so all effects work. Bluetooth: needs `0x31` framing+CRC, so `hidraw.rs` claims `BUS_USB` only.
 
 Adaptive triggers work on a **non-rooted** TV, but not through SDL. Verified end-to-end on G5
 (dev-mode install, `DualSense` over Bluetooth): trigger resistance, section walls and lightbar
@@ -335,7 +336,7 @@ Replaced mapping (fixed `base = player0 + (host_pts - host0)` + lead trim) gone.
   ⚠ Used to SUBSTITUTE fixed for adaptive (no-op at ceiling — 120Hz >~4ms MAD = most). Additive now; every step worth period. Only way past core's one-period cap.
 - ⚠ **Cushion ceiling is STREAM interval, not panel's.** Usually agree but different: bounds frame HOLD time, must follow host cadence. 120fps stream on 60Hz panel would license double-hold source can't justify.
 - **Picture folds ONCE.** Slice-progressive repeats AU PTS across pieces at rising arrivals; per-piece mapping teaches loop tail arrival, inflates jitter by AU duration. `VideoStage::au_base_ns` holds stamp while AU open (every piece same timestamp for NDL). Folded at arrival (core wants it), estimate sees transport process. `snapping()` permanent (VRR needs live on-glass stamps, don't have). `note_off_cadence` wired; infer off-cadence from same-PTS AUs (compositor stamp, driver burst) — folding zero-interval teaches false gap. Returns `ready + cushion` (only advancing answer — anchored repeats, NDL truncates 1ms).
-- **Re-anchor triggers:** freeze-until-reanchor hold, via `reset_timeline`. Source interval snapshotted at build; if mid-session mode change becomes path, fix snapshot.
+- **Re-anchor triggers:** freeze-until-reanchor hold, via `reset_timeline`, and a delivered refresh change (the dial's Refresh row: no new format, so no reload). The pump compares `client.mode()` per frame and `VideoStage::set_stream_hz` re-paces on the same load.
 - **Stamp sequence clamped monotonic per run** (`last_base_ns`): cushion shrinks between frames, NDL mutes on rewind. Only invariant whose break costs audio.
 - `late_stamps` (frames stamped behind player clock, judder) reported as `pacing:` heartbeat/`Pace` overlay.
 - **A/V offset = `plane_lead − cushion`** (`av=` heartbeat, `av ±Nms` overlay). Video pump holds both; both timestamp NDL's `elapsed_ns` (legal). Audio fixed `PLANE_LEAD_MS` ahead, picture mapped cushion ahead. Positive = sound behind. ⚠ Only where real audio (software route: the plane carries only the prime, figure is fiction). ⚠ Stamp domain: NDL decode+panel unobservable, bias picture later, true offset smaller. Trend/sign, never calibration. ⚠ Smoothness doesn't move it: same budget handed to plane (`set_plane_extra_lead_ms`), both shift, stays `PLANE_LEAD_MS − cushion`. Unmatched, deeper settings walk sound ahead of picture, the more audible direction.
@@ -381,7 +382,7 @@ NDL DirectMedia only backend. No decode context; calls through `NdlVideo::ffi` m
 
 AV1 is v2 type 4, as in moonlight-tv and aurora-tv. HEVC presents on arrival; AV1 waits for its PTS (`VideoSinkCaps::holds_pts`), so Lowest latency stamps "now" (`Pacing`'s arrival stamp); Smoothness keeps the mapped stamp, lining up the buffer, slot grid and the plane's extra audio lead. Unverified on glass. Fed 120 fps, AV1 is reported shown at 60 (aurora-tv on a C5, moonlight-tv #529 on a G4); unmeasured here. LG's browser has a Starfish-only 120 fps AV1 game mode (`enableGameLimitedAV1Fps120`, `externalVideoEncodingInfo`), so the limit looks like NDL's, not the decoder's. HDR/10-bit as HEVC; unverified on glass. Plain `strings` hides the impl's 3-letter `VP9`/`AV1`; use `strings -n 3`.
 
-Backpressure: pump samples `render_buffer_length` every 500ms; two ≥8-frame samples freeze+keyframe request (loss path, no flush — kills audio). Measured 0-1, fires decoder stall only.
+Backpressure: pump samples `render_buffer_length` every 500ms for the heartbeat only. It used to freeze on two ≥8-frame samples; smooth and stuttery sessions both read 0-1, so nothing steers on it.
 
 SMP (Starfish Media Pipeline) for webOS 3.5-4.x built+removed (#164): never verified real hardware, C++ shim, ACB sink, Settings row for NDL v1. Those TVs get NDL v1 (H.264/SDR).
 

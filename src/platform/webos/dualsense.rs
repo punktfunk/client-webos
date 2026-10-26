@@ -367,8 +367,8 @@ impl Feedback {
         self.mailbox.replace(self.state);
     }
 
-    /// Releases everything this client took over — both triggers back to no resistance, the
-    /// lightbar handed back to the system.
+    /// Releases everything this client took over: both triggers back to no resistance. The
+    /// lightbar and player LEDs are no longer written, and keep the last colour sent.
     ///
     /// Finalizes the mailbox so later updates cannot overwrite the release.
     /// [`Drop`] joins after its throttled send attempt.
@@ -769,6 +769,9 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
         // build will land, so stop writing rather than spend the bus on reports that all fail.
         if bus.as_ref().is_some_and(ls2::Bus::device_unavailable) {
             tracing::info!("DualSense feedback: set has no HID write path for the pad; lane off");
+            if let Some(envelope) = &lane {
+                envelope.disown_coils();
+            }
             break;
         }
         let now = Instant::now();
@@ -810,7 +813,10 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
                     }
                 }
                 Err(e) => {
+                    // Once per run of failures: a one-shot change (a trigger let go) must not be
+                    // lost to one refused send, and a dead pad must not respawn senders forever.
                     if !failing {
+                        pending.retry(state);
                         tracing::warn!("DualSense feedback send failed (further errors quiet): {e}");
                         failing = true;
                     }
