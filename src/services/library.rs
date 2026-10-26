@@ -281,6 +281,13 @@ pub fn fetch_art(agent: &ureq::Agent, addr: &str, mgmt_port: u16, art_path: &str
     if art_path.starts_with("http://") || art_path.starts_with("https://") {
         return fetch_external_art(art_path);
     }
+    // Appended to the base URL, so anything but a path would re-point it: `@other.host/…`
+    // turns the host's address into userinfo.
+    if !art_path.starts_with('/') {
+        return Err(LibraryError::BadReply(format!(
+            "art path {art_path:?} is not host-relative"
+        )));
+    }
     let url = format!("{}{art_path}", base_url(addr, mgmt_port));
     match agent.get(url.as_str()).header("Accept", ART_ACCEPT).call() {
         Ok(mut resp) => read_art_body(&mut resp, art_path),

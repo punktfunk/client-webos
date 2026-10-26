@@ -69,6 +69,10 @@ const COVER_MAX_W: u32 = 480;
 const COVER_MAX_H: u32 = 720;
 /// Re-encode quality. A cover is photographic and is seen from a couch.
 const COVER_QUALITY: u8 = 85;
+/// The largest cover decoded at all: a Steam hero is 3840 wide. Body size is no bound, since a
+/// 10 MB PNG can expand past this TV's whole memory budget.
+const DECODE_MAX_SIDE: u32 = 4096;
+const DECODE_MAX_ALLOC: u64 = 96 << 20;
 
 /// What [`shrink_cover`] makes of a cover's bytes.
 enum Shrink {
@@ -97,7 +101,15 @@ fn shrink_cover(bytes: &[u8]) -> Shrink {
     if small {
         return Shrink::Keep;
     }
-    let Ok(img) = image::load_from_memory(bytes) else {
+    let Ok(mut reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format() else {
+        return Shrink::Undecodable;
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_MAX_SIDE);
+    limits.max_image_height = Some(DECODE_MAX_SIDE);
+    limits.max_alloc = Some(DECODE_MAX_ALLOC);
+    reader.limits(limits);
+    let Ok(img) = reader.decode() else {
         return Shrink::Undecodable;
     };
     let img = if img.width() > COVER_MAX_W || img.height() > COVER_MAX_H {
