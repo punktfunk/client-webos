@@ -564,12 +564,24 @@ impl Service {
         self.handles.library.begin_fetch();
         // Dropping the old receivers cancels them.
         self.art = None;
+        // Unpinned, this TV's certificate and the covers' fetches go to whoever answers.
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            self.handles.library.set_phase(
+                &req,
+                LibraryPhase::Error {
+                    title: "Couldn't load the library".into(),
+                    body: LibraryError::NotPaired.to_string(),
+                    can_retry: false,
+                },
+            );
+            return;
+        };
         let rx = library::load_games_async(
             addr.to_string(),
             port,
             mgmt,
             self.identity.clone(),
-            shared::parse_fp(fp_hex),
+            Some(pin),
             budget::REQUEST,
         );
         self.games = Some((req, rx));
@@ -975,8 +987,12 @@ impl Service {
     }
 
     fn host_action(&self, addr: String, mgmt: u16, fp_hex: &str, host_name: String, action_id: String, label: String) {
+        // The shell offers power rows on paired hosts only, so a missing pin is a stale row.
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            return;
+        };
+        let pin = Some(pin);
         let identity = self.identity.clone();
-        let pin = shared::parse_fp(fp_hex);
         let console = self.handles.console.clone();
         // A 202 is the last word: the host ends every session and acts a second later, so
         // there is nothing to poll and nothing to undo.
