@@ -153,6 +153,7 @@ pub(super) fn run(
 
         for event in events.poll_iter() {
             use sdl3::event::Event;
+            note_focus(&event);
             // Resolved once, here, and read just below. Never re-derive it.
             let remote = remote_keys.press(&event);
             // A thumb resting on a pad's touchpad must not hover and click rows.

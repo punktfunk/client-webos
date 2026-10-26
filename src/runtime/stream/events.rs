@@ -76,7 +76,15 @@ impl Stream {
             Event::Window {
                 win_event: sdl3::event::WindowEvent::FocusGained,
                 ..
-            } => self.focused = true,
+            } => {
+                self.focused = true;
+                // Focus loss zeroed the sticks on the host; one held through it comes back here.
+                if !self.disconnect.is_open() && !self.ring.open() {
+                    for slot in cx.pads.iter() {
+                        slot.resend_sticks(cx.connected);
+                    }
+                }
+            }
             Event::GamepadAdded { which, .. } => {
                 // Under `Automatic` the handshake settled the pad kind from whatever was
                 // attached at connect time — usually nothing — so a pad arriving now has

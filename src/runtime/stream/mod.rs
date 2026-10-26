@@ -264,6 +264,7 @@ fn wait_for_dial(handle: &PendingConnect, events: &mut sdl3::EventPump) -> DialW
         // Bounded, not blocking: completion and the signal flag never wake SDL.
         crate::platform::webos::input::wait_for_event(Duration::from_millis(20));
         for event in events.poll_iter() {
+            note_focus(&event);
             if matches!(event, sdl3::event::Event::Quit { .. }) {
                 return DialWait::Quit;
             }

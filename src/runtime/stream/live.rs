@@ -200,7 +200,9 @@ impl App {
             green_pressed: false,
             blue_pressed: false,
             yellow: Default::default(),
-            focused: true,
+            // The menu drains the focus edges before this loop exists: Home pressed while
+            // connecting must not start the stream captured under the launcher.
+            focused: window_focused(),
             input_suspended: false,
             tap_up: None,
             disconnect: ConfirmDialog::new(
@@ -313,6 +315,7 @@ impl Stream {
         let osk = self.text_input.is_shown(cx.window);
         self.text_input.release_if_dismissed(osk, cx.window);
         for event in events.poll_iter() {
+            note_focus(&event);
             self.handle_event(cx, event, now, osk)?;
         }
         self.tick_ring(cx)?;

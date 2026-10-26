@@ -3,6 +3,33 @@
 
 use super::*;
 
+/// Whether the window holds input focus, by the last focus edge any loop drained. `true` until
+/// one arrives, so a set that never sends them keeps streams captured as before.
+static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+/// Every loop that drains SDL events passes each one through here. The menu swallows focus
+/// edges, and a stream started under the launcher must know it is not in front.
+pub(super) fn note_focus(event: &sdl3::event::Event) {
+    use sdl3::event::{Event, WindowEvent};
+    let focused = match event {
+        Event::Window {
+            win_event: WindowEvent::FocusGained,
+            ..
+        } => true,
+        Event::Window {
+            win_event: WindowEvent::FocusLost,
+            ..
+        } => false,
+        _ => return,
+    };
+    WINDOW_FOCUSED.store(focused, Ordering::Relaxed);
+}
+
+/// See [`note_focus`].
+pub(super) fn window_focused() -> bool {
+    WINDOW_FOCUSED.load(Ordering::Relaxed)
+}
+
 /// How long the controller chord ([`DisconnectChord`]) must be held before the in-stream
 /// disconnect dialog opens. The chord's buttons are also game input, so it fires on a hold,
 /// not a press — 1s, to match webOS's own long-press threshold on the EXIT gesture.
