@@ -148,7 +148,8 @@ fn type_for_name(name: &str) -> Option<crate::services::store::GamepadType> {
 /// checked since the remote's product string has varied across webOS releases.
 pub fn is_tv_remote(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    name.contains("remote") || name.contains("rcu")
+    // `hid-wiimote` names real pads "Nintendo Wii Remote …".
+    name.contains("rcu") || (name.contains("remote") && !name.contains("nintendo"))
 }
 
 /// Whether the controller with SDL instance id `id` is [the TV's remote](is_tv_remote). Neither
@@ -236,5 +237,23 @@ pub fn axis_event(axis: Axis, value: i16, pad: u8) -> InputEvent {
         x: scaled,
         y: 0,
         flags: u32::from(pad),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The Magic Remote's product strings match; a Nintendo pad named "… Wii Remote …" does not.
+    #[test]
+    fn only_the_tv_remote_reads_as_the_remote() {
+        for remote in ["Smart Remote RCU Input", "LGE M-RCU - Builtin [0]", "LG Magic Remote"] {
+            assert!(super::is_tv_remote(remote), "{remote}");
+        }
+        for pad in [
+            "Nintendo Wii Remote Pro Controller",
+            "Nintendo Wii Remote",
+            "DualSense Wireless Controller",
+        ] {
+            assert!(!super::is_tv_remote(pad), "{pad}");
+        }
     }
 }
