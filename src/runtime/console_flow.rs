@@ -336,9 +336,11 @@ pub(super) fn run(
                             console.session_phase(SessionPhase::Connecting);
                             connect = Some(started);
                         }
+                        // The shell raised its connecting card with the Launch; only a session
+                        // phase takes it down.
                         Err(e) => {
                             tracing::warn!("console: launch refused: {e:#}");
-                            handles.console.set_notice(format!("Couldn't start — {e}"));
+                            console.session_phase(SessionPhase::Failed(&e.to_string()));
                         }
                     }
                 }
