@@ -367,8 +367,8 @@ impl Feedback {
         self.mailbox.replace(self.state);
     }
 
-    /// Releases everything this client took over — both triggers back to no resistance, the
-    /// lightbar handed back to the system.
+    /// Releases everything this client took over: both triggers back to no resistance. The
+    /// lightbar and player LEDs are no longer written, and keep the last colour sent.
     ///
     /// Finalizes the mailbox so later updates cannot overwrite the release.
     /// [`Drop`] joins after its throttled send attempt.

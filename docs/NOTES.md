@@ -83,7 +83,7 @@ the NDL plane.
 
 ## DualSense feedback: hidraw when wired, the Bluetooth service otherwise
 
-**Wired pad gets `/dev/hidraw0`**, `root:jailer` read-write (verified non-rooted G5, webOS 10.3). No `/sys/class/hidraw` in jail; identify by `HIDIOCGRAWINFO`. Wired pad: 48-byte `0x02`, no CRC, one syscall/write; same 47-byte block as Bluetooth `0x31`, so all effects work. Bluetooth: needs `0x31` framing+CRC, so `hidraw.rs` claims `BUS_USB` only.
+**Wired pad gets `/dev/hidraw0`**, `root:jailer` read-write (verified non-rooted G5, webOS 10.3). No `/sys/class/hidraw` in jail; identify by `HIDIOCGRAWINFO`. Wired pad: 63-byte `0x02` (shorter is dropped silently), no CRC, one syscall/write; same 47-byte block as Bluetooth `0x31`, so all effects work. Bluetooth: needs `0x31` framing+CRC, so `hidraw.rs` claims `BUS_USB` only.
 
 Adaptive triggers work on a **non-rooted** TV, but not through SDL. Verified end-to-end on G5
 (dev-mode install, `DualSense` over Bluetooth): trigger resistance, section walls and lightbar
