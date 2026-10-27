@@ -14,11 +14,6 @@
 //! screen stays until something unrelated (a wheel or D-pad press on a node this app doesn't grab)
 //! flushes it. [`Cursor::flush`] supplies that event. Showing is lazy the same way, so releasing
 //! a capture needs the nudge too or the arrow stays gone until a button press.
-//!
-//! Re-asserting the hide on a timer was tried twice and dropped both times — unbounded, and
-//! bounded to the seconds after a capture to chase the arrow the panel repaints on the HDR mode
-//! switch. Neither retracted it: on webOS 26 the compositor re-shows its arrow on pointer
-//! activity regardless, so the loop only spent Wayland requests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -154,11 +149,12 @@ fn hides_on(webos_major: Option<u32>) -> bool {
 }
 
 fn set_compositor_visible(visible: bool) -> bool {
-    // Unresolved (stock SDL3) reports "unsupported", same as a TV without
-    // `wl_webos_input_manager`; the caller then uses SDL's own `show_cursor`.
+    // `SDL_webOSCursorVisibility(true)` shows the arrow. The TV keeps the last value after this app
+    // exits, so an inverted call leaves its pointer hidden TV-wide. Unresolved (stock SDL3) reports
+    // "unsupported", same as a TV without `wl_webos_input_manager`.
     let supported = sdl_webos::fns().is_ok_and(|fns| {
         // SAFETY: plain integer argument, no pointers; caller is the SDL video thread.
-        unsafe { (fns.cursor_visibility)(!visible) }
+        unsafe { (fns.cursor_visibility)(visible) }
     });
     // Logged once, for stray-cursor bug reports.
     if !SUPPORT_LOGGED.swap(true, Ordering::Relaxed) {
