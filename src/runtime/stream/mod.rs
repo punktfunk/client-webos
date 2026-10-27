@@ -335,6 +335,9 @@ pub(super) fn run_inner() -> Result<()> {
             StreamOutcome::ReturnToMenu => {}
         }
     };
+    // A pump flushes the stream's cursor hand-back: SDL's disconnect drops unsent Wayland requests,
+    // and the TV would keep its pointer hidden after this app exits.
+    app.events.pump_events();
     // The one place the app acts on a host's exit behaviour. Every way out of the loop above
     // has already torn down whatever session it had, which is the ordering this action needs:
     // the host refuses a cert-lane power action while a session is live. Blocking, because the
