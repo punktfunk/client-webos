@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="packaging/icon_large.png" alt="punktfunk" width="130">
+<img src="packaging/icon_large.png" alt="Punktfunk" width="130">
 
 <br>
 <br>
@@ -10,7 +10,7 @@
 [![Downloads](https://img.shields.io/github/downloads/punktfunk/client-webos/total?color=a79ff8&label=downloads)](https://github.com/punktfunk/client-webos/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-d2c9fb)](#license)
 
-**Native LG webOS TV client for [punktfunk](https://git.unom.io/unom/punktfunk) — low-latency desktop & game streaming.**
+**Native LG webOS TV client for [Punktfunk](https://git.unom.io/unom/punktfunk) — low-latency desktop & game streaming.**
 
 </div>
 
@@ -22,9 +22,9 @@ older NDL interface. Built directly on the upstream `punktfunk-core` crate (a pi
 `Cargo.toml`).
 
 The app is originally developed by [dyptan.io](https://github.com/dyptan-io) and donated to
-[punktfunk](https://github.com/punktfunk) organization. Built on the [punktfunk](https://git.unom.io/unom/punktfunk)
+[Punktfunk](https://github.com/punktfunk) organization. Built on the [Punktfunk](https://git.unom.io/unom/punktfunk)
 project by **Enrico Bühler ([unom](https://unom.io))** — all credit for the protocol and host implementation belongs there.
-This repo is only the webOS-specific client: a host for punktfunk's shared controller shell (Skia on GL over an SDL3 window), NDL DirectMedia hardware video decode, and webOS packaging.
+This repo is only the webOS-specific client: a host for Punktfunk's shared controller shell (Skia on GL over an SDL3 window), NDL DirectMedia hardware video decode, and webOS packaging.
 
 <details>
 <summary><b>Screenshots</b></summary>
@@ -52,10 +52,10 @@ This repo is only the webOS-specific client: a host for punktfunk's shared contr
 - **Audio** — stereo, 5.1 or 7.1 Opus, decoded in software on the TV. An experimental
   stereo or 5.1 route hands the Opus to the TV's media pipeline instead.
 - **Library** — the host's game library, custom collections and ordering.
-- **Settings profiles** — punktfunk's shared profiles: a named set of overrides (resolution,
+- **Settings profiles** — Punktfunk's shared profiles: a named set of overrides (resolution,
   frame rate, bitrate, codec, HDR, audio, controller) bound to a game, picked per launch, or
   set as a host's default. The same profiles every other client edits.
-- **Interface** — punktfunk's shared controller UI, the same one the desktop and Android clients
+- **Interface** — Punktfunk's shared controller UI, the same one the desktop and Android clients
   use. Driven by a game pad, the Magic Remote, or a keyboard and mouse.
 - **Input** — Magic Remote pointer, gamepads, USB keyboard and mouse. Pointer capture for games,
   absolute pointing for the desktop; the Red button right-clicks.
@@ -78,7 +78,7 @@ This repo is only the webOS-specific client: a host for punktfunk's shared contr
 1. Install [Homebrew Channel](https://www.webosbrew.org/) on the TV.
 2. Homebrew Channel → Configuration → Add repository →
    `https://raw.githubusercontent.com/punktfunk/client-webos/main/repo.json`
-3. punktfunk now appears in the Homebrew Channel app list.
+3. Punktfunk now appears in the Homebrew Channel app list.
 
 That repository serves a build of every commit on `main`. Tagged
 [releases](https://github.com/punktfunk/client-webos/releases) reach the TV through the central
@@ -108,5 +108,5 @@ the rest.
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), matching upstream punktfunk,
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), matching upstream Punktfunk,
 at your option.
