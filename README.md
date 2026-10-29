@@ -106,6 +106,10 @@ the rest.
 [`.env.example`](.env.example). Architecture and on-device gotchas live in
 [`docs/NOTES.md`](docs/NOTES.md) and [`AGENTS.md`](AGENTS.md).
 
+## Use of AI
+
+This project uses AI for writing code. The rules the agents follow are in [AGENTS.md](AGENTS.md).
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), matching upstream Punktfunk,
