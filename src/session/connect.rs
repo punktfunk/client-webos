@@ -304,6 +304,9 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         pin: params.pin,
         identity: Some(params.identity.clone()),
         profile: params.profile.clone(),
+        // LG's video path reads every stream as studio range, and NDL has no range to set.
+        studio_range: true,
+        studio_range_hdr: true,
         // Uncancelable: the connect has its own thread and the caller joins it.
         ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, params.mode, params.timeout)
     })
