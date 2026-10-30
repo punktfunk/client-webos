@@ -407,6 +407,12 @@ impl Service {
             // Presentation only: which profiles ride as cards behind the host's tile.
             ConsoleCmd::SetPin { key, preset_id, pin } => self.set_pin(&key, preset_id, pin),
             ConsoleCmd::FetchProfiles { addr, mgmt, fp_hex } => self.fetch_profiles(addr, mgmt, fp_hex),
+            ConsoleCmd::FetchAvatar {
+                addr,
+                mgmt,
+                fp_hex,
+                url,
+            } => self.fetch_avatar(addr, mgmt, &fp_hex, url),
             ConsoleCmd::WakeProfile { addr, mgmt, fp_hex, id } => self.wake_profile(addr, mgmt, &fp_hex, id),
             ConsoleCmd::SetProfile { key, profile } => self.set_profile(&key, profile),
             // Nothing to do here, each for its own reason:
@@ -492,6 +498,25 @@ impl Service {
                 };
                 console.set_profiles(&fp_hex, answer);
             })
+            .ok();
+    }
+
+    /// A profile's picture for the faces the shell draws. A read that fails leaves the initials.
+    fn fetch_avatar(&self, addr: String, mgmt: u16, fp_hex: &str, url: String) {
+        // The shell asks paired hosts only. Unpinned, this TV's certificate goes to anyone.
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            return;
+        };
+        let console = self.handles.console.clone();
+        let identity = self.identity.clone();
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-avatar".into())
+            .spawn(
+                move || match profiles::fetch_picture(&addr, mgmt, &identity, pin, &url) {
+                    Ok(bytes) => console.set_avatar(&url, bytes),
+                    Err(e) => tracing::debug!("console: picture {url}: {e}"),
+                },
+            )
             .ok();
     }
 
