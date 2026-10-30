@@ -419,8 +419,7 @@ impl Service {
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
             //   to answer it. Wiring one needs the status shape, not just another request.
-            // - `SetClipboard`: `KnownHost` carries no clipboard flag and the stream has no
-            //   clipboard lane to gate, so the toggle would be a control that does nothing.
+            // - `SetClipboard`: the shell offers shared clipboard on no TV but Android's.
             // - `PadTest`: the shell offers the input test on Android and Apple only.
             // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
