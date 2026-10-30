@@ -59,8 +59,10 @@ impl Write for Sink {
                 file.flush()?;
                 if *written >= MAX_LOG_BYTES {
                     rotate(path);
-                    *file = BufWriter::new(open_fresh(path)?);
+                    // Reset first: a reopen that fails must not rotate again on every flush, or
+                    // the previous run's log goes.
                     *written = 0;
+                    *file = BufWriter::new(open_fresh(path)?);
                 }
                 Ok(())
             }
