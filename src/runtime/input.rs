@@ -157,17 +157,30 @@ impl RemoteGate {
     /// Whether `event` may act: anything but a key does, and a key only if the remote pressed
     /// it. A pad's echo has no press behind it, so it, its repeats and its release all fail.
     pub(super) fn admits(&mut self, event: &sdl3::event::Event, now: Instant) -> bool {
-        use sdl3::event::Event;
-        if !self.armed {
-            return true;
-        }
+        use sdl3::event::{Event, WindowEvent};
         // `raw` is the Wayland key, i.e. the same evdev code the remote's node reports. A key the
         // remote lacks never has a press owed to it, so it fails below like an echo.
         let (code, down, repeat) = match *event {
             Event::KeyDown { raw, repeat, .. } => (raw, true, repeat),
             Event::KeyUp { raw, .. } => (raw, false, false),
+            // SDL's releases for a lost focus carry no `raw`, so nothing else clears these.
+            Event::Window {
+                win_event: WindowEvent::FocusLost,
+                ..
+            } => {
+                self.down.clear();
+                return true;
+            }
             _ => return true,
         };
+        if !self.armed {
+            // Noted, so a key held while the gate arms still has its release admitted.
+            self.down.retain(|&c| c != code);
+            if down {
+                self.down.push(code);
+            }
+            return true;
+        }
         self.owed.retain(|&(_, at)| now.duration_since(at) < Self::CLAIM_WINDOW);
         let held = self.down.iter().position(|&c| c == code);
         match (down, held) {
@@ -304,6 +317,32 @@ mod remote_gate_tests {
     /// The remote's Back as SDL3 actually delivers it: nothing but `raw`.
     fn back_key(down: bool) -> Event {
         key(None, None, RemoteKey::Back as u16, down, false)
+    }
+
+    #[test]
+    fn a_key_held_while_the_gate_arms_keeps_its_release() {
+        let (mut gate, t) = (RemoteGate::default(), Instant::now());
+        assert!(gate.admits(&back_key(true), t));
+        gate.armed = true;
+        assert!(gate.admits(&back_key(false), t));
+        assert!(!gate.admits(&back_key(false), t), "that release only");
+    }
+
+    #[test]
+    fn focus_loss_forgets_what_was_held() {
+        let (mut gate, t) = (RemoteGate::armed(), Instant::now());
+        gate.pressed(103, t);
+        assert!(gate.admits(&up_key(true, false), t));
+        let lost = Event::Window {
+            timestamp: 0,
+            window_id: 0,
+            win_event: sdl3::event::WindowEvent::FocusLost,
+        };
+        assert!(gate.admits(&lost, t));
+        assert!(
+            !gate.admits(&up_key(true, false), t),
+            "a pad's echo gets no pass from it"
+        );
     }
 
     #[test]
