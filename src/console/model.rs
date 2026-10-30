@@ -361,7 +361,7 @@ impl Service {
             // The shell closed the card as it sent this; clearing the slot here would close the
             // card of a `Wake` queued behind it.
             ConsoleCmd::CancelWake => self.stop(),
-            ConsoleCmd::Probe => self.start_sweep(),
+            ConsoleCmd::Probe => self.rescan(),
             ConsoleCmd::SpeedTest {
                 key,
                 addr,
@@ -849,6 +849,15 @@ impl Service {
     }
 
     // ---- reachability, rights, wake ------------------------------------------------------
+
+    /// The Rescan tile: look for hosts from scratch, and ask the saved ones who is up.
+    fn rescan(&mut self) {
+        match &mut self.discovery {
+            Some(discovery) => discovery.rebrowse(),
+            None => self.discovery = Discovery::start(),
+        }
+        self.start_sweep();
+    }
 
     fn start_sweep(&mut self) {
         if self.sweep.is_some() {

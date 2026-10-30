@@ -186,7 +186,9 @@ impl Discovery {
         (self.last_browse.elapsed() >= BROWSE_SETTLE).then_some(self.last_browse)
     }
 
-    fn rebrowse(&mut self) {
+    /// Starts the browse over now. [`Self::poll`] does this on its interval; a player asking
+    /// shouldn't have to wait that out.
+    pub fn rebrowse(&mut self) {
         // Without the stop, the old retransmission chain keeps running and they stack one per
         // interval. It also drops the cache, which is what makes hosts resolve from scratch.
         let _ = self.daemon.stop_browse(SERVICE_TYPE);
