@@ -128,6 +128,10 @@ pub(super) fn bring_up(
     registry: Option<&Arc<Envelopes>>,
 ) {
     let Some(slot) = pads.get_mut(id) else { return };
+    // An envelope dropped here can't send its stop, and a level it applied holds until changed.
+    if slot.extras.audio.take().is_some() && slot.rumble() {
+        let _ = slot.pad.set_rumble(0, 0, 0);
+    }
     // Hands back whatever link this pad held before, so the new one does not race it.
     slot.extras.hand_back();
     let link = if slot.is_dualsense(setting) {
