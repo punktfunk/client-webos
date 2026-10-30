@@ -1,12 +1,12 @@
 //! A host's profiles over the management API, on the pinned mTLS lane `library` uses:
-//! `GET /api/v1/profiles/enumerate` for the console's picker, and `POST
+//! `GET /api/v1/profiles/enumerate` for the console's picker, a row's picture, and `POST
 //! /api/v1/profiles/{id}/wake` to start a stopped seat. The rules for using the list live in
 //! `pf_client_core::profiles`, shared with every other client.
 
 use pf_client_core::profiles::ListedProfile;
 
 use crate::services::budget;
-use crate::services::library::{agent, base_url, classify, get_json, LibraryError};
+use crate::services::library::{agent, base_url, classify, fetch_art, get_json, LibraryError};
 
 /// The profiles on the box. `Ok(None)`: it has none, or predates the route (404).
 pub fn fetch(
@@ -17,6 +17,20 @@ pub fn fetch(
 ) -> Result<Option<Vec<ListedProfile>>, LibraryError> {
     let path = "/api/v1/profiles/enumerate";
     none_on_404(get_json(addr, mgmt_port, identity, Some(pin), path, budget::REQUEST))
+}
+
+/// The picture at `path`, a row's `avatar`. Only a path: a row never sends this TV elsewhere.
+pub fn fetch_picture(
+    addr: &str,
+    mgmt_port: u16,
+    identity: &(String, String),
+    pin: [u8; 32],
+    path: &str,
+) -> Result<Vec<u8>, LibraryError> {
+    if !path.starts_with('/') {
+        return Err(LibraryError::BadReply(format!("picture {path:?} is not host-relative")));
+    }
+    fetch_art(&agent(identity, Some(pin))?, addr, mgmt_port, path)
 }
 
 fn none_on_404<T>(answer: Result<T, LibraryError>) -> Result<Option<T>, LibraryError> {
@@ -47,6 +61,13 @@ pub fn wake(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_must_be_a_path_on_the_host() {
+        let id = (String::new(), String::new());
+        let read = fetch_picture("10.0.0.2", 47990, &id, [0; 32], "https://elsewhere.example/x.png");
+        assert!(matches!(read, Err(LibraryError::BadReply(_))));
+    }
 
     /// Only a 404 means "no profiles": any other failure is the host not answering the ask.
     #[test]

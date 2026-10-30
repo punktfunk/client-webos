@@ -366,6 +366,7 @@ mod launch_tests {
             id: "kid".into(),
             display_name: "Kid".into(),
             remember: true,
+            ..Default::default()
         });
         assert!(set_profile(&mut state, &format!("{key}\0p1"), pick.clone()));
         assert!(!set_profile(&mut state, &key, pick.clone()), "a repeat is a no-op");
