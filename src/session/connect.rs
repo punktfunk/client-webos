@@ -370,6 +370,7 @@ pub fn connect(params: &ConnectParams, attempt: &ConnectAttempt) -> Result<Conne
             // us: end it deliberately rather than leave it lingering for a stream that isn't
             // coming — the same teardown `PendingConnect`'s drop gives a connect that finished.
             client.disconnect_quit();
+            crate::platform::webos::ndl::quit_after_failed_connect();
             return Err(e);
         }
     };

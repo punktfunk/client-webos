@@ -3,8 +3,11 @@
 //! /api/v1/profiles/{id}/wake` to start a stopped seat. The rules for using the list live in
 //! `pf_client_core::profiles`, shared with every other client.
 
+use std::path::Path;
+
 use pf_client_core::profiles::ListedProfile;
 
+use crate::services::art;
 use crate::services::budget;
 use crate::services::library::{agent, base_url, classify, fetch_art, get_json, LibraryError};
 
@@ -31,6 +34,30 @@ pub fn fetch_picture(
         return Err(LibraryError::BadReply(format!("picture {path:?} is not host-relative")));
     }
     fetch_art(&agent(identity, Some(pin))?, addr, mgmt_port, path)
+}
+
+/// Hands `show` this TV's copy of the picture at `path`, then the host's when it differs. The copy
+/// keeps a face up with the host off. A `?v=` URL names its bytes, so a hit ends there; a bare one,
+/// all a host before 0.46 sends, can change under the hit, so `read` still runs.
+pub fn load_picture(
+    dir: &Path,
+    path: &str,
+    read: impl FnOnce() -> Result<Vec<u8>, LibraryError>,
+    mut show: impl FnMut(Vec<u8>),
+) -> Result<(), LibraryError> {
+    let kept = art::cached_picture(dir, path);
+    if let Some(bytes) = &kept {
+        show(bytes.clone());
+        if path.contains("?v=") {
+            return Ok(());
+        }
+    }
+    let bytes = read()?;
+    if kept.as_ref() != Some(&bytes) {
+        art::store_picture(dir, path, &bytes);
+        show(bytes);
+    }
+    Ok(())
 }
 
 fn none_on_404<T>(answer: Result<T, LibraryError>) -> Result<Option<T>, LibraryError> {
@@ -67,6 +94,35 @@ mod tests {
         let id = (String::new(), String::new());
         let read = fetch_picture("10.0.0.2", 47990, &id, [0; 32], "https://elsewhere.example/x.png");
         assert!(matches!(read, Err(LibraryError::BadReply(_))));
+    }
+
+    #[test]
+    fn a_kept_picture_shows_before_the_host_answers() {
+        let dir = std::env::temp_dir().join(format!("pf-picture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let load = |path: &str, host: Result<&[u8], LibraryError>| {
+            let mut shown = Vec::new();
+            let result = load_picture(&dir, path, || host.map(<[u8]>::to_vec), |b| shown.push(b));
+            (result.is_ok(), shown)
+        };
+        let down = || Err(LibraryError::NotPaired);
+
+        // First sight: the host's bytes, kept.
+        assert_eq!(load("/a?v=1", Ok(b"one")), (true, vec![b"one".to_vec()]));
+        // A versioned hit never reads the host, so a host that is off still shows it.
+        assert_eq!(load("/a?v=1", down()), (true, vec![b"one".to_vec()]));
+        // Nothing kept and no host: the initials stay.
+        assert_eq!(load("/b", down()), (false, vec![]));
+
+        assert_eq!(load("/b", Ok(b"old")), (true, vec![b"old".to_vec()]));
+        // A bare URL is read again: the same bytes draw nothing new.
+        assert_eq!(load("/b", Ok(b"old")), (true, vec![b"old".to_vec()]));
+        // New bytes follow the copy, and the next launch starts from them.
+        let replaced = vec![b"old".to_vec(), b"new".to_vec()];
+        assert_eq!(load("/b", Ok(b"new")), (true, replaced));
+        assert_eq!(load("/b", down()), (false, vec![b"new".to_vec()]));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Only a 404 means "no profiles": any other failure is the host not answering the ask.

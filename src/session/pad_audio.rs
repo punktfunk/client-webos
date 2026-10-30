@@ -145,13 +145,11 @@ impl Envelope {
     }
 
     /// The motor pair the main loop should write now, if any: `Some((low, high))` for a changed
-    /// level (rate-limited), `Some((0, 0))` once when the envelope expires, `None` otherwise.
+    /// level (rate-limited), `Some((0, 0))` once when the envelope expires or the coils are
+    /// claimed, `None` otherwise. A claim can land on an applied level, and that holds until changed.
     pub fn take_change(&self) -> Option<(u16, u16)> {
-        if self.coils_owned() {
-            return None;
-        }
         let now = self.now_ms();
-        if !self.active() {
+        if self.coils_owned() || !self.active() {
             return self.owning.swap(false, Ordering::Relaxed).then(|| {
                 self.applied.store(0, Ordering::Relaxed);
                 (0, 0)
@@ -521,6 +519,20 @@ mod tests {
         std::thread::sleep(HOLD + Duration::from_millis(20));
         assert_eq!(env.take_change(), Some((0, 0)), "one explicit zero on expiry");
         assert_eq!(env.take_change(), None, "and only one");
+    }
+
+    #[test]
+    fn a_claim_stops_the_level_the_envelope_applied() {
+        let env = Envelope::new();
+        env.publish(0.5, 0.0);
+        assert!(env.take_change().is_some_and(|(low, _)| low > 0));
+        env.own_usb();
+        assert_eq!(
+            env.take_change(),
+            Some((0, 0)),
+            "wire rumble can't stop it: coils are arriving"
+        );
+        assert_eq!(env.take_change(), None, "and only once");
     }
 
     #[test]

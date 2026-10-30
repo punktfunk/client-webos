@@ -1,7 +1,7 @@
-//! The per-host cover-art disk cache the console shell reads and fills. Covers are kept as
-//! small JPEGs, bounded per host, and dropped with the host.
+//! The per-host art disk cache the console shell reads and fills: covers as small JPEGs, profile
+//! pictures as they came. Both are bounded per host and dropped with the host.
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Per-host disk budget for covers. Well over a hundred stay resident; a miss costs one LAN
 /// fetch.
@@ -27,18 +27,42 @@ fn cache_dir(host: &str, port: u16) -> PathBuf {
     cache_root().join(host_key(host, port))
 }
 
-/// Drops every cache directory that isn't one of `known`'s (best-effort).
+/// A host's picture directory name. By pin: an ask carries no stream port, and two systems booted
+/// behind one address each have their own pictures at the same URLs.
+fn picture_key(fp_hex: &str) -> String {
+    cache_name(&format!("pictures_{}", fp_hex.to_ascii_lowercase()))
+}
+
+pub(crate) fn picture_dir(fp_hex: &str) -> PathBuf {
+    cache_root().join(picture_key(fp_hex))
+}
+
+/// The bytes `dir` holds for the picture at `url`. Pictures stay verbatim: the host caps them at
+/// 1 MiB, and [`shrink_cover`]'s JPEG would lose their transparency.
+pub(crate) fn cached_picture(dir: &Path, url: &str) -> Option<Vec<u8>> {
+    std::fs::read(dir.join(cache_name(url))).ok().filter(|b| !b.is_empty())
+}
+
+pub(crate) fn store_picture(dir: &Path, url: &str, bytes: &[u8]) {
+    let _ = std::fs::create_dir_all(dir);
+    write_cover(&dir.join(cache_name(url)), bytes);
+}
+
+/// Drops every cache directory that isn't one of `known`'s, and bounds the rest (best-effort).
 ///
 /// The one expression of "a host's art outlives the host exactly as long as the host does".
 /// Stated against the whole host list rather than against a single removal, so every way a host
 /// can leave is covered by construction — forgetting one, editing its address (a remove plus an
 /// upsert), a reset or torn `settings.json`, a migration — rather than each needing its own call
 /// at its own site. [`prune_cache`] bounds a host's directory; nothing else bounds their number.
+/// Pruning here is what bounds a picture directory: a replaced picture leaves its old URL's file.
 ///
 /// The filesystem work runs on its own thread: the caller is the menu's bring-up or a keypress
 /// (`console::model::Service`), and unlinking a stale host's quota is up to ~190 files.
 pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
-    let keep: HashSet<String> = known.iter().map(|h| host_key(&h.addr, h.port)).collect();
+    let covers = known.iter().map(|h| host_key(&h.addr, h.port));
+    let pictures = known.iter().map(|h| picture_key(&h.fp_hex));
+    let keep: HashSet<String> = covers.chain(pictures).collect();
     std::thread::Builder::new()
         .name("punktfunk-webos-art-gc".into())
         .spawn(move || {
@@ -50,6 +74,7 @@ pub fn reconcile_host_caches(known: &[crate::core::model::KnownHost]) {
                     .file_name()
                     .is_some_and(|n| keep.contains(n.to_string_lossy().as_ref()))
                 {
+                    prune_cache(&path);
                     continue;
                 }
                 tracing::info!("art: dropping orphaned cache {}", path.display());
@@ -179,7 +204,7 @@ impl CoverCache {
     }
 
     /// Writes one entry and keeps `total` in step, pruning once it runs over budget.
-    fn put(&mut self, path: &std::path::Path, bytes: &[u8]) {
+    fn put(&mut self, path: &Path, bytes: &[u8]) {
         let old_len = path.metadata().map_or(0, |meta| meta.len());
         if write_cover(path, bytes) {
             self.total = self.total.saturating_sub(old_len).saturating_add(bytes.len() as u64);
@@ -191,14 +216,14 @@ impl CoverCache {
 }
 
 /// Atomic replacement prevents interrupted writes from poisoning the cache.
-fn write_cover(path: &std::path::Path, bytes: &[u8]) -> bool {
+fn write_cover(path: &Path, bytes: &[u8]) -> bool {
     crate::services::atomic::write_parts(path, &[bytes], "cover cache").is_ok()
 }
 
 /// Whether a cache entry is stale: a `.tmp` left by a kill mid-write, or the decoded `.raw` and
 /// `.hero` art older builds kept beside the covers. `cache_name` leaves only ASCII
 /// alphanumerics in an id, so a marker can never be part of one.
-fn is_stale(path: &std::path::Path) -> bool {
+fn is_stale(path: &Path) -> bool {
     path.file_name()
         .map(|n| n.to_string_lossy())
         .is_some_and(|n| n.ends_with(".tmp") || n.ends_with(".raw") || n.ends_with(".hero"))
@@ -210,7 +235,7 @@ fn is_stale(path: &std::path::Path) -> bool {
 /// The quota is per host directory, so a host with a huge library cannot evict another host's
 /// art — and forgetting a host ([`reconcile_host_caches`]) reclaims exactly its own share.
 /// Eviction is by write time, not use time.
-fn prune_cache(dir: &std::path::Path) -> u64 {
+fn prune_cache(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };

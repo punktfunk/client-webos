@@ -656,7 +656,7 @@ fn pad_sample(slot: &pads::Slot) -> MenuSample {
 /// instead of cancelling, and one `MenuNav` keeps one repeat clock.
 fn merge_samples(samples: impl Iterator<Item = MenuSample>) -> MenuSample {
     let mut out = MenuSample::default();
-    let mut best = -1i32;
+    let mut best = -1i64;
     for s in samples {
         for (o, b) in out.buttons.iter_mut().zip(s.buttons) {
             *o |= b;
@@ -664,7 +664,7 @@ fn merge_samples(samples: impl Iterator<Item = MenuSample>) -> MenuSample {
         for (o, b) in out.dpad.iter_mut().zip(s.dpad) {
             *o |= b;
         }
-        let mag = i32::from(s.lx).pow(2) + i32::from(s.ly).pow(2);
+        let mag = i64::from(s.lx).pow(2) + i64::from(s.ly).pow(2);
         if mag > best {
             best = mag;
             out.lx = s.lx;

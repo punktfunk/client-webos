@@ -406,6 +406,14 @@ pub fn defer_teardown(teardown: impl FnOnce() + Send + 'static) {
     }));
 }
 
+/// Undoes the init of a connect that ended with no session to quit it: a warm NDL breaks the next
+/// load. A thread the attempt leaked may still be inside NDL, so its [`LeakGuard`] quits instead.
+pub fn quit_after_failed_connect() {
+    if LEAKED_THREADS.load(Ordering::SeqCst) == 0 {
+        defer_teardown(quit);
+    }
+}
+
 /// Blocks until a [`defer_teardown`] still in flight has finished. Bounded: every join in a
 /// session teardown has a timeout.
 pub fn await_teardown() {

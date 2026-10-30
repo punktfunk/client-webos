@@ -893,7 +893,7 @@ fn read_device(dev: &mut Device, sink: &impl Fn(HidReport), keys: &KeyActivity) 
         // SAFETY: reading into a local byte buffer of exactly `buf.len()`.
         let n = unsafe { libc::read(dev.fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n <= 0 {
-            return; // EAGAIN on an empty non-blocking node, or the node went away
+            break; // EAGAIN on an empty non-blocking node, or the node went away
         }
         let n = n as usize;
         if let Some(pad) = dev.pad.as_mut() {
