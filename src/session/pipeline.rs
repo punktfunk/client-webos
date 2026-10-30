@@ -282,6 +282,7 @@ fn spawn_video_thread(
         stream_hz: client.mode().refresh_hz,
         report_decode_latency: client.wants_decode_latency(),
         present_priority,
+        hevc: client.video_format().codec == punktfunk_core::quic::CODEC_HEVC,
     };
     let audio_rides_plane = route.on_ndl_plane();
     let (client, reformat, stop, stats) = (client.clone(), reformat.clone(), stop.clone(), stats.clone());

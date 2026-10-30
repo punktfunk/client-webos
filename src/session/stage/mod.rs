@@ -19,10 +19,12 @@ use crate::session::timeline::{ms, CadenceTrace, Pacing, PacingHealth};
 use crate::session::StreamStats;
 
 mod parts;
+mod poc_bridge;
 mod recovery;
 mod timing;
 
 use parts::{AuParts, PartStep};
+use poc_bridge::PocBridge;
 use recovery::{HoldGate, Recovery};
 use timing::FeedTiming;
 
@@ -79,10 +81,16 @@ pub struct SinkConfig {
     pub present_priority: PresentPriority,
     /// Whether the host asked for decode-latency reports (its ABR controller).
     pub report_decode_latency: bool,
+    /// The stream is HEVC, whose anchors may need a POC bridge.
+    pub hevc: bool,
 }
 
 /// Sampling cadence for the backlog diagnostic: one FFI call each.
 const BACKLOG_SAMPLE: Duration = Duration::from_millis(500);
+
+/// How far each POC bridge's stamp leads the next. They decode to the anchor's own picture, so
+/// any order-preserving stamp does.
+const BRIDGE_LEAD_NS: u64 = 1_000_000;
 
 /// Everything between "an access unit arrived" and "the decoder has been fed", on any backend.
 ///
@@ -123,6 +131,8 @@ pub struct VideoStage {
     /// Completed access units fed this session. A plain counter, mirrored into the overlay's cell
     /// by the pump — nothing else writes it.
     frames: u64,
+    /// HEVC only: what an anchor needs fed ahead of it after a long hold.
+    poc_bridge: Option<PocBridge>,
 }
 
 impl VideoStage {
@@ -159,6 +169,7 @@ impl VideoStage {
             timing,
             parts_fed: 0,
             frames: 0,
+            poc_bridge: cfg.hevc.then(PocBridge::default),
         }
     }
 
@@ -325,15 +336,27 @@ impl VideoStage {
         if self.sink.is_dead() {
             return SinkResult::Dead;
         }
-        match self.recovery.gate(&flags) {
-            HoldGate::Feed => {}
+        let bridges = match self.recovery.gate(&flags) {
+            HoldGate::Feed => Vec::new(),
             // The real timeline just jumped (freeze then reanchor) — nothing about the pre-hold
             // accumulator is worth continuing.
-            HoldGate::Resume => self.reset_timeline(),
+            HoldGate::Resume => {
+                self.reset_timeline();
+                self.poc_bridge
+                    .as_mut()
+                    .map_or_else(Vec::new, |bridge| bridge.bridges(au, flags.index))
+            }
             HoldGate::Skip(result) => return result,
-        }
+        };
 
         let base_ns = self.au_stamp_ns(pts_ns, flags.partial);
+        for (i, bridge) in bridges.iter().enumerate() {
+            let lead = (bridges.len() - i) as u64 * BRIDGE_LEAD_NS;
+            if let Err(e) = self.sink.feed(bridge, base_ns.saturating_sub(lead)) {
+                tracing::warn!("POC bridge refused (frame {}): {e:#}", flags.index);
+                break;
+            }
+        }
         let started = self.timing.begin();
         let play_result = self.sink.feed(au, base_ns);
         if let Some(slow) = self.timing.end(started) {
@@ -354,6 +377,9 @@ impl VideoStage {
         match play_result {
             Ok(()) if flags.partial => SinkResult::Presented { decode_us: None },
             Ok(()) => {
+                if let Some(bridge) = &mut self.poc_bridge {
+                    bridge.note_fed(au, flags.index);
+                }
                 // Clock read is per-picture vDSO; guarded by timing gate.
                 if self.timing.timed() {
                     if let Some(clock) = self.sink.clock() {
@@ -544,6 +570,7 @@ mod tests {
                 stream_hz: 60,
                 present_priority,
                 report_decode_latency: false,
+                hevc: false,
             },
         );
         Harness { stage, clock, fed }
@@ -590,6 +617,27 @@ mod tests {
             reanchor,
             loss,
         }
+    }
+
+    /// An anchor past half the lsb range goes in behind its bridge, stamped after it.
+    #[test]
+    fn a_long_hold_feeds_the_bridge_ahead_of_the_anchor() {
+        let mut h = harness();
+        h.stage.poc_bridge = Some(poc_bridge::tests::bridge_at(111));
+        let anchor = poc_bridge::tests::anchor_au();
+        let _ = h.stage.submit(&WireFrame {
+            loss: true,
+            ..frame(112, None, false, false)
+        });
+        let result = h.stage.submit(&WireFrame {
+            data: &anchor,
+            reanchor: true,
+            ..frame(120, None, false, false)
+        });
+        assert!(matches!(result, SinkResult::Presented { .. }));
+        let fed = h.fed.lock().expect("fed");
+        assert_eq!(fed.len(), 2, "one bridge, then the anchor");
+        assert!(fed[0] < fed[1]);
     }
 
     /// The sampler feeds the heartbeat and steers nothing: a depth that would once have frozen the

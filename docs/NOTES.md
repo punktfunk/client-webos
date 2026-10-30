@@ -74,6 +74,11 @@ the NDL plane.
 - **Freeze-until-reanchor adapted for NDL**: NDL does decode+present in one opaque call (no split),
   so the client reimplements the skip-until-reanchor subset. A forward gap arms `holding`; frames
   are withheld until one arrives with `FLAG_SOF` (IDR) or a recovery anchor.
+- **An anchor past half the POC lsb range takes a bridge.** NDL derives POC from the last picture
+  fed, so a longer hold lands the anchor a wrap low and its long-term reference resolves to nothing:
+  nine frames on AMF's 4-bit lsb. `session::stage::poc_bridge` feeds copies of the anchor with POC
+  and MSB cycles rewritten until the real one is in range. Feeding held AUs can't do this: the
+  frames lost in the gap never arrived.
 - ⚠ **Request keyframe only while SKIPPED, never before checking hold lift.** Resume frame restarts itself. Early check returned `NeedKeyframe` for already-fed AU, dropping pieces of resume keyframe on v2 (slice-progressive) — second freeze after recovery.
 - **Count on `Presented`, not arrival.** Otherwise fps overlay ticks through freezes and refused plays count as frames.
 - **Name hold only after 300ms** (`HOLD_TOAST_AFTER`, once per hold). RFI and startup probe loss clear inside round trip; rising-edge toast fires on every Wi-Fi session start.

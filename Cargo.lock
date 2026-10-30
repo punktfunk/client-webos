@@ -376,6 +376,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cros-codecs"
+version = "0.0.5"
+source = "git+https://git.unom.io/unom/punktfunk?rev=ec15a3774b68bd8bac049f9914e79647bc124d77#ec15a3774b68bd8bac049f9914e79647bc124d77"
+dependencies = [
+ "log",
+ "memchr",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1258,6 +1267,7 @@ name = "punktfunk-webos"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "cros-codecs",
  "image",
  "libc",
  "mdns-sd",
