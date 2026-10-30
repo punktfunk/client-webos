@@ -501,22 +501,25 @@ impl Service {
             .ok();
     }
 
-    /// A profile's picture for the faces the shell draws. A read that fails leaves the initials.
+    /// A profile's picture for the faces the shell draws: this TV's copy, then the host's. With
+    /// neither, the initials stay.
     fn fetch_avatar(&self, addr: String, mgmt: u16, fp_hex: &str, url: String) {
         // The shell asks paired hosts only. Unpinned, this TV's certificate goes to anyone.
         let Some(pin) = shared::parse_fp(fp_hex) else {
             return;
         };
+        let dir = crate::services::art::picture_dir(fp_hex);
         let console = self.handles.console.clone();
         let identity = self.identity.clone();
         std::thread::Builder::new()
             .name("punktfunk-webos-console-avatar".into())
-            .spawn(
-                move || match profiles::fetch_picture(&addr, mgmt, &identity, pin, &url) {
-                    Ok(bytes) => console.set_avatar(&url, bytes),
-                    Err(e) => tracing::debug!("console: picture {url}: {e}"),
-                },
-            )
+            .spawn(move || {
+                let read = || profiles::fetch_picture(&addr, mgmt, &identity, pin, &url);
+                let show = |bytes| console.set_avatar(&url, bytes);
+                if let Err(e) = profiles::load_picture(&dir, &url, read, show) {
+                    tracing::debug!("console: picture {url}: {e}");
+                }
+            })
             .ok();
     }
 
