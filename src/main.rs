@@ -46,6 +46,9 @@ const ABR_PROBE_KBPS: u32 = 320_000;
 fn set_abr_env() {
     std::env::set_var("PUNKTFUNK_ABR_PROBE_KBPS", ABR_PROBE_KBPS.to_string());
     std::env::set_var("PUNKTFUNK_ABR_MAX_MBPS", ABR_MAX_MBPS.to_string());
+    if crate::services::paths::app_dir().join("no-abr-probe").exists() {
+        std::env::set_var("PUNKTFUNK_ABR_PROBE", "0");
+    }
     for (key, value) in [
         ("PYROWAVE_ZERO_ONCE", "1"),
         ("PYROWAVE_SKIP_BANDS", "1"),
