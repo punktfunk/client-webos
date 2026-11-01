@@ -1,0 +1,248 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_EXT_control_flow_attributes : require
+#if FP16
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
+#ifndef NSG
+#define NSG 8
+#endif
+#ifndef UNROLL
+#define UNROLL 2
+#endif
+#ifndef LIFT
+#define LIFT 0
+#endif
+#ifndef SKIP_MASK
+#define SKIP_MASK 0
+#endif
+#ifndef MERGE
+#define MERGE 0
+#endif
+#ifndef PACKED
+#define PACKED 0
+#endif
+#ifndef SKIP_TILES
+#define SKIP_TILES 0
+#endif
+
+#if LIFT == 2
+#define LIFT_STEP(x, c, a, b) x = fma(VEC2(-(c)), (a) + (b), x)
+#elif LIFT == 1
+#define LIFT_STEP(x, c, a, b) { precise VEC2 lift_t = (c) * ((a) + (b)); x = x - lift_t; }
+#else
+#define LIFT_STEP(x, c, a, b) x -= (c) * ((a) + (b))
+#endif
+
+layout(local_size_x = 8 * NSG) in;
+layout(constant_id = 0) const bool DCShift = false;
+
+#include "dwt_common.h"
+
+layout(set = 0, binding = 0) uniform mediump sampler2DArray uTexture;
+#if PACKED
+layout(set = 0, binding = 1, r32ui) writeonly uniform uimage2D uOutput;
+#else
+layout(set = 0, binding = 1) writeonly mediump uniform image2D uOutput;
+#endif
+#if MERGE
+layout(set = 0, binding = 3) uniform highp usampler2D uCb;
+#endif
+#if SKIP_TILES
+layout(set = 0, binding = 2) readonly buffer TileFlags
+{
+    uint data[];
+} tile_flags;
+#endif
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+    vec2 inv_resolution;
+};
+
+const int TILE_X = 24;
+const int ROWS_HALF = BLOCK_SIZE_HALF;
+
+vec2 generate_mirror_uv(ivec2 coord, bool even_x, bool even_y)
+{
+    coord -= ivec2(band(bvec2(even_x, even_y), lessThan(coord, ivec2(0))));
+    coord += 1;
+    coord += ivec2(band(bvec2(!even_x, !even_y), greaterThanEqual(coord, resolution)));
+    vec2 uv = vec2(coord) * inv_resolution;
+    return uv.yx;
+}
+
+VEC4 gather(ivec2 coord, bool even_x, bool even_y, float layer)
+{
+    return VEC4(textureGather(uTexture, vec3(generate_mirror_uv(coord, even_x, even_y), layer), 0)).wxzy;
+}
+
+struct Window
+{
+    VEC2 a, b, c, d;
+};
+
+VEC2 up(VEC2 v)
+{
+    return unpackFloat2x16(subgroupShuffleUp(packFloat2x16(v), 1u));
+}
+
+VEC2 down(VEC2 v)
+{
+    return unpackFloat2x16(subgroupShuffleDown(packFloat2x16(v), 1u));
+}
+
+void second_pass_store(int m, Window wa, Window wb, ivec2 out_base, ivec2 size, bool store_lane)
+{
+    VEC2 r0 = VEC2(wa.b.x, wa.c.x) * K;
+    VEC2 r1 = VEC2(wa.b.y, wa.c.y) * inv_K;
+    VEC2 r2 = VEC2(wb.b.x, wb.c.x) * K;
+    VEC2 r3 = VEC2(wb.b.y, wb.c.y) * inv_K;
+
+    LIFT_STEP(r0, DELTA, up(r3), r1);
+    LIFT_STEP(r2, DELTA, r1, r3);
+    LIFT_STEP(r1, GAMMA, r0, r2);
+    LIFT_STEP(r3, GAMMA, r2, down(r0));
+    LIFT_STEP(r0, BETA, up(r3), r1);
+    LIFT_STEP(r2, BETA, r1, r3);
+    LIFT_STEP(r1, ALPHA, r0, r2);
+    LIFT_STEP(r3, ALPHA, r2, down(r0));
+
+    if (DCShift)
+    {
+        r0 += FLOAT(0.5);
+        r1 += FLOAT(0.5);
+        r2 += FLOAT(0.5);
+        r3 += FLOAT(0.5);
+    }
+
+    if (!store_lane)
+        return;
+
+    int y_odd = out_base.y + 2 * m - 3;
+    int y_even = y_odd + 1;
+#if PACKED && MERGE
+    int w = out_base.x >> 1;
+    if (w >= size.x)
+        return;
+    if (m >= 4 && y_odd < size.y)
+    {
+        uint cb = texelFetch(uCb, ivec2(out_base.x >> 2, y_odd), 0).x;
+        uint cr = packUnorm4x8(vec4(r0.x, r1.x, r2.x, r3.x));
+        imageStore(uOutput, ivec2(w, y_odd), uvec4((cb & 0xffu) | ((cr & 0xffu) << 8) | ((cb & 0xff00u) << 8) | ((cr & 0xff00u) << 16)));
+        imageStore(uOutput, ivec2(w + 1, y_odd), uvec4(((cb >> 16) & 0xffu) | (((cr >> 16) & 0xffu) << 8) | ((cb >> 8) & 0xff0000u) | (cr & 0xff000000u)));
+    }
+    if (m <= ROWS_HALF + 2 && y_even < size.y)
+    {
+        uint cb = texelFetch(uCb, ivec2(out_base.x >> 2, y_even), 0).x;
+        uint cr = packUnorm4x8(vec4(r0.y, r1.y, r2.y, r3.y));
+        imageStore(uOutput, ivec2(w, y_even), uvec4((cb & 0xffu) | ((cr & 0xffu) << 8) | ((cb & 0xff00u) << 8) | ((cr & 0xff00u) << 16)));
+        imageStore(uOutput, ivec2(w + 1, y_even), uvec4(((cb >> 16) & 0xffu) | (((cr >> 16) & 0xffu) << 8) | ((cb >> 8) & 0xff0000u) | (cr & 0xff000000u)));
+    }
+#elif PACKED
+    int w = out_base.x >> 2;
+    if (w >= size.x)
+        return;
+    if (m >= 4 && y_odd < size.y)
+        imageStore(uOutput, ivec2(w, y_odd), uvec4(packUnorm4x8(vec4(r0.x, r1.x, r2.x, r3.x))));
+    if (m <= ROWS_HALF + 2 && y_even < size.y)
+        imageStore(uOutput, ivec2(w, y_even), uvec4(packUnorm4x8(vec4(r0.y, r1.y, r2.y, r3.y))));
+#else
+    VEC2 r[4] = VEC2[](r0, r1, r2, r3);
+    for (int k = 0; k < 4; k++)
+    {
+        int x = out_base.x + k;
+        if (x >= size.x)
+            continue;
+        if (m >= 4 && y_odd < size.y)
+            imageStore(uOutput, ivec2(x, y_odd), vec4(r[k].x));
+        if (m <= ROWS_HALF + 2 && y_even < size.y)
+            imageStore(uOutput, ivec2(x, y_even), vec4(r[k].y));
+    }
+#endif
+}
+
+void step(int m, inout Window wa, inout Window wb, VEC2 ae, VEC2 ao, VEC2 be, VEC2 bo,
+          ivec2 out_base, ivec2 size, bool store_lane)
+{
+    ae *= K;
+    ao *= inv_K;
+    be *= K;
+    bo *= inv_K;
+    if (m >= 1)
+    {
+        LIFT_STEP(ae, DELTA, wa.d, ao);
+        LIFT_STEP(be, DELTA, wb.d, bo);
+    }
+    if (m >= 2)
+    {
+        LIFT_STEP(wa.d, GAMMA, wa.c, ae);
+        LIFT_STEP(wb.d, GAMMA, wb.c, be);
+    }
+    if (m >= 3)
+    {
+        LIFT_STEP(wa.c, BETA, wa.b, wa.d);
+        LIFT_STEP(wb.c, BETA, wb.b, wb.d);
+    }
+    if (m >= 4)
+    {
+        LIFT_STEP(wa.b, ALPHA, wa.a, wa.c);
+        LIFT_STEP(wb.b, ALPHA, wb.a, wb.c);
+    }
+    if (m >= 3)
+        second_pass_store(m, wa, wb, out_base, size, store_lane);
+    wa = Window(wa.c, wa.d, ae, ao);
+    wb = Window(wb.c, wb.d, be, bo);
+}
+
+void main()
+{
+    int lane = int(gl_SubgroupInvocationID);
+    int tile_x = int(gl_WorkGroupID.y) * NSG + int(gl_SubgroupID);
+    ivec2 base = ivec2(int(gl_WorkGroupID.x) * ROWS_HALF - APRON_HALF, tile_x * (TILE_X / 2) - APRON_HALF);
+    ivec2 coord = ivec2(base.x, base.y + 2 * lane);
+    ivec2 out_base = ivec2(tile_x * TILE_X + 4 * lane - APRON, int(gl_WorkGroupID.x) * (2 * ROWS_HALF) - APRON);
+    ivec2 size = imageSize(uOutput);
+    bool store_lane = lane >= 1 && lane <= 6;
+
+    VEC2 zero = VEC2(0.0);
+    Window wa = Window(zero, zero, zero, zero);
+    Window wb = wa;
+
+#if SKIP_TILES
+    uint present = (tile_flags.data[gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x] >> (3u * gl_SubgroupID)) & 7u;
+#else
+    const uint present = 7u;
+#endif
+    bool read1 = (SKIP_MASK & 1) == 0 && (present & 1u) != 0u;
+    bool read2 = (SKIP_MASK & 2) == 0 && (present & 2u) != 0u;
+    bool read3 = (SKIP_MASK & 4) == 0 && (present & 4u) != 0u;
+
+#if UNROLL == 1
+    [[unroll]]
+#elif UNROLL == 2
+    [[dont_unroll]]
+#endif
+    for (int j = 0; j < ROWS_HALF + 4; j += 2)
+    {
+        ivec2 c = coord + ivec2(j, 0);
+        VEC4 g00 = gather(c, true, true, 0.0);
+        VEC4 g01 = VEC4(0.0);
+        VEC4 g10 = VEC4(0.0);
+        VEC4 g11 = VEC4(0.0);
+        if (read2)
+            g01 = gather(c, false, true, 2.0);
+        if (read1)
+            g10 = gather(c, true, false, 1.0);
+        if (read3)
+            g11 = gather(c, false, false, 3.0);
+
+        step(j, wa, wb, VEC2(g00.x, g10.x), VEC2(g01.x, g11.x), VEC2(g00.z, g10.z), VEC2(g01.z, g11.z),
+             out_base, size, store_lane);
+        step(j + 1, wa, wb, VEC2(g00.y, g10.y), VEC2(g01.y, g11.y), VEC2(g00.w, g10.w), VEC2(g01.w, g11.w),
+             out_base, size, store_lane);
+    }
+}

@@ -33,6 +33,18 @@ fn main() {
     println!("cargo:rustc-link-arg={obj}");
     println!("cargo:rerun-if-changed=src/platform/webos/glibc_compat_shim.c");
 
+    let vo = format!("{out_dir}/vo.o");
+    let status = std::process::Command::new(&cc)
+        .args(["-fPIC", "-O2", "-c", "src/platform/webos/vo.c", "-o"])
+        .arg(&vo)
+        .status()
+        .unwrap_or_else(|e| panic!("run {cc} to compile vo.c: {e}"));
+    assert!(status.success(), "{cc} failed compiling vo.c");
+    println!("cargo:rustc-link-arg={vo}");
+    println!("cargo:rustc-link-arg=-lwayland-client");
+    println!("cargo:rustc-link-arg=-lwayland-webos-client");
+    println!("cargo:rerun-if-changed=src/platform/webos/vo.c");
+
     // SDL3's prefix lies outside the sysroot (buildroot's pkg-config breaks on external .pc files),
     // so we emit the search path manually. sdl3-sys supplies `-lSDL3` without probing.
     let sdl3_prefix = std::env::var("SDL3_PREFIX")

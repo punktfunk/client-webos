@@ -53,10 +53,17 @@ impl VideoCaps {
     /// Without HEVC only one codec is decodable, so `Automatic` would resolve to it anyway and
     /// the list collapses to a single entry. AV1 rides with HEVC: both are NDL v2 types.
     pub fn codec_prefs(self) -> &'static [CodecPref] {
-        if self.h265 {
-            &[CodecPref::Auto, CodecPref::H264, CodecPref::Hevc, CodecPref::Av1]
-        } else {
-            &[CodecPref::H264]
+        match (self.h265, pyrowave()) {
+            (true, true) => &[
+                CodecPref::Auto,
+                CodecPref::H264,
+                CodecPref::Hevc,
+                CodecPref::Av1,
+                CodecPref::PyroWave,
+            ],
+            (true, false) => &[CodecPref::Auto, CodecPref::H264, CodecPref::Hevc, CodecPref::Av1],
+            (false, true) => &[CodecPref::H264, CodecPref::PyroWave],
+            (false, false) => &[CodecPref::H264],
         }
     }
 }
@@ -71,6 +78,16 @@ pub fn install(ndl_caps: VideoCaps) {
     if NDL_BASELINE.set(ndl_caps).is_err() {
         tracing::warn!("video caps already installed — ignoring {ndl_caps:?}");
     }
+}
+
+static PYROWAVE: OnceLock<bool> = OnceLock::new();
+
+pub fn install_pyrowave(available: bool) {
+    let _ = PYROWAVE.set(available);
+}
+
+pub fn pyrowave() -> bool {
+    PYROWAVE.get().copied().unwrap_or(false)
 }
 
 /// The active caps: the NDL baseline detected at startup.

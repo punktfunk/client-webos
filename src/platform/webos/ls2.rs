@@ -88,6 +88,7 @@ pub enum Call {
     SendReport = 1,
     StopSniff = 2,
     StartSniff = 3,
+    Video = 4,
 }
 
 impl Call {
@@ -96,6 +97,7 @@ impl Call {
             Self::SendReport => "sendData",
             Self::StopSniff => "stopSniff",
             Self::StartSniff => "startSniff",
+            Self::Video => "videooutput",
         }
     }
 }
@@ -135,7 +137,9 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
     let Ok(f) = fns() else { return true };
     // SAFETY: `ctx` points into the calling `Bus`'s `calls`, live while its context dispatches.
     let ctx = unsafe { &*ctx.cast::<CallCtx>() };
-    ctx.pending.fetch_sub(1, Ordering::Relaxed);
+    if ctx.call != Call::Video {
+        ctx.pending.fetch_sub(1, Ordering::Relaxed);
+    }
     // SAFETY: `reply` is the live message the hub delivered for this callback.
     let payload = unsafe { (f.message_payload)(reply) };
     let text = if payload.is_null() {
@@ -144,6 +148,10 @@ unsafe extern "C" fn on_reply(_sh: Handle, reply: Message, ctx: *mut c_void) -> 
         // SAFETY: LS2 payloads are NUL-terminated JSON owned by the message for the callback.
         unsafe { CStr::from_ptr(payload) }.to_string_lossy()
     };
+    if ctx.call == Call::Video {
+        tracing::info!("pyrowave vo reply: {text}");
+        return true;
+    }
     if !text.contains("\"returnValue\":true") {
         // An address with no HID write path answers every single report with `106` ("Device with
         // supplied address is not available"). Latch it on this bus — one pad per bus, so another
@@ -166,13 +174,18 @@ pub struct Bus {
     context: *mut c_void,
     fns: &'static Fns,
     /// One reply context per [`Call`], boxed so the addresses handed to the hub are stable.
-    calls: Box<[CallCtx; 3]>,
+    calls: Box<[CallCtx; 4]>,
 }
 
 impl Bus {
     /// Registers under the app id. Fails (softly, for callers to fall back) when the library is
     /// absent or the hub refuses this executable.
     pub fn open() -> Result<Self> {
+        Self::open_named(BUS_NAME)
+    }
+
+    /// [`open`](Self::open) under another name the role file allows.
+    pub fn open_named(name: &CStr) -> Result<Self> {
         let fns = fns()?;
         let mut err = LsError {
             error_code: 0,
@@ -183,7 +196,7 @@ impl Bus {
         // SAFETY: all pointers are to live locals; `BUS_NAME` is NUL-terminated.
         let mut ok = unsafe {
             (fns.error_init)(&mut err);
-            (fns.register)(BUS_NAME.as_ptr(), &mut handle, &mut err)
+            (fns.register)(name.as_ptr(), &mut handle, &mut err)
         };
         if !ok || handle.is_null() {
             let named = describe(&err);
@@ -199,7 +212,7 @@ impl Bus {
                 unsafe { (fns.error_free)(&mut err) };
                 bail!("LSRegister refused: named {named}; anonymous {msg}");
             }
-            tracing::debug!("Luna bus: {BUS_NAME:?} taken ({named}); registered anonymously");
+            tracing::debug!("Luna bus: {name:?} taken ({named}); registered anonymously");
         }
         // SAFETY: a fresh context; the handle is attached before any call.
         let context = unsafe { (fns.context_new)() };
@@ -216,7 +229,7 @@ impl Bus {
             bail!("LSGmainContextAttach failed: {msg}");
         }
         let calls = Box::new(
-            [Call::SendReport, Call::StopSniff, Call::StartSniff].map(|call| CallCtx {
+            [Call::SendReport, Call::StopSniff, Call::StartSniff, Call::Video].map(|call| CallCtx {
                 call,
                 unavailable: AtomicBool::new(false),
                 pending: AtomicU32::new(0),
@@ -270,7 +283,9 @@ impl Bus {
             unsafe { (self.fns.error_free)(&mut err) };
             bail!("LSCallOneReply failed: {msg}");
         }
-        ctx.pending.fetch_add(1, Ordering::Relaxed);
+        if what != Call::Video {
+            ctx.pending.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 

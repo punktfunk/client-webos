@@ -47,3 +47,12 @@ int gettid(void) {
 int sendmmsg(int sockfd, void *msgvec, unsigned int vlen, int flags) {
     return (int) syscall(SYS_sendmmsg, sockfd, msgvec, vlen, flags);
 }
+
+int posix_memalign(void **memptr, size_t alignment, size_t size);
+
+void *aligned_alloc(size_t alignment, size_t size) {
+    void *p = NULL;
+    if (alignment < sizeof(void *))
+        alignment = sizeof(void *);
+    return posix_memalign(&p, alignment, size) == 0 ? p : NULL;
+}

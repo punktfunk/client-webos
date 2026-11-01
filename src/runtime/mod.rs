@@ -152,6 +152,7 @@ fn spawn_connect(
                     port,
                     mode,
                     bitrate_kbps: settings.bitrate_kbps,
+                    pyrowave_bpp_x100: (settings.pyrowave_bpp * 100.0).round() as u16,
                     hdr_enabled: settings.hdr_enabled,
                     ten_bit_sdr: settings.ten_bit_sdr,
                     audio_channels: settings.audio_channels,
@@ -315,6 +316,7 @@ pub fn run() -> Result<()> {
     crate::platform::webos::device::DeviceInfo::detect().log();
     // Before settings load or any UI exists: `store::load` clamps against this.
     crate::core::caps::install(crate::platform::webos::device::video_caps());
+    crate::core::caps::install_pyrowave(crate::platform::webos::pyro::available());
     // A panic on ANY thread otherwise goes only to stderr, which a SAM-launched
     // native app has no terminal for — the app simply vanishes back to the
     // launcher with nothing written down. Routing it through `tracing` puts the

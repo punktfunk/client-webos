@@ -1,0 +1,95 @@
+Confirm one external import instead of every handle type — PUNKTFUNK LOCAL PATCH.
+
+Not upstream. `pyrowave_device_confirm_interop_support` passes only when the device imports
+all five Win32 memory handle types with STORAGE|SAMPLED usage, plus OPAQUE_WIN32 binary and
+timeline semaphores and a D3D12 fence. The Windows host imports D3D11 textures with
+SAMPLED|TRANSFER usage and one D3D12 fence, so a GPU lacking any unused type was refused.
+
+WHAT IT DOES. Adds `pyrowave_device_confirm_image_import_support` (one handle type, format
+and usage) and `pyrowave_device_confirm_semaphore_import_support` (one handle type, asked
+without a type chain as upstream asks a D3D12 fence). Upstream's check is unchanged.
+
+diff --git a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave-shared.def b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave-shared.def
+index 1427d1b4d..66efcf178 100644
+--- a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave-shared.def
++++ b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave-shared.def
+@@ -11,6 +11,8 @@ EXPORTS
+ 	pyrowave_device_report_performance_stats
+ 	pyrowave_device_get_vk_device_handles
+ 	pyrowave_device_confirm_interop_support
++	pyrowave_device_confirm_image_import_support
++	pyrowave_device_confirm_semaphore_import_support
+ 	pyrowave_device_set_queue_type
+ 	pyrowave_device_destroy
+ 	pyrowave_sync_object_create
+diff --git a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave.h b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave.h
+index d2fa2957f..2557cbcf2 100644
+--- a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave.h
++++ b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave.h
+@@ -218,6 +218,18 @@ pyrowave_device_set_queue_type(pyrowave_device device, VkQueueFlagBits queue_fla
+ PYROWAVE_PUBLIC_API bool
+ pyrowave_device_confirm_interop_support(pyrowave_device device);
+ 
++// PUNKTFUNK LOCAL EXTENSION (patches/0013-confirm-one-import.patch), not upstream.
++// Confirm the one import a caller makes (a 2D optimal image, a semaphore), where the check
++// above wants every handle type and STORAGE usage. The semaphore is asked without a
++// VkSemaphoreTypeCreateInfo, as upstream asks a D3D12 fence.
++PYROWAVE_PUBLIC_API bool
++pyrowave_device_confirm_image_import_support(pyrowave_device device,
++		VkExternalMemoryHandleTypeFlagBits handle_type, VkFormat format, VkImageUsageFlags usage);
++
++PYROWAVE_PUBLIC_API bool
++pyrowave_device_confirm_semaphore_import_support(pyrowave_device device,
++		VkExternalSemaphoreHandleTypeFlagBits handle_type);
++
+ // All encoders and decoders must have been destroyed before destroying the device.
+ PYROWAVE_PUBLIC_API void pyrowave_device_destroy(pyrowave_device device);
+ ////
+diff --git a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave_c.cpp b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave_c.cpp
+index 7ccdf2320..444d5ca80 100644
+--- a/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave_c.cpp
++++ b/crates/codec/pyrowave-sys/vendor/pyrowave/pyrowave_c.cpp
+@@ -441,6 +441,43 @@ bool pyrowave_device_confirm_interop_support(pyrowave_device device)
+ 	return true;
+ }
+ 
++// PUNKTFUNK LOCAL EXTENSION (patches/0013-confirm-one-import.patch), not upstream.
++bool pyrowave_device_confirm_image_import_support(pyrowave_device device,
++		VkExternalMemoryHandleTypeFlagBits handle_type, VkFormat format, VkImageUsageFlags usage)
++{
++	Util::set_thread_logging_interface(&null_logger);
++	if (!device || !device->device.get_device_features().supports_external)
++		return false;
++
++	VkExternalImageFormatProperties external_props = { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
++	VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, &external_props };
++	VkPhysicalDeviceExternalImageFormatInfo external_format_info =
++		{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
++	external_format_info.handleType = handle_type;
++
++	if (!device->device.get_image_format_properties(
++		format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0, &external_format_info, &props2))
++		return false;
++
++	return (external_props.externalMemoryProperties.externalMemoryFeatures &
++	        VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
++}
++
++bool pyrowave_device_confirm_semaphore_import_support(pyrowave_device device,
++		VkExternalSemaphoreHandleTypeFlagBits handle_type)
++{
++	Util::set_thread_logging_interface(&null_logger);
++	if (!device || !device->device.get_device_features().supports_external)
++		return false;
++
++	// No VkSemaphoreTypeCreateInfo, as upstream asks for a D3D12 fence above.
++	VkPhysicalDeviceExternalSemaphoreInfo sem_info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO };
++	VkExternalSemaphoreProperties sem_props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
++	sem_info.handleType = handle_type;
++	vkGetPhysicalDeviceExternalSemaphoreProperties(device->device.get_physical_device(), &sem_info, &sem_props);
++	return (sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0;
++}
++
+ pyrowave_result
+ pyrowave_device_set_queue_type(pyrowave_device device, VkQueueFlagBits queue_flags)
+ {

@@ -106,6 +106,7 @@ impl VideoPump {
         // `slack +0.0 ms` for the two seconds it takes one to arrive.
         stats.pacing_min_slack_us.store(i32::MIN, Ordering::Relaxed);
         let hud = client.hud_shared();
+        crate::platform::webos::pyro::set_hud(hud.clone());
         let stream_hz = client.mode().refresh_hz;
         Self {
             stream_hz,
@@ -185,8 +186,10 @@ impl VideoPump {
             pts_ns: frame.pts_ns,
             index: frame.frame_index,
             part: frame.part,
-            reanchor: frame.flags & (u32::from(FLAG_SOF) | USER_FLAG_RECOVERY_ANCHOR) != 0,
+            reanchor: frame.flags & (u32::from(FLAG_SOF) | USER_FLAG_RECOVERY_ANCHOR) != 0
+                || self.client.video_format().codec == punktfunk_core::quic::CODEC_PYROWAVE,
             loss: self.note_loss(frame),
+            user_flags: frame.flags,
         };
         match self.stage.submit(&wire) {
             SinkResult::Presented { decode_us } => {
@@ -194,7 +197,7 @@ impl VideoPump {
                     self.client.report_decode_us(us);
                 }
                 // Once per picture: a slice-progressive piece is not a frame.
-                if frame.part.is_none_or(|part| part.last) {
+                if frame.part.is_none_or(|part| part.last) && crate::platform::webos::pyro::current_output().is_none() {
                     self.hud.note_decoded(frame.pts_ns, realtime_ns());
                 }
             }

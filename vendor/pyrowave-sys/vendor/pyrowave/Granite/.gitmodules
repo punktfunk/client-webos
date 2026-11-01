@@ -1,0 +1,54 @@
+[submodule "third_party/spirv-cross"]
+	path = third_party/spirv-cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross
+[submodule "third_party/shaderc"]
+	path = third_party/shaderc
+	url = https://github.com/google/shaderc.git
+[submodule "third_party/glslang"]
+	path = third_party/glslang
+	url = https://github.com/Themaister/glslang.git
+[submodule "third_party/spirv-tools"]
+	path = third_party/spirv-tools
+	url = https://github.com/Themaister/SPIRV-Tools
+[submodule "third_party/spirv-headers"]
+	path = third_party/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers
+[submodule "third_party/rapidjson"]
+	path = third_party/rapidjson
+	url = https://github.com/miloyip/rapidjson
+[submodule "third_party/stb/stb"]
+	path = third_party/stb/stb
+	url = https://github.com/nothings/stb
+[submodule "third_party/astc-encoder"]
+	path = third_party/astc-encoder
+	url = https://github.com/ARM-software/astc-encoder
+[submodule "third_party/fossilize"]
+	path = third_party/fossilize
+	url = https://github.com/ValveSoftware/Fossilize
+[submodule "third_party/volk"]
+	path = third_party/volk
+	url = https://github.com/zeux/volk
+[submodule "third_party/meshoptimizer"]
+	path = third_party/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer
+[submodule "third_party/muFFT"]
+	path = third_party/muFFT
+	url = https://github.com/Themaister/muFFT
+[submodule "third_party/oboe"]
+	path = third_party/oboe
+	url = https://github.com/google/oboe
+[submodule "third_party/khronos/vulkan-headers"]
+	path = third_party/khronos/vulkan-headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers
+[submodule "third_party/fsr2"]
+	path = third_party/fsr2
+	url = https://github.com/Themaister/FidelityFX-FSR2
+[submodule "third_party/sdl3"]
+	path = third_party/sdl3
+	url = https://github.com/libsdl-org/SDL
+[submodule "third_party/pyroenc"]
+	path = third_party/pyroenc
+	url = https://github.com/HansKristian-Work/pyroenc
+[submodule "third_party/pyrowave"]
+	path = third_party/pyrowave
+	url = https://github.com/Themaister/pyrowave

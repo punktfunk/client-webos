@@ -42,6 +42,7 @@ pub struct WireFrame<'a> {
     /// Loss was detected at or before this frame — a sequence gap, or a frame the transport
     /// dropped.
     pub loss: bool,
+    pub user_flags: u32,
 }
 
 /// What the stage worked out about one delivery before feeding it.
@@ -54,6 +55,7 @@ struct FrameFlags {
     /// One piece of a slice-progressive AU; decoder takes it but can't present. Reference points
     /// hang off the piece that completes the AU. `false` on whole-AU path.
     partial: bool,
+    user_flags: u32,
 }
 
 /// Outcome of one [`VideoStage::submit`].
@@ -306,6 +308,7 @@ impl VideoStage {
             loss: frame.loss || lost_parts,
             index: u64::from(frame.index),
             partial,
+            user_flags: frame.user_flags,
         };
         let result = self.feed(frame.data, frame.pts_ns, flags);
         if matches!(result, SinkResult::Presented { .. }) {
@@ -358,7 +361,7 @@ impl VideoStage {
             }
         }
         let started = self.timing.begin();
-        let play_result = self.sink.feed(au, base_ns);
+        let play_result = self.sink.feed_flags(au, base_ns, flags.user_flags);
         if let Some(slow) = self.timing.end(started) {
             tracing::warn!(
                 "NDL slow: {:.1}ms (frame {}, pts {:.2}ms)",
@@ -616,6 +619,7 @@ mod tests {
             part: part.map(|(first, last, offset)| punktfunk_core::session::FramePart { offset, first, last }),
             reanchor,
             loss,
+            user_flags: 0,
         }
     }
 
@@ -873,6 +877,7 @@ mod tests {
             part: None,
             reanchor: true,
             loss: false,
+            user_flags: 0,
         });
         let stamps = h.distinct_stamps();
         assert!(

@@ -160,6 +160,7 @@ pub struct ConnectParams {
     /// Requested capture mode; the host clamps it and echoes the result in `client.mode()`.
     pub mode: Mode,
     pub bitrate_kbps: u32,
+    pub pyrowave_bpp_x100: u16,
     pub hdr_enabled: bool,
     /// Main10 at BT.709 without HDR. Subsumed by `hdr_enabled`.
     pub ten_bit_sdr: bool,
@@ -195,6 +196,7 @@ fn codec_bit(pref: CodecPref) -> u8 {
         CodecPref::H264 => quic::CODEC_H264,
         CodecPref::Hevc => quic::CODEC_HEVC,
         CodecPref::Av1 => quic::CODEC_AV1,
+        CodecPref::PyroWave => quic::CODEC_PYROWAVE,
     }
 }
 
@@ -278,6 +280,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         // per-pad arrival and also reaches hosts without `HOST_CAP_GAMEPAD_STATE`.
         gamepad: params.gamepad_type.to_core(),
         bitrate_kbps: params.bitrate_kbps,
+        pyrowave_bpp_x100: params.pyrowave_bpp_x100,
         video_caps: negotiated.video_caps,
         // Requested only: `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`.
         audio_channels: negotiated.audio_channels,

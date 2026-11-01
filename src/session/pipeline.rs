@@ -200,6 +200,18 @@ fn load_player(client: &NativeClient, params: &MediaParams) -> Result<(Box<dyn V
     let resolved_mode = client.mode();
     let fps = resolved_mode.refresh_hz.max(1);
     let format = client.video_format();
+    if format.codec == punktfunk_core::quic::CODEC_PYROWAVE {
+        let sink =
+            crate::platform::webos::pyro::PyroSink::new(client.shard_payload as usize, format.color.full_range != 0)
+                .context("PyroWave load")?;
+        tracing::info!(
+            "{} loaded ({}x{}@{fps}fps)",
+            sink.name(),
+            resolved_mode.width,
+            resolved_mode.height
+        );
+        return Ok((Box::new(sink), false));
+    }
     let codec =
         NdlCodec::from_wire(format.codec).with_context(|| format!("unsupported codec 0x{:02x}", format.codec))?;
     let app_id = crate::platform::webos::ndl::app_id();

@@ -59,8 +59,7 @@ pub(super) fn run(
         spatial: false,
         // The shell is the only UI: no "Controller-optimized UI" row to turn it off.
         fallback_ui: false,
-        // NDL has no PyroWave; AV1 only where the Hello offers it (`VideoCaps::codec_prefs`).
-        pyrowave_ok: false,
+        pyrowave_ok: crate::core::caps::pyrowave(),
         av1_ok: crate::core::caps::video_caps()
             .codec_prefs()
             .contains(&crate::core::model::CodecPref::Av1),
@@ -130,6 +129,19 @@ pub(super) fn run(
     // A connect that landed, held while the shell keeps animating until its first frame
     // reaches NDL: leaving now would freeze the Connecting card for the whole wait.
     let mut reveal: Option<Reveal> = None;
+    if let Some(auto) = crate::logger::autostream().filter(|_| !AUTOSTREAM_FIRED.swap(true, Ordering::Relaxed)) {
+        match auto_launch(&store, auto) {
+            Some(want) => match start_launch(&store, identity, game_controller, want) {
+                Ok(started) => {
+                    tracing::info!("console: autostream from {}", auto.host);
+                    console.session_phase(SessionPhase::Connecting);
+                    connect = Some(started);
+                }
+                Err(e) => tracing::warn!("console: autostream refused: {e:#}"),
+            },
+            None => tracing::warn!("console: autostream: no known host named {:?}", auto.host),
+        }
+    }
 
     let outcome = 'ui: loop {
         let frame_start = Instant::now();
@@ -552,6 +564,21 @@ impl Reveal {
             drop(guard);
         });
     }
+}
+
+static AUTOSTREAM_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn auto_launch(store: &ConsoleStore, auto: &crate::logger::AutoStream) -> Option<Launch> {
+    let state = store.snapshot();
+    let host = state.known_hosts.iter().find(|h| h.name == auto.host)?;
+    Some(Launch {
+        addr: host.addr.clone(),
+        port: host.port,
+        fp_hex: host.fp_hex.clone(),
+        launch: auto.target.clone().filter(|t| t != "desktop"),
+        preset: None,
+        profile: None,
+    })
 }
 
 /// A connect in flight: its thread, what it dialled, the session settings, and whether the

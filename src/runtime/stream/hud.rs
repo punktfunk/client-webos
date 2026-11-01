@@ -40,6 +40,7 @@ pub(super) struct Hud {
     built_at: Option<Instant>,
     /// CPU ticks at the last snapshot, for the card's CPU line.
     prev_cpu: Option<(u64, Instant)>,
+    prev_gpu: Option<(u64, u64)>,
     /// Transient toasts.
     notif: overlay::Notification,
     /// When the one-line exit hint went up, if Settings asks for it.
@@ -57,6 +58,7 @@ pub(super) struct Hud {
     log_rows: overlay::LogRows,
     ring_drawn: u64,
     ring_drawn_at: Instant,
+    video: super::video::Video,
 }
 
 impl Hud {
@@ -86,6 +88,7 @@ impl Hud {
             snap: None,
             built_at: None,
             prev_cpu: None,
+            prev_gpu: None,
             notif: overlay::Notification::new(),
             // The one-line exit hint, from the first frame of the stream.
             exit_hint_at: settings.exit_hint.then(Instant::now),
@@ -97,6 +100,7 @@ impl Hud {
             log_rows: overlay::LogRows::default(),
             ring_drawn: 0,
             ring_drawn_at: Instant::now(),
+            video: super::video::Video::default(),
         }
     }
 
@@ -180,7 +184,13 @@ impl Hud {
         let log_overlay_on = log_overlay_state() != LogOverlayState::Off;
         let ring_damage = ring.damage();
         let ring_visible = ring_damage != 0;
-        let active = stats_alpha.is_some() || log_overlay_on || notif_active || ring_visible || hint_frame.is_some();
+        let video_frame = self.video.poll();
+        let active = stats_alpha.is_some()
+            || log_overlay_on
+            || notif_active
+            || ring_visible
+            || hint_frame.is_some()
+            || video_frame.is_some();
         if self.was_active && !active {
             // Nothing else clears this window when the last overlay disappears.
             // A wipe that could not draw stays owed, so the next tick tries it again.
@@ -196,7 +206,11 @@ impl Hud {
             Duration::from_millis(500)
         };
         let ring_due = ring_visible && ring_damage != self.ring_drawn && self.ring_drawn_at.elapsed() >= RING_FRAME;
-        if !(active && !dialog_shown && (ring_due || self.last.is_none_or(|t| t.elapsed() >= redraw_interval))) {
+        let video_due = video_frame == Some(true);
+        if !(active
+            && !dialog_shown
+            && (video_due || ring_due || self.last.is_none_or(|t| t.elapsed() >= redraw_interval)))
+        {
             return;
         }
         self.last = Some(Instant::now());
@@ -207,7 +221,7 @@ impl Hud {
         if self.enabled && self.built_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
             self.built_at = Some(Instant::now());
             let mut snap = cx.connected.hud_snapshot();
-            snap.extras = tv_extras(cx.connected, &mut self.prev_cpu);
+            snap.extras = tv_extras(cx.connected, &mut self.prev_cpu, &mut self.prev_gpu);
             self.lines = core_hud::format(&snap, self.tier, self.advanced);
             self.snap = Some(snap);
         }
@@ -216,31 +230,32 @@ impl Hud {
         let (lines, tier, corner, scale) = (&self.lines, self.tier, self.corner, self.scale);
         let log_rows = &mut self.log_rows;
         let notif_frame = if notif_active { self.notif.frame() } else { None };
-        let frame = overlay::frame(
-            cx.gl,
-            cx.window,
-            cx.fonts,
-            cx.ui,
-            cx.display,
-            overlay::TRANSPARENT,
-            |f| {
-                if let Some(alpha) = stats_alpha {
-                    overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
-                }
-                if let Some(lines) = log_lines {
-                    overlay::log(f, log_rows, lines);
-                }
-                if let Some((text, alpha)) = notif_frame {
-                    overlay::toast(f, text, alpha);
-                }
-                if let Some(alpha) = hint_frame {
-                    overlay::exit_hint(f, exit_hint_text(pad), alpha);
-                }
-                if ring_visible {
-                    ring.render(f.canvas, f.ui, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
-                }
-            },
-        );
+        let video = &mut self.video;
+        let clear = if video_frame.is_some() {
+            skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0)
+        } else {
+            overlay::TRANSPARENT
+        };
+        let frame = overlay::frame(cx.gl, cx.window, cx.fonts, cx.ui, cx.display, clear, |f| {
+            if video_frame.is_some() {
+                video.draw(f.canvas, f.w, f.h);
+            }
+            if let Some(alpha) = stats_alpha {
+                overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
+            }
+            if let Some(lines) = log_lines {
+                overlay::log(f, log_rows, lines);
+            }
+            if let Some((text, alpha)) = notif_frame {
+                overlay::toast(f, text, alpha);
+            }
+            if let Some(alpha) = hint_frame {
+                overlay::exit_hint(f, exit_hint_text(pad), alpha);
+            }
+            if ring_visible {
+                ring.render(f.canvas, f.ui, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
+            }
+        });
         self.drawn(frame);
     }
 }
@@ -264,11 +279,17 @@ fn stats_hint(tier: StatsVerbosity) -> &'static str {
 
 /// Lines only this client measures: NDL's feed, backlog and hold, the audio route, the pacing
 /// loop, and this process's CPU and memory. `prev_cpu` spans CPU ticks between two calls.
-fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant)>) -> Vec<Extra> {
+fn tv_extras(
+    connected: &session::Connected,
+    prev_cpu: &mut Option<(u64, Instant)>,
+    prev_gpu: &mut Option<(u64, u64)>,
+) -> Vec<Extra> {
     let stats = connected.stats();
     let backlog = stats.render_backlog.load(Ordering::Relaxed);
+    let pyrowave = crate::platform::webos::pyro::current_output().is_some();
     let mut ndl = format!(
-        "NDL feed {:.1} ms · backlog {}",
+        "{} feed {:.1} ms · backlog {}",
+        if pyrowave { "decode" } else { "NDL" },
         stats.feed_us.load(Ordering::Relaxed) as f32 / 1000.0,
         if backlog < 0 {
             "n/a".to_string()
@@ -325,8 +346,9 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
         *prev_cpu = Some((ticks, Instant::now()));
         out.push(Extra {
             text: format!(
-                "{}RAM {:.0} MB",
+                "{}{}RAM {:.0} MB",
                 cpu.unwrap_or_default(),
+                gpu_text(prev_gpu).unwrap_or_default(),
                 mem_bytes as f64 / (1024.0 * 1024.0)
             ),
             tier: StatsVerbosity::Detailed,
@@ -335,4 +357,31 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
         });
     }
     out
+}
+
+fn mali_busy_idle() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/sys/kernel/debug/mali0/dvfs_utilization").ok()?;
+    let mut words = text.split_whitespace();
+    let (mut busy, mut idle) = (None, None);
+    while let Some(key) = words.next() {
+        match key {
+            "busy_time:" => busy = words.next()?.parse().ok(),
+            "idle_time:" => idle = words.next()?.parse().ok(),
+            _ => {}
+        }
+    }
+    Some((busy?, idle?))
+}
+
+fn gpu_text(prev: &mut Option<(u64, u64)>) -> Option<String> {
+    let now = mali_busy_idle();
+    let text = match (*prev, now) {
+        (Some((pb, pi)), Some((b, i))) => {
+            let (db, di) = (b.saturating_sub(pb), i.saturating_sub(pi));
+            (db + di > 0).then(|| format!("GPU {:.0}% · ", db as f64 * 100.0 / (db + di) as f64))
+        }
+        _ => None,
+    };
+    *prev = now;
+    text
 }

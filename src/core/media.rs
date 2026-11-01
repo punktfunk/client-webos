@@ -67,6 +67,9 @@ pub trait VideoSink: Send {
 
     /// Feed one AU (or one piece). PTS is in this sink's clock; ignored if caps deny timestamps.
     fn feed(&self, au: &[u8], pts_ns: u64) -> Result<()>;
+    fn feed_flags(&self, au: &[u8], pts_ns: u64, _user_flags: u32) -> Result<()> {
+        self.feed(au, pts_ns)
+    }
 
     /// Drop the render queue. No-op where [`VideoSinkCaps::flush`] is false.
     fn flush(&self) -> Result<()> {

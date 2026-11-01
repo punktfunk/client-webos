@@ -172,7 +172,12 @@ impl Connected {
     /// Close the overlay window: the connector's figures, decoded by NDL.
     pub(crate) fn hud_snapshot(&self) -> punktfunk_core::hud::StatsSnapshot {
         let mut snap = self.client.hud_snapshot();
-        snap.decoder = "NDL".into();
+        snap.decoder = if crate::platform::webos::pyro::current_output().is_some() {
+            "Vulkan"
+        } else {
+            "NDL"
+        }
+        .into();
         snap
     }
 

@@ -46,6 +46,16 @@ const ABR_PROBE_KBPS: u32 = 320_000;
 fn set_abr_env() {
     std::env::set_var("PUNKTFUNK_ABR_PROBE_KBPS", ABR_PROBE_KBPS.to_string());
     std::env::set_var("PUNKTFUNK_ABR_MAX_MBPS", ABR_MAX_MBPS.to_string());
+    for (key, value) in [
+        ("PYROWAVE_ZERO_ONCE", "1"),
+        ("PYROWAVE_SKIP_BANDS", "1"),
+        ("PYROWAVE_SKIP_TILES", "1"),
+        ("PYROWAVE_HALF_OUTPUT", "0"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {

@@ -14,6 +14,7 @@ use std::sync::Arc;
 mod events;
 mod hud;
 pub(super) mod live;
+mod video;
 
 /// How many times a lost link is dialled again before the menu, and the pause before each
 /// dial. The host lingers a dropped session for a reconnect; a link that is still down
@@ -94,6 +95,7 @@ impl App {
             .get_primary_display()
             .and_then(|display| display.get_mode())
             .map_err(|e| anyhow::anyhow!("current display mode: {e}"))?;
+        let _ = crate::platform::webos::pyro::DISPLAY.set((display_mode.w as u32, display_mode.h as u32));
         tracing::info!(
             "display mode: {}x{}@{:.3}",
             display_mode.w,
@@ -120,6 +122,20 @@ impl App {
         // No SDL renderer: everything on screen is Skia on the console's GL context
         // (`console::gl`), which is the window's only one.
         tracing::info!("window created");
+        unsafe {
+            use sdl3::sys::properties::SDL_GetPointerProperty;
+            let props = sdl3::sys::video::SDL_GetWindowProperties(window.raw());
+            let display = SDL_GetPointerProperty(props, c"SDL.window.wayland.display".as_ptr(), std::ptr::null_mut());
+            let surface = SDL_GetPointerProperty(props, c"SDL.window.wayland.surface".as_ptr(), std::ptr::null_mut());
+            if !display.is_null() && !surface.is_null() {
+                let _ = crate::platform::webos::pyro::VO_WINDOW.set((
+                    display as usize,
+                    surface as usize,
+                    display_mode.w as u32,
+                    display_mode.h as u32,
+                ));
+            }
+        }
 
         let events = sdl.event_pump().map_err(|e| anyhow::anyhow!("event pump: {e}"))?;
         crate::platform::webos::input::mute_unused_events();

@@ -21,7 +21,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
-pub use launch::webos_sdk_override;
+pub use launch::{autostream, webos_sdk_override, AutoStream};
 pub use level::resolved_level;
 pub use ring::{recent_lines, set_ring_capture};
 pub use sink::{latest_log_file, previous_log_file, MAX_LOG_BYTES};

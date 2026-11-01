@@ -208,13 +208,14 @@ pub enum CodecPref {
     Hevc,
     /// Only ever the explicit pick: the ladder ranks HEVC first.
     Av1,
+    PyroWave,
 }
 
 impl CodecPref {
     /// Can stream 10-bit, so HDR too. Automatic defers to the negotiated codec
     /// (`NdlCodec::carries_hdr`, the same rule on the decoder side).
     pub fn allows_ten_bit(self) -> bool {
-        self != Self::H264
+        !matches!(self, Self::H264 | Self::PyroWave)
     }
 }
 

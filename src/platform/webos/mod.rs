@@ -16,6 +16,7 @@ pub mod mouse;
 pub mod ndl;
 pub mod pad_link;
 pub(crate) mod proc_input;
+pub mod pyro;
 pub mod sdl_webos;
 pub mod usb_audio;
 

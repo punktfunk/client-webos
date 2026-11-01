@@ -64,6 +64,16 @@ libc = "0.2"
 miniz_oxide = "0.8"
 # Keep default features/textlayout for the prebuilt Skia archive.
 skia-safe = { version = "0.153", features = ["gl", "textlayout"] }
+pyrowave-sys = { git = "https://git.unom.io/unom/punktfunk", rev = "bd072336f79cd75d392c2ce6d314a4a2309a7fae" }
+ash = "0.38"
+
+[patch."https://git.unom.io/unom/punktfunk"]
+pyrowave-sys = { path = "vendor/pyrowave-sys" }
+pf-console-ui = { path = "/home/lzampier/Clone/punktfunk/.claude/worktrees/webos-console/crates/client/pf-console-ui" }
+pf-client-core = { path = "/home/lzampier/Clone/punktfunk/.claude/worktrees/webos-console/crates/client/pf-client-core" }
+punktfunk-core = { path = "/home/lzampier/Clone/punktfunk/.claude/worktrees/webos-console/crates/core/punktfunk-core" }
+cros-codecs = { path = "/home/lzampier/Clone/punktfunk/.claude/worktrees/webos-console/crates/codec/pf-bitstream/vendor/cros-codecs" }
+fec-rs = { path = "/home/lzampier/Clone/punktfunk/.claude/worktrees/webos-console/crates/core/punktfunk-core/vendor/fec-rs" }
 
 [features]
 # Host tests build SDL3 from source; webOS links the prebuilt fork.

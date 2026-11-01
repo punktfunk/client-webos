@@ -13,6 +13,13 @@ struct LaunchParams {
     /// Forces `device::sdk_version`, so a modern TV can exercise the NDL v1 path
     /// (`task deploy WEBOS_SDK=...`).
     webos_sdk: Option<String>,
+    autostream: Option<AutoStream>,
+}
+
+#[derive(Deserialize)]
+pub struct AutoStream {
+    pub host: String,
+    pub target: Option<String>,
 }
 
 /// Cache launch params once; argv doesn't change over process lifetime.
@@ -52,4 +59,8 @@ pub(super) fn launch_level() -> Option<Level> {
 /// Launch-time override for the detected webOS SDK version; `None` leaves detection untouched.
 pub fn webos_sdk_override() -> Option<&'static str> {
     launch_params().webos_sdk.as_deref().filter(|s| !s.is_empty())
+}
+
+pub fn autostream() -> Option<&'static AutoStream> {
+    launch_params().autostream.as_ref()
 }
