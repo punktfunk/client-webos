@@ -191,6 +191,7 @@ impl VideoPump {
             loss: self.note_loss(frame),
             user_flags: frame.flags,
         };
+        crate::platform::webos::pyro::note_arrival(frame.first_ns, frame.received_ns);
         match self.stage.submit(&wire) {
             SinkResult::Presented { decode_us } => {
                 if let Some(us) = decode_us {

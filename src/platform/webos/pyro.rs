@@ -86,6 +86,107 @@ impl Timing {
     }
 }
 
+static ARRIVAL: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static FED: AtomicU64 = AtomicU64::new(0);
+static REPLACED: AtomicU64 = AtomicU64::new(0);
+static VO_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Packet arrival stamps (CLOCK_REALTIME ns) of the AU the pump is about to feed.
+pub fn note_arrival(first_ns: u64, received_ns: u64) {
+    ARRIVAL[0].store(first_ns, Ordering::Relaxed);
+    ARRIVAL[1].store(received_ns, Ordering::Relaxed);
+}
+
+#[derive(Default)]
+struct RxTimes {
+    assembly: Timing,
+    handoff: Timing,
+}
+
+struct Census {
+    at: Instant,
+    ticks: std::collections::HashMap<String, u64>,
+    cores: Vec<(u64, u64)>,
+    counts: [u64; 3],
+}
+
+impl Census {
+    fn new() -> Self {
+        let mut c = Self { at: Instant::now(), ticks: Default::default(), cores: Vec::new(), counts: [0; 3] };
+        (c.ticks, c.cores) = {
+            let (t, k) = c.read();
+            (t.into_iter().map(|(n, t, _)| (n, t)).collect(), k)
+        };
+        c
+    }
+
+    fn read(&mut self) -> (Vec<(String, u64, String)>, Vec<(u64, u64)>) {
+        let mut threads = Vec::new();
+        if let Ok(dir) = std::fs::read_dir("/proc/self/task") {
+            for e in dir.flatten() {
+                let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { continue };
+                let (Some(l), Some(r)) = (stat.find('('), stat.rfind(')')) else { continue };
+                let f: Vec<&str> = stat[r + 2..].split_whitespace().collect();
+                let ticks = f.get(11).zip(f.get(12)).and_then(|(u, s)| Some(u.parse::<u64>().ok()? + s.parse::<u64>().ok()?));
+                if let Some(t) = ticks {
+                    let tid = e.file_name().to_string_lossy().into_owned();
+                    threads.push((format!("{}/{tid}", &stat[l + 1..r]), t, f.get(36).copied().unwrap_or("?").to_owned()));
+                }
+            }
+        }
+        let mut cores = Vec::new();
+        if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
+            for line in stat.lines().filter(|l| l.starts_with("cpu") && !l.starts_with("cpu ")) {
+                let v: Vec<u64> = line.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+                let total: u64 = v.iter().take(8).sum();
+                let idle = v.get(3).unwrap_or(&0) + v.get(4).unwrap_or(&0);
+                cores.push((total - idle.min(total), total));
+            }
+        }
+        (threads, cores)
+    }
+
+    fn tick(&mut self) {
+        let el = self.at.elapsed();
+        if el < Duration::from_secs(10) {
+            return;
+        }
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+        let (threads, cores) = self.read();
+        let mut rows: Vec<(f64, String)> = threads
+            .iter()
+            .filter_map(|(n, t, c)| {
+                let pct = t.saturating_sub(*self.ticks.get(n).unwrap_or(t)) as f64 / hz / el.as_secs_f64() * 100.0;
+                (pct >= 1.0).then(|| (pct, format!("{n} {pct:.0}%@c{c}")))
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let busy: Vec<String> = cores
+            .iter()
+            .zip(self.cores.iter().chain(std::iter::repeat(&(0, 0))))
+            .map(|(n, o)| format!("{:.0}", (n.0.saturating_sub(o.0)) as f64 * 100.0 / n.1.saturating_sub(o.1).max(1) as f64))
+            .collect();
+        let now = [FED.load(Ordering::Relaxed), REPLACED.load(Ordering::Relaxed), VO_SKIPPED.load(Ordering::Relaxed)];
+        tracing::info!(
+            "pyrowave threads: {:.1}s, {}; cores busy % [{}]",
+            el.as_secs_f32(),
+            rows.iter().map(|r| r.1.as_str()).collect::<Vec<_>>().join(", "),
+            busy.join("/")
+        );
+        tracing::info!(
+            "pyrowave stale: {} fed, {} replaced before decode, {} skipped before show in {:.1}s",
+            now[0] - self.counts[0],
+            now[1] - self.counts[1],
+            now[2] - self.counts[2],
+            el.as_secs_f32()
+        );
+        self.ticks = threads.into_iter().map(|(n, t, _)| (n, t)).collect();
+        self.cores = cores;
+        self.counts = now;
+        self.at = Instant::now();
+    }
+}
+
 static OUTPUT: Mutex<Option<Arc<Output>>> = Mutex::new(None);
 static HUD: Mutex<Option<Arc<punktfunk_core::hud::Stats>>> = Mutex::new(None);
 
@@ -214,6 +315,8 @@ fn vo_thread(output: Weak<Output>, frames: mpsc::Receiver<usize>) {
     }
     let mut chroma = Vec::new();
     let mut connected = false;
+    let mut wake = Timing::default();
+    let mut il = Timing::default();
     let mut show = Timing::default();
     let mut age = Timing::default();
     let mut interval = Timing::default();
@@ -221,13 +324,15 @@ fn vo_thread(output: Weak<Output>, frames: mpsc::Receiver<usize>) {
     while let Ok(mut slot) = frames.recv() {
         while let Ok(newer) = frames.try_recv() {
             slot = newer;
+            VO_SKIPPED.fetch_add(1, Ordering::Relaxed);
         }
         let Some(out) = output.upgrade() else {
             break;
         };
         out.mark_shown(slot);
-        let started = Instant::now();
+        wake.add("pyrowave vo wake", out.age(slot));
         let [(y, pitch), cb, cr] = out.planes(slot);
+        let t = Instant::now();
         let uv = if out.nv12 && cb.1 == pitch {
             cb.0
         } else {
@@ -237,11 +342,13 @@ fn vo_thread(output: Weak<Output>, frames: mpsc::Receiver<usize>) {
             interleave(&mut chroma, pitch, cb, cr, w2, h2);
             chroma.as_ptr()
         };
+        il.add("pyrowave vo interleave", t.elapsed());
+        let t = Instant::now();
         let r = unsafe { pf_vo_show(y, uv, pitch, out.width, out.height) };
+        show.add("pyrowave vo displaypicture", t.elapsed());
         if r != 0 {
             tracing::warn!("pyrowave vo: DisplayPicture failed: {r}");
         }
-        show.add("pyrowave vo interleave+show", started.elapsed());
         age.add("pyrowave decoded->shown", out.age(slot));
         if let Some(prev) = last.replace(Instant::now()) {
             interval.add("pyrowave vo interval", prev.elapsed().min(Duration::from_secs(1)));
@@ -539,6 +646,7 @@ struct Lane {
     frag: Vec<u8>,
     full_range: bool,
     record: Timing,
+    slot_wait: Timing,
 }
 
 struct SlotSync {
@@ -725,7 +833,8 @@ impl Lane {
             return Ok(None);
         }
         let out = &dec.output;
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let wait_from = Instant::now();
+        let deadline = wait_from + Duration::from_secs(1);
         let slot = loop {
             let busy = out.busy.load(Ordering::Acquire);
             let latest = out.latest.load(Ordering::Acquire);
@@ -739,6 +848,7 @@ impl Lane {
             }
         };
         let started = Instant::now();
+        self.slot_wait.add("pyrowave slot wait", started - wait_from);
         let submitted = self.record_and_submit(slot)?;
         self.record.add("pyrowave record+submit", submitted - started);
         let dec = self.dec.as_ref().context("no decoder")?;
@@ -1341,6 +1451,7 @@ struct Pending {
     au: Vec<u8>,
     aligned: bool,
     pts_ns: u64,
+    fed_at: Instant,
 }
 
 #[derive(Default)]
@@ -1381,12 +1492,21 @@ fn margin() -> Duration {
 fn decode_thread(mut lane: Lane, shared: Arc<Shared>) {
     let mut record = Duration::from_millis(3);
     let mut due: Option<Instant> = None;
+    let (mut queue, mut timer, mut notify) = (Timing::default(), Timing::default(), Timing::default());
+    let mut census = Census::new();
     loop {
         let until = due.and_then(|d| d.checked_sub(record + margin()));
         let Some(p) = shared.take(until) else {
             break;
         };
         let started = Instant::now();
+        let queued = started.saturating_duration_since(p.fed_at);
+        queue.add("pyrowave feed queue", queued);
+        match until.filter(|t| p.fed_at <= *t) {
+            Some(t) => timer.add("pyrowave decode timer overshoot", started.saturating_duration_since(t)),
+            None => notify.add("pyrowave decode notify wake", queued),
+        }
+        census.tick();
         match lane.decode(&p.au, p.aligned, p.pts_ns) {
             Ok(Some(submitted)) => {
                 record = (record * 7 + (submitted - started)) / 8;
@@ -1413,6 +1533,7 @@ fn decode_thread(mut lane: Lane, shared: Arc<Shared>) {
 
 pub struct PyroSink {
     shared: Arc<Shared>,
+    rx: Mutex<RxTimes>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1425,6 +1546,7 @@ impl PyroSink {
             frag: Vec::new(),
             full_range,
             record: Timing::default(),
+            slot_wait: Timing::default(),
         };
         let shared = Arc::new(Shared::default());
         let worker = shared.clone();
@@ -1433,6 +1555,7 @@ impl PyroSink {
             .spawn(move || decode_thread(lane, worker))?;
         Ok(Self {
             shared,
+            rx: Mutex::default(),
             thread: Some(thread),
         })
     }
@@ -1466,12 +1589,28 @@ impl VideoSink for PyroSink {
             bail!("pyrowave decoder is dead");
         }
         let aligned = user_flags & punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED != 0;
+        let (first, last, now) = (ARRIVAL[0].load(Ordering::Relaxed), ARRIVAL[1].load(Ordering::Relaxed), realtime_ns());
+        {
+            let mut rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
+            if first != 0 && last >= first {
+                rx.assembly.add("pyrowave rx assembly", Duration::from_nanos(last - first));
+            }
+            if last != 0 && now >= last {
+                rx.handoff.add("pyrowave rx->feed", Duration::from_nanos(now - last));
+            }
+        }
+        FED.fetch_add(1, Ordering::Relaxed);
         let mut next = self.shared.next.lock().unwrap_or_else(PoisonError::into_inner);
+        if next.is_some() {
+            REPLACED.fetch_add(1, Ordering::Relaxed);
+        }
         let mut p = next.take().unwrap_or(Pending {
             au: Vec::new(),
             aligned,
             pts_ns,
+            fed_at: Instant::now(),
         });
+        p.fed_at = Instant::now();
         p.au.clear();
         p.au.extend_from_slice(au);
         p.aligned = aligned;
@@ -1497,6 +1636,7 @@ mod tests {
             au: vec![n],
             aligned: false,
             pts_ns: u64::from(n),
+            fed_at: Instant::now(),
         };
         let shared = Arc::new(Shared::default());
         *shared.next.lock().unwrap() = Some(pending(1));
