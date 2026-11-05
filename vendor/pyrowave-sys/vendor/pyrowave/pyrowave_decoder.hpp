@@ -50,6 +50,9 @@ public:
 
 	bool decode_is_ready(bool allow_partial_frame) const;
 
+	// Wall time of the last frame's CPU dequant (PYROWAVE_CPU_DEQUANT=1), 0 otherwise.
+	uint32_t cpu_dequant_us() const;
+
 	// A more refined version of decode_is_ready() that allows a bit more control.
 	// The default is num_pristine_bands = 2 (the next-to-final LL band) and minimum_packet_ratio = 0.9.
 	// active_block_mask is an optional pointer.

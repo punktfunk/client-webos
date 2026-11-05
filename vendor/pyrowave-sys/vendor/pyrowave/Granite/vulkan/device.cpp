@@ -307,6 +307,16 @@ LinearHostImageHandle Device::create_linear_host_image(const LinearHostImageCrea
 	return LinearHostImageHandle(handle_pool.linear_images.allocate(this, std::move(gpu_image), std::move(cpu_image), info.stages));
 }
 
+void *Device::map_image_memory(const Image &image, MemoryAccessFlags access)
+{
+	return managers.memory.map_memory(image.get_allocation(), access, 0, image.get_allocation().get_size());
+}
+
+void Device::unmap_image_memory(const Image &image, MemoryAccessFlags access)
+{
+	managers.memory.unmap_memory(image.get_allocation(), access, 0, image.get_allocation().get_size());
+}
+
 void *Device::map_linear_host_image(const LinearHostImage &image, MemoryAccessFlags access)
 {
 	void *host = managers.memory.map_memory(image.get_host_visible_allocation(), access,
@@ -4226,7 +4236,7 @@ ImageHandle Device::create_image_from_staging_buffer(const ImageCreateInfo &crea
 		// Do some more stringent checks.
 		if (info.mipLevels > 1)
 			return ImageHandle(nullptr);
-		if (info.arrayLayers > 1)
+		if (info.arrayLayers > 1 && (create_info.misc & IMAGE_MISC_LINEAR_IMAGE_IGNORE_DEVICE_LOCAL_BIT) == 0)
 			return ImageHandle(nullptr);
 		if (info.imageType != VK_IMAGE_TYPE_2D)
 			return ImageHandle(nullptr);

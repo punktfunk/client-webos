@@ -32,3 +32,9 @@ add_library(pyrowave-capi STATIC ${PYROWAVE_VENDOR_DIR}/pyrowave_c.cpp
 target_link_libraries(pyrowave-capi PRIVATE pyrowave granite-vulkan granite-math)
 target_include_directories(pyrowave-capi PRIVATE
     ${PYROWAVE_VENDOR_DIR}/shaders ${PYROWAVE_VENDOR_DIR}/Granite/video)
+
+# cpudq.hpp converts with the NEON half-float instructions, which the soft-float armv7
+# webOS toolchain only enables with an explicit FPU.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm" AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_compile_options(pyrowave PRIVATE -mfpu=neon-fp16 -mfp16-format=ieee)
+endif()

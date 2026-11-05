@@ -1752,6 +1752,11 @@ bool pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_parti
 	return decoder->decoder.decode_is_ready(allow_partial_frame);
 }
 
+uint32_t pyrowave_decoder_cpu_dequant_us(pyrowave_decoder decoder)
+{
+	return decoder->decoder.cpu_dequant_us();
+}
+
 bool pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
 		int num_pristine_bands, float minimum_packet_ratio,
 		const uint32_t *active_block_mask, size_t word_count)

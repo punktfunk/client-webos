@@ -665,6 +665,10 @@ pyrowave_decoder_push_packet_in_place(pyrowave_decoder decoder, const void *data
 PYROWAVE_PUBLIC_API bool
 pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_frame);
 
+// Wall time of the last decode's CPU dequant in microseconds, 0 when PYROWAVE_CPU_DEQUANT is off.
+PYROWAVE_PUBLIC_API uint32_t
+pyrowave_decoder_cpu_dequant_us(pyrowave_decoder decoder);
+
 PYROWAVE_PUBLIC_API bool
 pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
 		int num_pristine_bands, float minimum_packet_ratio,

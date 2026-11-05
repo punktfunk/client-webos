@@ -108,16 +108,24 @@ struct Census {
     ticks: std::collections::HashMap<String, u64>,
     cores: Vec<(u64, u64)>,
     counts: [u64; 3],
+    irq: [u64; 4],
 }
 
 impl Census {
     fn new() -> Self {
-        let mut c = Self { at: Instant::now(), ticks: Default::default(), cores: Vec::new(), counts: [0; 3] };
+        let mut c = Self { at: Instant::now(), ticks: Default::default(), cores: Vec::new(), counts: [0; 3], irq: Self::irq() };
         (c.ticks, c.cores) = {
             let (t, k) = c.read();
             (t.into_iter().map(|(n, t, _)| (n, t)).collect(), k)
         };
         c
+    }
+
+    fn irq() -> [u64; 4] {
+        let l = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+        let v: Vec<u64> = l.lines().next().unwrap_or("").split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+        let g = |i| v.get(i).copied().unwrap_or(0);
+        [g(0) + g(1), g(2), g(5), g(6)]
     }
 
     fn read(&mut self) -> (Vec<(String, u64, String)>, Vec<(u64, u64)>) {
@@ -160,6 +168,15 @@ impl Census {
                 (pct >= 1.0).then(|| (pct, format!("{n} {pct:.0}%@c{c}")))
             })
             .collect();
+        let irq = Self::irq();
+        let names = ["sys.user", "sys.system", "sys.irq", "sys.softirq"];
+        for (i, (n, o)) in irq.iter().zip(self.irq).enumerate() {
+            let pct = n.saturating_sub(o) as f64 / hz / el.as_secs_f64() * 100.0;
+            if pct >= 1.0 {
+                rows.push((pct, format!("{}/0 {pct:.0}%@c-", names[i])));
+            }
+        }
+        self.irq = irq;
         rows.sort_by(|a, b| b.0.total_cmp(&a.0));
         let busy: Vec<String> = cores
             .iter()
@@ -646,6 +663,7 @@ struct Lane {
     frag: Vec<u8>,
     full_range: bool,
     record: Timing,
+    cpu_dequant: Timing,
     slot_wait: Timing,
 }
 
@@ -695,10 +713,15 @@ impl Completion {
             let done = Instant::now();
             wall.add("pyrowave feed decode+copy wall", done - started);
             gpu.add("pyrowave submit->done", done - submitted);
+            let queued = last.is_some_and(|prev| prev >= submitted);
             let own = done - last.map_or(submitted, |prev| prev.max(submitted));
             let old = out.gpu_ns.load(Ordering::Relaxed);
             let own = own.as_nanos() as u64;
-            out.gpu_ns.store(if old == 0 { own } else { old - old / 8 + own / 8 }, Ordering::Relaxed);
+            // A frame submitted to an idle GPU also counts submit and wake latency (~1 ms with the
+            // CPU dequant ahead of it); only back-to-back frames measure the GPU.
+            if queued || old == 0 {
+                out.gpu_ns.store(if old == 0 { own } else { old - old / 8 + own / 8 }, Ordering::Relaxed);
+            }
             if let Some(hud) = HUD.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
                 hud.note_decoded(pts_ns, realtime_ns());
             }
@@ -851,6 +874,12 @@ impl Lane {
         self.slot_wait.add("pyrowave slot wait", started - wait_from);
         let submitted = self.record_and_submit(slot)?;
         self.record.add("pyrowave record+submit", submitted - started);
+        if let Some(dec) = &self.dec {
+            let us = unsafe { pw::pyrowave_decoder_cpu_dequant_us(dec.pw_dec) };
+            if us > 0 {
+                self.cpu_dequant.add("pyrowave cpu dequant", Duration::from_micros(us.into()));
+            }
+        }
         let dec = self.dec.as_ref().context("no decoder")?;
         if let Some((done, _)) = &dec.done {
             let _ = done.send((slot, started, submitted, pts_ns));
@@ -1161,6 +1190,10 @@ impl Lane {
         let half = !vo && (width > dw || height > dh) && width % 4 == 0 && height % 4 == 0;
         let nv12 = vo && width % 8 == 0 && app_flag("pyro-gpu-nv12");
         std::env::set_var("PYROWAVE_HALF_OUTPUT", if half { "1" } else { "0" });
+        // Above 1080p the GPU dequant is what misses 60 fps; the CPU does it on spare cores.
+        if std::env::var_os("PYROWAVE_CPU_DEQUANT").is_none() {
+            std::env::set_var("PYROWAVE_CPU_DEQUANT", if width * height > 1920 * 1080 { "1" } else { "0" });
+        }
         let (out_w, out_h) = if half { (width / 2, height / 2) } else { (width, height) };
         let dinfo = pw::pyrowave_decoder_create_info {
             device: pw_dev,
@@ -1490,6 +1523,10 @@ fn margin() -> Duration {
 }
 
 fn decode_thread(mut lane: Lane, shared: Arc<Shared>) {
+    if let Some(n) = std::env::var("PYROWAVE_CPU_DEQUANT_NICE").ok().and_then(|n| n.parse::<i32>().ok()) {
+        let r = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, n) };
+        tracing::info!("pyrowave decode thread nice {n}: {r}");
+    }
     let mut record = Duration::from_millis(3);
     let mut due: Option<Instant> = None;
     let (mut queue, mut timer, mut notify) = (Timing::default(), Timing::default(), Timing::default());
@@ -1546,6 +1583,7 @@ impl PyroSink {
             frag: Vec::new(),
             full_range,
             record: Timing::default(),
+            cpu_dequant: Timing::default(),
             slot_wait: Timing::default(),
         };
         let shared = Arc::new(Shared::default());

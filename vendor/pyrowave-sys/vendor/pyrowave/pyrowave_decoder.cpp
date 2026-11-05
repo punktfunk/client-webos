@@ -7,6 +7,12 @@
 #include "math.hpp"
 #include "pyrowave_common.hpp"
 #include <algorithm>
+#include <chrono>
+#ifdef __linux__
+#include <sched.h>
+#endif
+#include <thread>
+#include "cpudq.hpp"
 
 namespace PyroWave
 {
@@ -59,6 +65,27 @@ struct Decoder::Impl final : public WaveletBuffers
 	int total_blocks_in_sequence = 0;
 	uint32_t last_seq = UINT32_MAX;
 	bool decoded_frame_for_current_sequence = false;
+
+	// PYROWAVE_CPU_DEQUANT=1: the CPU dequantizes into host-cached linear images (NEON, thread pool)
+	// and the GPU runs only the iDWT. Each ring slot has its own images and dirty map.
+	bool cpu_dq = getenv("PYROWAVE_CPU_DEQUANT") && atoi(getenv("PYROWAVE_CPU_DEQUANT")) != 0;
+	static constexpr int CpuRing = 4;
+	cpudq::Dequant hq;
+	bool cpu_dq_ready = false;
+	int cpu_slot = 0;
+	bool cpu_lin_fresh[CpuRing] = { true, true, true, true };
+	std::vector<uint8_t> cpu_dirty[CpuRing];
+	ImageHandle cpu_lin[CpuRing][NumComponents][DecompositionLevels];
+	ImageViewHandle cpu_lin_view[CpuRing][NumComponents][DecompositionLevels];
+	ImageViewHandle cpu_lin_ll[CpuRing][NumComponents][DecompositionLevels];
+	std::vector<uint32_t> cpu_offsets_scratch;
+	uint32_t cpu_dq_us = 0;
+	bool cpu_dq_setup();
+	bool cpu_dq_fill(CommandBuffer &cmd);
+	~Impl()
+	{
+		hq.pool.stop();
+	}
 
 	bool push_packet(const void *data, size_t size);
 	bool decode(CommandBuffer &cmd, const ViewBuffers &views);
@@ -450,6 +477,122 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	cmd.enable_subgroup_size_control(false);
 	device->register_time_interval("GPU", std::move(start_dequant), std::move(end_dequant), "Dequant");
 
+	return true;
+}
+
+bool Decoder::Impl::cpu_dq_setup()
+{
+	if (chroma != ChromaSubsampling::Chroma420 || half_output || fragment_path || in_place_base)
+		return false;
+	hq.init(width, height);
+	// Write-combined (HOST_COHERENT, uncached) images need no cache flush; PYROWAVE_CPU_CACHED=1 restores the host-cached path.
+	const bool cached = getenv("PYROWAVE_CPU_CACHED") && atoi(getenv("PYROWAVE_CPU_CACHED")) != 0;
+	hq.wc = !cached;
+	for (auto &p : hq.planes)
+		if (p.w != int(wavelet_img_high_res->get_width(p.level)) || p.h != int(wavelet_img_high_res->get_height(p.level)))
+			return false;
+	for (int i = 0; i < CpuRing; i++)
+	{
+		for (int c = 0; c < NumComponents; c++)
+			for (int l = 0; l < DecompositionLevels; l++)
+			{
+				if (l == 0 && c != 0)
+					continue;
+				auto info = ImageCreateInfo::immutable_2d_image(wavelet_img_high_res->get_width(l),
+				                                                wavelet_img_high_res->get_height(l),
+				                                                VK_FORMAT_R16_SFLOAT);
+				info.domain = cached ? ImageDomain::LinearHostCached : ImageDomain::LinearHost;
+				info.layers = NumFrequencyBandsPerLevel;
+				info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+				info.initial_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+				info.misc |= IMAGE_MISC_LINEAR_IMAGE_IGNORE_DEVICE_LOCAL_BIT;
+				info.layout = ImageLayout::General;
+				cpu_lin[i][c][l] = device->create_image(info);
+				if (!cpu_lin[i][c][l])
+					return false;
+				ImageViewCreateInfo vi = {};
+				vi.image = cpu_lin[i][c][l].get();
+				vi.view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+				vi.layers = NumFrequencyBandsPerLevel;
+				vi.levels = 1;
+				cpu_lin_view[i][c][l] = device->create_image_view(vi);
+				vi.view_type = VK_IMAGE_VIEW_TYPE_2D;
+				vi.layers = 1;
+				cpu_lin_ll[i][c][l] = device->create_image_view(vi);
+			}
+		cpu_dirty[i].assign(hq.nblocks, 1);
+		cpu_lin_fresh[i] = true;
+	}
+	// The calling thread is one worker; leave one core for the rest of the client.
+	long ncpu = long(std::thread::hardware_concurrency());
+#ifdef __linux__
+	cpu_set_t set;
+	if (sched_getaffinity(0, sizeof(set), &set) == 0)
+		ncpu = CPU_COUNT(&set);
+#endif
+	int threads = int(std::max(1L, std::min(3L, ncpu - 1)));
+	if (const char *t = getenv("PYROWAVE_CPU_DEQUANT_THREADS"))
+		threads = std::max(1, atoi(t));
+	hq.pool.start(&hq, threads - 1);
+	return true;
+}
+
+bool Decoder::Impl::cpu_dq_fill(CommandBuffer &cmd)
+{
+	const auto now_us = [] {
+		return std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+	};
+	const auto t0 = now_us();
+	cpu_slot = (cpu_slot + 1) % CpuRing;
+	const int slot = cpu_slot;
+
+	// The NEON reader may read a few bytes past the last block.
+	const size_t payload_words = payload_data_cpu.size();
+	payload_data_cpu.resize(payload_words + 4, 0);
+	hq.offs = dequant_offset_buffer_cpu;
+	hq.dirty.swap(cpu_dirty[slot]);
+
+	uint8_t *bases[NumComponents][DecompositionLevels] = {};
+	for (int c = 0; c < NumComponents; c++)
+		for (int l = 0; l < DecompositionLevels; l++)
+			if (cpu_lin[slot][c][l])
+				bases[c][l] = static_cast<uint8_t *>(device->map_image_memory(*cpu_lin[slot][c][l], MEMORY_ACCESS_WRITE_BIT));
+	bool ok = true;
+	for (auto &p : hq.planes)
+	{
+		VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, uint32_t(p.band) };
+		VkSubresourceLayout lay;
+		device->get_device_table().vkGetImageSubresourceLayout(device->get_device(),
+		                                                       cpu_lin[slot][p.comp][p.level]->get_image(), &sub, &lay);
+		p.ptr = reinterpret_cast<uint16_t *>(bases[p.comp][p.level] + lay.offset);
+		p.ostride = int(lay.rowPitch / 2);
+		p.clip = true;
+		ok = ok && lay.rowPitch % 2 == 0;
+	}
+	if (ok)
+		hq.run(reinterpret_cast<const uint8_t *>(payload_data_cpu.data()));
+
+	for (int c = 0; c < NumComponents; c++)
+		for (int l = 0; l < DecompositionLevels; l++)
+			if (cpu_lin[slot][c][l])
+				device->unmap_image_memory(*cpu_lin[slot][c][l], MEMORY_ACCESS_WRITE_BIT);
+	hq.dirty.swap(cpu_dirty[slot]);
+	payload_data_cpu.resize(payload_words);
+	cpu_dq_us = uint32_t(now_us() - t0);
+	if (!ok)
+		return false;
+
+	for (int c = 0; c < NumComponents; c++)
+		for (int l = 0; l < DecompositionLevels; l++)
+			if (cpu_lin[slot][c][l])
+				cmd.image_barrier(*cpu_lin[slot][c][l],
+				                  cpu_lin_fresh[slot] ? VK_IMAGE_LAYOUT_PREINITIALIZED : VK_IMAGE_LAYOUT_GENERAL,
+				                  VK_IMAGE_LAYOUT_GENERAL,
+				                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+				                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+	cpu_lin_fresh[slot] = false;
 	return true;
 }
 
@@ -1010,7 +1153,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 					snprintf(label, sizeof(label), "iDWT final, component %u", c);
 					cmd.begin_region(label);
 					cmd.set_storage_texture(0, 1, *views.planes[c]);
-					cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
+					cmd.set_texture(0, 0, cpu_dq ? *cpu_lin_view[cpu_slot][c][input_level] : *component_layer_views[c][input_level], *mirror_repeat_sampler);
 					select_program(c, input_level, true);
 					cmd.dispatch((push.resolution.x + 15) / 16, groups_y(push.resolution.y), 1);
 					cmd.end_region();
@@ -1020,7 +1163,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 			{
 				cmd.set_storage_texture(0, 1, *views.planes[0]);
 				cmd.begin_region("iDWT final");
-				cmd.set_texture(0, 0, *component_layer_views[0][input_level], *mirror_repeat_sampler);
+				cmd.set_texture(0, 0, cpu_dq ? *cpu_lin_view[cpu_slot][0][input_level] : *component_layer_views[0][input_level], *mirror_repeat_sampler);
 				select_program(0, input_level, true);
 				cmd.dispatch((push.resolution.x + 15) / 16, groups_y(push.resolution.y), 1);
 				cmd.end_region();
@@ -1034,7 +1177,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 				if (input_level < final_level)
 					continue;
 
-				cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
+				cmd.set_texture(0, 0, cpu_dq ? *cpu_lin_view[cpu_slot][c][input_level] : *component_layer_views[c][input_level], *mirror_repeat_sampler);
 
 				if (input_level == final_level)
 				{
@@ -1046,7 +1189,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 				}
 				else
 				{
-					cmd.set_storage_texture(0, 1, *component_ll_views[c][input_level - 1]);
+					cmd.set_storage_texture(0, 1, cpu_dq ? *cpu_lin_ll[cpu_slot][c][input_level - 1] : *component_ll_views[c][input_level - 1]);
 					cmd.set_specialization_constant(0, false);
 				}
 
@@ -1158,16 +1301,33 @@ bool Decoder::Impl::decode_is_ready(bool allow_partial_frame) const
 
 bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 {
+	if (cpu_dq && !cpu_dq_ready)
+	{
+		cpu_dq_ready = cpu_dq_setup();
+		if (!cpu_dq_ready)
+		{
+			LOGE("CPU dequant unavailable, using the GPU path.\n");
+			cpu_dq = false;
+		}
+	}
+
 	cmd.begin_region("Decode uploads");
 	{
-		if (!upload_payload(cmd))
+		if (!cpu_dq && !upload_payload(cmd))
 		{
 			cmd.end_region();
 			return false;
 		}
 
-		auto *offsets = static_cast<uint32_t *>(cmd.update_buffer(*dequant_offset_buffer, 0,
-		                         dequant_offset_buffer_cpu.size() * sizeof(dequant_offset_buffer_cpu.front())));
+		uint32_t *offsets;
+		if (cpu_dq)
+		{
+			cpu_offsets_scratch.resize(dequant_offset_buffer_cpu.size());
+			offsets = cpu_offsets_scratch.data();
+		}
+		else
+			offsets = static_cast<uint32_t *>(cmd.update_buffer(*dequant_offset_buffer, 0,
+			                         dequant_offset_buffer_cpu.size() * sizeof(dequant_offset_buffer_cpu.front())));
 		const bool skip_bands = skip_bands_enabled && !fragment_path && use_idwt_shuf();
 		for (int c = 0; c < NumComponents; c++)
 		{
@@ -1233,7 +1393,12 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 	if (stages < 1)
 		return true;
 
-	if (!dequant(cmd))
+	if (cpu_dq)
+	{
+		if (!cpu_dq_fill(cmd))
+			return false;
+	}
+	else if (!dequant(cmd))
 		return false;
 
 	if (stages < 2)
@@ -1523,6 +1688,11 @@ bool Decoder::push_packet_in_place(const void *data, size_t size)
 bool Decoder::decode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views)
 {
 	return impl->decode(cmd, views);
+}
+
+uint32_t Decoder::cpu_dequant_us() const
+{
+	return impl->cpu_dq_us;
 }
 
 bool Decoder::decode_is_ready(bool allow_partial_frame) const

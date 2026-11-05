@@ -62,6 +62,13 @@ fn set_abr_env() {
 }
 
 fn main() -> anyhow::Result<()> {
+    unsafe {
+        std::env::set_var("PYROWAVE_CPU_DEQUANT_NICE", "-10");
+        std::env::set_var("PYROWAVE_CPU_DEQUANT_THREADS", "4");
+    }
+    punktfunk_core::client::set_thread_boost(|| unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, -8);
+    });
     // Load-bearing, not belt-and-braces: `ureq` is built without a backend feature
     // (`rustls-no-provider` — see Cargo.toml for why), and its own provider resolution ends in a
     // `panic!` when no process default has been installed. The two agents built by

@@ -357,6 +357,8 @@ public:
 	void *map_host_buffer(const Buffer &buffer, MemoryAccessFlags access, VkDeviceSize offset, VkDeviceSize length);
 	void unmap_host_buffer(const Buffer &buffer, MemoryAccessFlags access, VkDeviceSize offset, VkDeviceSize length);
 
+	void *map_image_memory(const Image &image, MemoryAccessFlags access);
+	void unmap_image_memory(const Image &image, MemoryAccessFlags access);
 	void *map_linear_host_image(const LinearHostImage &image, MemoryAccessFlags access);
 	void unmap_linear_host_image_and_sync(const LinearHostImage &image, MemoryAccessFlags access);
 
