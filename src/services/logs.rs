@@ -17,7 +17,7 @@ pub struct HostTarget {
 /// Reads the newest `budget` bytes, dropping any partial leading line.
 fn log_tail(path: &Path, budget: u64) -> Result<String, String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
-    let unreadable = |e: std::io::Error| format!("Couldn't read the log file: {e}");
+    let unreadable = |e: std::io::Error| pf_l10n::console::console_logs_read_failed(e);
     let mut f = std::fs::File::open(path).map_err(unreadable)?;
     let len = f.metadata().map_err(unreadable)?.len();
     let truncated = len > budget;
@@ -34,7 +34,7 @@ fn log_tail(path: &Path, budget: u64) -> Result<String, String> {
     };
     let text = String::from_utf8_lossy(&raw[from..]);
     if text.trim().is_empty() {
-        return Err("No logs to send yet.".into());
+        return Err(pf_l10n::console::console_logs_none().into());
     }
     Ok(if truncated {
         format!("… older log lines truncated …\n{text}")
@@ -61,7 +61,7 @@ fn post_log(target: &HostTarget) -> Result<String, String> {
     } else {
         MAX_LOG_BYTES
     };
-    let path = crate::logger::latest_log_file(&dir).ok_or("No logs to send yet.")?;
+    let path = crate::logger::latest_log_file(&dir).ok_or(pf_l10n::console::console_logs_none())?;
     let log = log_tail(&path, budget)?;
     let previous = previous
         .filter(|p| *p != path)
@@ -74,7 +74,7 @@ fn post_log(target: &HostTarget) -> Result<String, String> {
         std::env::consts::ARCH,
     );
     let agent = library::agent(&target.identity, Some(target.pin))
-        .map_err(|e| format!("Couldn't send logs to {} — {e}", target.name))?;
+        .map_err(|e| pf_l10n::console::console_logs_send_failed(&target.name, e))?;
     let url = format!(
         "{}/api/v1/client-logs",
         library::base_url(&target.addr, target.mgmt_port)
@@ -84,14 +84,11 @@ fn post_log(target: &HostTarget) -> Result<String, String> {
         .header("Content-Type", "text/plain; charset=utf-8")
         .send(body.as_bytes())
     {
-        Ok(_) => Ok(format!(
-            "Logs sent to {} — download them from its web console's Logs page",
-            target.name
-        )),
+        Ok(_) => Ok(pf_l10n::client::hostcard_logs_sent_body(&target.name)),
         Err(e) => Err(match library::classify(e) {
-            LibraryError::Http(413) => "Log file too large to send (1 MB limit).".into(),
-            LibraryError::NotPaired => format!("{} refused the logs — pair with it again.", target.name),
-            other => format!("{}: {other}", target.name),
+            LibraryError::Http(413) => pf_l10n::console::console_logs_too_large().into(),
+            LibraryError::NotPaired => pf_l10n::console::console_logs_refused(&target.name),
+            other => pf_l10n::console::console_logs_failed_why(&target.name, other),
         }),
     }
 }

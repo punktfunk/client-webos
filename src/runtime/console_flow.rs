@@ -187,7 +187,7 @@ pub(super) fn run(
                         }
                         handles
                             .console
-                            .set_notice("HDR calibration needs an HDR-capable TV.".to_string());
+                            .set_notice(pf_l10n::console::console_webos_calibration_needs_hdr().to_string());
                         continue;
                     }
                     _ => continue,

@@ -57,14 +57,14 @@ pub enum LibraryError {
 impl std::fmt::Display for LibraryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotPaired => f.write_str("Not paired — pair with the host first."),
-            Self::PinMismatch => f.write_str("Host certificate changed — re-pair with a PIN."),
-            Self::Http(code) => write!(f, "Management API returned HTTP {code}."),
-            Self::Unreachable(_) => f.write_str("The host isn't answering."),
-            Self::Timeout(_) => f.write_str("The host is answering too slowly."),
-            Self::BadReply(_) => f.write_str("Couldn't read the host's reply."),
-            Self::Tls(_) => f.write_str("Couldn't secure the connection to the host."),
-            Self::Identity(_) => f.write_str("Couldn't load this device's pairing identity."),
+            Self::NotPaired => f.write_str(pf_l10n::console::console_lib_not_paired()),
+            Self::PinMismatch => f.write_str(pf_l10n::console::console_lib_pin_changed()),
+            Self::Http(code) => f.write_str(&pf_l10n::console::console_lib_http(code)),
+            Self::Unreachable(_) => f.write_str(pf_l10n::console::console_lib_unreachable()),
+            Self::Timeout(_) => f.write_str(pf_l10n::console::console_lib_timeout()),
+            Self::BadReply(_) => f.write_str(pf_l10n::console::console_lib_bad_reply()),
+            Self::Tls(_) => f.write_str(pf_l10n::console::console_lib_tls()),
+            Self::Identity(_) => f.write_str(pf_l10n::console::console_lib_identity()),
         }
     }
 }
