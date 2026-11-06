@@ -51,7 +51,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "c4d6fe182882dd1874afc47e78bbe7ff8d8c822c", features = ["quic", "chacha-aws-lc-rs", "l10n"] }
 pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "c4d6fe182882dd1874afc47e78bbe7ff8d8c822c", default-features = false }
 # The words the kit and the core show; this client reads the `client` and `console` parts too.
-pf-l10n = { git = "https://git.unom.io/unom/punktfunk", rev = "c4d6fe182882dd1874afc47e78bbe7ff8d8c822c", default-features = false, features = ["client", "console"] }
+pf-l10n = { git = "https://git.unom.io/unom/punktfunk", rev = "c4d6fe182882dd1874afc47e78bbe7ff8d8c822c", default-features = false, features = ["client", "console", "host"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cros-codecs = { git = "https://git.unom.io/unom/punktfunk", rev = "c4d6fe182882dd1874afc47e78bbe7ff8d8c822c" }

@@ -1141,8 +1141,8 @@ fn same_host(h: &KnownHost, d: &DiscoveredHost) -> bool {
 /// worse than naming the two it does understand.
 fn power_rows(rights: PowerRights) -> Vec<HostAction> {
     [
-        (ExitAction::Sleep, "Sleep", false),
-        (ExitAction::Shutdown, "Shut down", true),
+        (ExitAction::Sleep, pf_l10n::host::host_power_sleep(), false),
+        (ExitAction::Shutdown, pf_l10n::host::host_power_shutdown(), true),
     ]
     .into_iter()
     .filter_map(|(action, label, danger)| {
