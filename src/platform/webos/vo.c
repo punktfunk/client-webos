@@ -2,6 +2,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <time.h>
+#define LXVO_DIR "/media/developer/apps/usr/palm/applications/io.unom.punktfunk.client-webos"
 #include <wayland-client.h>
 #include <wayland-webos-foreign-client-protocol.h>
 
@@ -94,6 +102,71 @@ const char *pf_vo_window_id(void)
 	return window_id;
 }
 
+typedef int (*lx_rw_t)(void *);
+typedef int (*lx_fr_t)(void *, unsigned, unsigned);
+static void *lx_h;
+static int lx_fd = -1, lx_flags = 2, lx_lag = 1, lx_tmo = 25;
+static volatile unsigned lx_disp, lx_drop, lx_nev;
+static unsigned lx_k, lx_base;
+static lx_rw_t lx_read_info;
+static pthread_mutex_t lx_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t lx_cv = PTHREAD_COND_INITIALIZER;
+#define LX_RING 65536
+static struct { double t; unsigned tag, w1, w2; } lx_ev[LX_RING];
+static struct { double t0, t1, t2; unsigned k, disp; } lx_fl[LX_RING];
+static unsigned lx_nfl, lx_dumped_ev, lx_dumped_fl;
+
+static double lx_now(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+static void *lx_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		struct pollfd p = { lx_fd, POLLIN | POLLPRI, 0 };
+		int r = poll(&p, 1, 200);
+		if (r <= 0 || !(p.revents & POLLIN))
+			continue;
+		memset((char *)lx_h + 8, 0, 56);
+		unsigned tag = (unsigned)lx_read_info(lx_h);
+		double t = lx_now();
+		unsigned *w = (unsigned *)((char *)lx_h + 8);
+		unsigned n = lx_nev++ % LX_RING;
+		lx_ev[n].t = t;
+		lx_ev[n].tag = tag;
+		lx_ev[n].w1 = w[1];
+		lx_ev[n].w2 = w[2];
+		pthread_mutex_lock(&lx_mu);
+		if (tag == 0x44495350u)
+			lx_disp++;
+		else if (tag == 0x44524f50u)
+			lx_drop++;
+		pthread_cond_broadcast(&lx_cv);
+		pthread_mutex_unlock(&lx_mu);
+	}
+	return NULL;
+}
+
+static void lx_dump(void)
+{
+	FILE *f = fopen("/tmp/lxvo.log", "a");
+	if (!f)
+		return;
+	for (; lx_dumped_ev < lx_nev && lx_dumped_ev < LX_RING; lx_dumped_ev++) {
+		unsigned i = lx_dumped_ev;
+		fprintf(f, "%.3f EV %08x w1=%x w2=%x\n", lx_ev[i].t, lx_ev[i].tag, lx_ev[i].w1, lx_ev[i].w2);
+	}
+	for (; lx_dumped_fl < lx_nfl && lx_dumped_fl < LX_RING; lx_dumped_fl++) {
+		unsigned i = lx_dumped_fl;
+		fprintf(f, "%.3f FR k=%u t1=%.3f t2=%.3f disp=%u\n", lx_fl[i].t0, lx_fl[i].k, lx_fl[i].t1, lx_fl[i].t2, lx_fl[i].disp);
+	}
+	fclose(f);
+}
+
 int pf_vo_open(int uhd)
 {
 	if (vo_ch >= 0)
@@ -115,6 +188,33 @@ int pf_vo_open(int uhd)
 	vo_ch = 0;
 	dile_vo_config c = { 4, 13, 0, 0, 0 };
 	vo_config(vo_ch, c);
+	/* liblxv handle of channel 0 from the HAL channel table (libhal_photo md5 68bbd1f2) */
+	uintptr_t hv = (uintptr_t)dlsym(hal, "HAL_VO_Open");
+	void *lxv = dlopen("liblxv.so.2", RTLD_NOW);
+	if (hv && lxv) {
+		lx_h = *(void **)((hv & ~1u) - 0x2c1c + 0x160f0);
+		lx_fr_t set_fr = (lx_fr_t)dlsym(lxv, "lxvo_set_framerate");
+		if (lx_h && set_fr)
+			set_fr(lx_h, 60, 1);
+		FILE *lf = fopen(LXVO_DIR "/lxvo-dg", "r");
+		if (lf) {
+			if (fscanf(lf, "%d %d %d", &lx_flags, &lx_lag, &lx_tmo) < 1)
+				lx_flags = 0;
+			fclose(lf);
+		}
+		if (lx_h) {
+			lx_read_info = (lx_rw_t)dlsym(lxv, "lxvo_read_info");
+			lx_fd = *(int *)lx_h;
+			if (lx_flags && lx_read_info && lx_fd >= 0) {
+				pthread_t th;
+				pthread_create(&th, NULL, lx_thread, NULL);
+			} else {
+				lx_flags = 0;
+			}
+		} else {
+			lx_flags = 0;
+		}
+	}
 	return 0;
 }
 
@@ -122,12 +222,42 @@ int pf_vo_show(const uint8_t *luma, const uint8_t *chroma, uint32_t stride, uint
 {
 	if (vo_ch < 0)
 		return -1;
+	double t0 = lx_flags ? lx_now() : 0;
+	if (lx_k == 0)
+		lx_base = lx_disp + lx_drop;
+	if ((lx_flags & 2) && lx_k >= 1) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		long ns = ts.tv_nsec + (long)lx_tmo * 1000000L;
+		ts.tv_sec += ns / 1000000000L;
+		ts.tv_nsec = ns % 1000000000L;
+		pthread_mutex_lock(&lx_mu);
+		while ((int)(lx_disp + lx_drop - lx_base) < (int)lx_k - lx_lag)
+			if (pthread_cond_timedwait(&lx_cv, &lx_mu, &ts))
+				break;
+		pthread_mutex_unlock(&lx_mu);
+	}
+	double t1 = lx_flags ? lx_now() : 0;
 	hal_vo_image img = { luma, 0, (uint32_t)(chroma - luma), stride * h * 3 / 2, stride, 0, 0, w, h, 13 };
-	return hal_display(vo_ch, &img);
+	int ret = hal_display(vo_ch, &img);
+	if (lx_flags) {
+		unsigned n = lx_nfl++ % LX_RING;
+		lx_fl[n].t0 = t0;
+		lx_fl[n].t1 = t1;
+		lx_fl[n].t2 = lx_now();
+		lx_fl[n].k = lx_k;
+		lx_fl[n].disp = lx_disp;
+		if (!(lx_k % 120) && lx_k)
+			lx_dump();
+	}
+	lx_k++;
+	return ret;
 }
 
 void pf_vo_close(void)
 {
+	if (lx_flags)
+		lx_dump();
 	if (vo_ch >= 0) {
 		vo_close(vo_ch);
 		vo_ch = -1;

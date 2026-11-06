@@ -214,7 +214,9 @@ impl App {
                 }
             };
             let session_started = Instant::now();
+            let game_picture = crate::platform::webos::game_picture::enter();
             let ended = self.stream(connected, settings, gamepad_auto);
+            drop(game_picture);
             // A lost link is dialled again with the same target and settings, the toast up over
             // the (now empty) video plane while the handshake runs. Anything else ends here.
             if session_started.elapsed() >= RECONNECT_RESET_AFTER {
@@ -308,6 +310,7 @@ fn wait_for_dial(handle: &PendingConnect, events: &mut sdl3::EventPump) -> DialW
 }
 
 pub(super) fn run_inner() -> Result<()> {
+    crate::platform::webos::game_picture::recover();
     let mut app = App::bring_up()?;
     // The loop's value is the exit action owed on the way out — see the single fire site
     // below it, which is the only reason this is a `break`-with-value rather than a `return`.
