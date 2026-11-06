@@ -70,6 +70,9 @@ pub(super) fn run(
         screen: None,
         // The host's profile picker: `Service` answers its list, wake and pick.
         profiles: true,
+        // `Service` has no password prompt: a locked profile is dialled as it stands.
+        prompts_unlock: false,
+        languages: Vec::new(),
     };
     // Land back on the shelf the last stream was launched from (`Persisted::last_host_key`).
     // The shell sends that shelf's fetch itself.

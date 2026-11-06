@@ -1284,6 +1284,7 @@ dependencies = [
  "opus",
  "pf-client-core",
  "pf-console-ui",
+ "pf-l10n",
  "punktfunk-core",
  "rustls",
  "sdl3",
