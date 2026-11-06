@@ -555,7 +555,15 @@ impl ConfirmDialog {
             press: self.press,
             hover_close: self.hover_close && !closing,
         };
-        dialog::draw(f, l, self.title, [self.label, "Cancel"], focus, &motion, alpha);
+        dialog::draw(
+            f,
+            l,
+            self.title,
+            [self.label, pf_l10n::common::common_cancel()],
+            focus,
+            &motion,
+            alpha,
+        );
     }
 }
 

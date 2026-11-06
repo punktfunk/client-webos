@@ -168,7 +168,7 @@ impl App {
                         if gave_up == DialWait::Quit {
                             return Ok(StreamOutcome::Quit);
                         }
-                        self.menu_notice = Some("Connection lost".to_string());
+                        self.menu_notice = Some(pf_l10n::client::ended_lost().to_string());
                         return Ok(StreamOutcome::ReturnToMenu);
                     }
                     // Joined BEFORE the window is cleared transparent, so the reconnect toast stays
@@ -192,8 +192,7 @@ impl App {
                 Err(e) => {
                     // Return to the menu with the reason on screen instead of `?`-ing the app down.
                     tracing::error!("session connect failed: {e:#}");
-                    let what = if reconnects > 0 { "reconnect" } else { "connect" };
-                    self.menu_notice = Some(format!("Couldn't {what}: {}", crate::core::errors::friendly(&e)));
+                    self.menu_notice = Some(pf_l10n::client::dial_connect_failed(crate::core::errors::friendly(&e)));
                     return Ok(StreamOutcome::ReturnToMenu);
                 }
             };
@@ -220,7 +219,7 @@ impl App {
     /// Puts the reconnect toast up over the emptied video plane and starts dial `attempt`.
     fn redial(&mut self, attempt: u8, target: &ConnectTarget, settings: &store::Settings) -> Result<PendingConnect> {
         tracing::warn!("connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
-        let text = format!("Connection lost — reconnecting ({attempt}/{RECONNECT_ATTEMPTS})");
+        let text = pf_l10n::console::console_notice_reconnecting_attempt(attempt, RECONNECT_ATTEMPTS);
         let frame = overlay::frame(
             &mut self.console_gl,
             &self.window,
