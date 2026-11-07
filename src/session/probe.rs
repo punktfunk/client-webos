@@ -14,10 +14,9 @@ use punktfunk_core::{quic, PunktfunkError};
 /// presented. A throwaway 720p mode, whole-AU delivery, no cursor, no HDR metadata, the host's
 /// own device label.
 ///
-/// **`video_caps` always advertises `VIDEO_CAP_CHACHA20`, exactly as a real session does.**
-/// `punktfunk-core` counts delivered bytes AFTER AEAD decrypt, so a probe that negotiated
-/// AES-GCM would measure a ceiling this armv7 CPU can't reach with the cipher an actual stream
-/// uses. See `docs/NOTES.md` on why `ChaCha20` exists on this client at all.
+/// **`video_caps` carries the same cipher bit as a real session (`connect::cipher_caps`).**
+/// `punktfunk-core` counts delivered bytes AFTER AEAD decrypt, so a probe that negotiated a
+/// different cipher would measure a ceiling an actual stream can't match. See `docs/NOTES.md`.
 fn handshake_only(
     host: &str,
     port: u16,
@@ -36,7 +35,7 @@ fn handshake_only(
     };
     NativeClient::connect(punktfunk_core::client::ConnectParams {
         bitrate_kbps,
-        video_caps: quic::VIDEO_CAP_CHACHA20,
+        video_caps: super::connect::cipher_caps(),
         video_codecs,
         pin,
         identity: Some(identity),
@@ -141,7 +140,7 @@ pub fn run_speed_probe(
         client.codec,
         client.audio_channels,
         client.resolved_bitrate_kbps,
-        quic::VIDEO_CAP_CHACHA20,
+        super::connect::cipher_caps(),
     );
 
     // Don't burst into a dead plane — see PROBE_WARMUP_CAP. `next_frame` drains the session's

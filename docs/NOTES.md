@@ -195,9 +195,9 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - No env vars in SAM launch; `params` in `applicationManager/launch` reach app as argv[1] JSON.
 - SDL/Wayland may report `refresh_rate=0`; clamp to default. (SDL3 reports it as a float plus an exact numerator/denominator pair, so 59.94 is no longer rounded to 60.)
 
-## ChaCha20 over AES-GCM
+## AES-GCM when the CPU has AES, else ChaCha20
 
-32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`; 32-bit ARM falls back. ChaCha20 (add/rotate/xor, no intrinsics) stays fast. Advertise `VIDEO_CAP_CHACHA20` unconditionally — only cipher here.
+32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`, so ChaCha20 was advertised unconditionally. The `aes-aws-lc-rs` backend uses the ARMv8 AES/PMULL instructions from 32-bit code, and AES-GCM decrypts about 2.5x faster than ChaCha20 on a C5 (about 12 µs to 4.5 µs per packet). `session::connect::cipher_caps` advertises `VIDEO_CAP_CHACHA20` only when `AT_HWCAP2` lacks `HWCAP2_AES`.
 
 ## Audio: two routes, one pipeline (SDL is the default)
 
@@ -380,7 +380,7 @@ Session ending `PunktfunkEndReason::Lost` (idle timeout, reset, network) re-dial
 
 ## Network speed test quirks
 
-Burst 320 Mbps / 3s (not 3 Gbps / 5s) — 3-core A9 UI starves on unbounded. 320 detects ceiling changes (>~285 Mbps for recommendation); 400 only raises overshoot (51% drop vs 38%). Probe must advertise `VIDEO_CAP_CHACHA20` (core's `bytes_received` after AEAD). **~245 Mbps airlink ceiling** G5 Wi-Fi (MediaTek USB 2.0), UDP flood confirmed — client can't raise. Flows black-hole 10-29s (AP/driver), `run_speed_probe` waits first completed frame (35s cap) before burst — plane live, path warm.
+Burst 320 Mbps / 3s (not 3 Gbps / 5s) — 3-core A9 UI starves on unbounded. 320 detects ceiling changes (>~285 Mbps for recommendation); 400 only raises overshoot (51% drop vs 38%). Probe must advertise the same cipher bit as a session (`cipher_caps`) (core's `bytes_received` after AEAD). **~245 Mbps airlink ceiling** G5 Wi-Fi (MediaTek USB 2.0), UDP flood confirmed — client can't raise. Flows black-hole 10-29s (AP/driver), `run_speed_probe` waits first completed frame (35s cap) before burst — plane live, path warm.
 
 ## Video backend: NDL
 
