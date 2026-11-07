@@ -513,7 +513,7 @@ mod tests {
         );
         assert_eq!(
             LibraryError::PinMismatch.phrase(),
-            "host certificate changed — re-pair with a PIN"
+            "host certificate changed — pair again with a PIN"
         );
     }
 
