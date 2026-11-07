@@ -70,6 +70,10 @@ pub(super) fn run(
         screen: None,
         // The host's profile picker: `Service` answers its list, wake and pick.
         profiles: true,
+        // `Service` has no password prompt: a locked profile is dialled as it stands.
+        prompts_unlock: false,
+        // The same list `run` set the language from, for the kit's own `set_languages`.
+        languages: crate::platform::webos::device::ui_languages().to_vec(),
     };
     // Land back on the shelf the last stream was launched from (`Persisted::last_host_key`).
     // The shell sends that shelf's fetch itself.
@@ -183,7 +187,7 @@ pub(super) fn run(
                         }
                         handles
                             .console
-                            .set_notice("HDR calibration needs an HDR-capable TV.".to_string());
+                            .set_notice(pf_l10n::console::console_webos_calibration_needs_hdr().to_string());
                         continue;
                     }
                     _ => continue,

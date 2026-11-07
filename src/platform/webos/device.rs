@@ -164,6 +164,34 @@ fn config_digits(reply: &str, key: &str) -> Option<u32> {
         .ok()
 }
 
+/// The TV's UI language as the one-tag BCP-47 list `pf_l10n::set_languages` takes, e.g.
+/// `["de-DE"]`, from Luna's settings service. Empty, which reads as English, when the call is
+/// unavailable or the reply holds no tag. Resolved once: a Luna round-trip is a subprocess.
+pub fn ui_languages() -> &'static [String] {
+    static LANGUAGES: OnceLock<Vec<String>> = OnceLock::new();
+    LANGUAGES.get_or_init(|| {
+        if !super::luna::available() {
+            return Vec::new();
+        }
+        super::luna::call_capture(
+            "luna://com.webos.settingsservice/getSystemSettings",
+            r#"{"keys":["localeInfo"]}"#,
+            super::luna::CALL_TIMEOUT,
+        )
+        .ok()
+        .and_then(|reply| ui_tag(&reply))
+        .into_iter()
+        .collect()
+    })
+}
+
+/// `localeInfo.locales.UI` from a `getSystemSettings` reply.
+fn ui_tag(reply: &str) -> Option<String> {
+    let reply: serde_json::Value = serde_json::from_str(reply).ok()?;
+    let tag = reply.pointer("/settings/localeInfo/locales/UI")?.as_str()?;
+    (!tag.is_empty()).then(|| tag.to_string())
+}
+
 /// `otaId` from Luna's `getSystemInfo`, e.g. `HE_DTV_W19H_...`. Display-only.
 fn ota_id() -> Option<String> {
     json_str_field(system_info(), "otaId")
@@ -396,7 +424,7 @@ pub fn clock_ticks_per_sec() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::config_digits;
+    use super::{config_digits, ui_tag};
 
     #[test]
     fn a_config_number_is_read_quoted_or_bare() {
@@ -405,5 +433,19 @@ mod tests {
         assert_eq!(config_digits(quoted, "tv.model.moduleInchType"), Some(65));
         assert_eq!(config_digits(bare, "tv.model.moduleInchType"), Some(48));
         assert_eq!(config_digits(r#"{"configs":{}}"#, "tv.model.moduleInchType"), None);
+    }
+
+    #[test]
+    fn the_ui_language_is_read_from_the_locale_settings() {
+        let reply = r#"{"returnValue":true,"settings":{"localeInfo":{"locales":{"UI":"de-DE","TV":"en-US"}}}}"#;
+        assert_eq!(ui_tag(reply).as_deref(), Some("de-DE"));
+        for none in [
+            r#"{"returnValue":false}"#,
+            r#"{"settings":{"localeInfo":{"locales":{"UI":""}}}}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(ui_tag(none), None, "{none:?}");
+        }
     }
 }

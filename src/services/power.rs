@@ -76,7 +76,7 @@ pub(crate) fn probe_rights(
         // saying nothing.
         Err(LibraryError::NotPaired) => Ok(PowerRights::default()),
         Err(e) => {
-            tracing::debug!("power rights probe ({addr}:{mgmt_port}): {e}");
+            tracing::debug!("power rights probe ({addr}:{mgmt_port}): {e:?}");
             Err(e)
         }
     }
@@ -166,7 +166,7 @@ impl ExitPlan {
     pub fn run(&self) {
         match self.send_within(crate::services::budget::EXIT_ACTION) {
             Ok(()) => tracing::info!("exit action accepted"),
-            Err(e) => tracing::warn!("exit action refused: {e}"),
+            Err(e) => tracing::warn!("exit action refused: {e:?}"),
         }
     }
 }

@@ -313,6 +313,11 @@ pub fn run() -> Result<()> {
     // Logged before anything else can fail: a report from a model neither developer
     // owns is only actionable if the log says what it was running on.
     crate::platform::webos::device::DeviceInfo::detect().log();
+    // Before any text is read: the kit, the stream overlays and the menu notices all word
+    // themselves in the TV's language.
+    let tags = crate::platform::webos::device::ui_languages();
+    let language = pf_l10n::set_languages(tags);
+    tracing::info!(?tags, language, "UI language");
     // Before settings load or any UI exists: `store::load` clamps against this.
     crate::core::caps::install(crate::platform::webos::device::video_caps());
     // A panic on ANY thread otherwise goes only to stderr, which a SAM-launched

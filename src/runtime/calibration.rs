@@ -58,10 +58,10 @@ enum Step {
     FrameAverage,
 }
 
-/// What a step shows and measures, apart from the value itself.
+/// What a step shows and measures, apart from the value itself: the messages, read when drawn.
 struct StepSpec {
-    label: &'static str,
-    instruction: &'static str,
+    label: fn() -> &'static str,
+    instruction: fn() -> &'static str,
 }
 
 impl Step {
@@ -76,18 +76,16 @@ impl Step {
 
     fn spec(self) -> &'static StepSpec {
         const BLACK: StepSpec = StepSpec {
-            label: "Minimum luminance",
-            instruction: "Step 1 of 3. Lower until the pattern is no longer visible.",
+            label: pf_l10n::console::console_calibration_black_label,
+            instruction: pf_l10n::console::console_calibration_black_step,
         };
         const PEAK: StepSpec = StepSpec {
-            label: "Maximum luminance",
-            instruction: "Step 2 of 3. With the TV's Tone Mapping on HGIG, raise until the pattern is no longer \
-                          visible.",
+            label: pf_l10n::console::console_calibration_peak_label,
+            instruction: pf_l10n::console::console_calibration_peak_step,
         };
         const FRAME_AVERAGE: StepSpec = StepSpec {
-            label: "Max full frame luminance",
-            instruction: "Step 3 of 3. Raise one step at a time, pausing after each. Stop as soon as a step \
-                          no longer makes the screen brighter.",
+            label: pf_l10n::console::console_calibration_frame_label,
+            instruction: pf_l10n::console::console_calibration_frame_step,
         };
         match self {
             Self::Black => &BLACK,
@@ -209,7 +207,7 @@ fn window_pane(field: u16, icon: u16) -> Vec<Patch> {
 fn black_text(code: u16) -> String {
     let nits = pq::pq_nits(code);
     if nits <= 0.0 {
-        return "Black".to_string();
+        return pf_l10n::console::console_calibration_black().to_string();
     }
     let decimals = (1 - nits.log10().floor() as i32).clamp(2, 5) as usize;
     format!("{nits:.decimals$} nits")
@@ -400,9 +398,9 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     let w = (f.w * CARD_WIDTH_FRAC).round();
     let inner = w - 2.0 * PAD * k;
     let body = if cal.stalled() {
-        "The video plane did not accept the test pattern. The values below are unchanged."
+        pf_l10n::console::console_calibration_stalled()
     } else {
-        spec.instruction
+        (spec.instruction)()
     };
     let lines = wrap(f.fonts, body, W::Regular, BODY_SIZE * kf, f64::from(inner));
     let title_h = line_h(TITLE_SIZE * kf) as f32;
@@ -420,7 +418,7 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     opaque_card(f, card, CORNER);
     let left = card.left + PAD * k;
     let mut y = card.top + PAD * k;
-    text(spec.label, left, y, title_h, W::SemiBold, TITLE_SIZE, f.ui.fg(1.0));
+    text((spec.label)(), left, y, title_h, W::SemiBold, TITLE_SIZE, f.ui.fg(1.0));
     let value = cal.step.value_text(cal.display);
     let value_x = card.right - PAD * k - f.fonts.measure(&value, W::Medium, TITLE_SIZE * kf);
     text(&value, value_x, y, title_h, W::Medium, TITLE_SIZE, f.ui.accent(1.0));
@@ -444,12 +442,18 @@ fn draw(f: &Frame<'_>, cal: &Calibration) {
     knob.set_anti_alias(true);
     c.draw_circle((track.left + inner * fraction, cy), KNOB_R * k, &knob);
     y += slider_h + GAP * k;
-    let hint = if cal.step.next().is_some() {
-        "◀ ▶ Adjust   ·   OK Next   ·   Back Cancel"
+    let confirm = if cal.step.next().is_some() {
+        pf_l10n::common::common_next()
     } else {
-        "◀ ▶ Adjust   ·   OK Save   ·   Back Cancel"
+        pf_l10n::common::common_save()
     };
-    text(hint, left, y, hint_h, W::Regular, HINT_SIZE, f.ui.fg(0.5));
+    // The glyph and the remote's key names stay as they are; only the verbs are messages.
+    let hint = format!(
+        "◀ ▶ {}   ·   OK {confirm}   ·   Back {}",
+        pf_l10n::console::console_hint_adjust(),
+        pf_l10n::common::common_cancel(),
+    );
+    text(&hint, left, y, hint_h, W::Regular, HINT_SIZE, f.ui.fg(0.5));
     c.restore();
 }
 

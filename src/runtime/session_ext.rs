@@ -156,11 +156,11 @@ impl Connected {
     pub(crate) fn end_message(&self) -> String {
         use punktfunk_core::client::PunktfunkEndReason as R;
         match self.end_reason() {
-            R::GameExited => "The game exited",
-            R::HostEnded => "The host ended the session",
-            R::HostError => "The host closed the session with an error",
-            R::Lost => "Connection lost",
-            R::None | R::Local => "The host closed the connection",
+            R::GameExited => pf_l10n::console::console_ended_game_exited(),
+            R::HostEnded => pf_l10n::console::console_ended_host_ended(),
+            R::HostError => pf_l10n::client::ended_host_error(),
+            R::Lost => pf_l10n::client::ended_lost(),
+            R::None | R::Local => pf_l10n::client::ended_closed(),
         }
         .to_string()
     }

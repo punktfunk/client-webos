@@ -107,7 +107,7 @@ impl App {
                         connected.shutdown_and_quit();
                         cursor.set_captured(false, &self.window);
                         cursor.flush(&self.window, &self.events);
-                        self.menu_notice = Some(format!("Couldn't start audio: {e:#}"));
+                        self.menu_notice = Some(pf_l10n::console::console_webos_audio_failed(format!("{e:#}")));
                         return Ended {
                             outcome: StreamOutcome::ReturnToMenu,
                             lost: false,
@@ -206,9 +206,9 @@ impl App {
             input_suspended: false,
             tap_up: None,
             disconnect: ConfirmDialog::new(
-                "Stop streaming?",
-                "The stream will end and you'll return to the menu.",
-                "Stop streaming",
+                pf_l10n::console::console_webos_stop_title(),
+                pf_l10n::console::console_webos_stop_body(),
+                pf_l10n::console::console_webos_stop_confirm(),
             ),
             ring: pf_console_ui::Ring::new(),
             ring_was_open: false,
@@ -661,7 +661,7 @@ impl Stream {
             tracing::error!("decoder failed for good — returning to the menu");
             // The notice says the session ended; without the quit code the host holds it open.
             cx.connected.disconnect_quit();
-            self.notice = Some("Video decoder failed — session ended".to_string());
+            self.notice = Some(pf_l10n::console::console_webos_decoder_failed().to_string());
             return ControlFlow::Break(StreamOutcome::ReturnToMenu);
         }
         if cx.connected.is_session_ended() {

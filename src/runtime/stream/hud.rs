@@ -135,7 +135,7 @@ impl Hud {
             if !self.hold_toasted && since.elapsed() >= HOLD_TOAST_AFTER {
                 self.hold_toasted = true;
                 tracing::warn!("connection issues detected (freeze-until-reanchor)");
-                self.notif.show("Connection issues — recovering...");
+                self.notif.show(pf_l10n::console::console_notice_recovering());
                 self.redraw_now();
             }
         } else {
@@ -225,7 +225,7 @@ impl Hud {
             overlay::TRANSPARENT,
             |f| {
                 if let Some(alpha) = stats_alpha {
-                    overlay::stats(f, lines, stats_hint(tier), alpha, corner, scale);
+                    overlay::stats(f, lines, &stats_hint(tier), alpha, corner, scale);
                 }
                 if let Some(lines) = log_lines {
                     overlay::log(f, log_rows, lines);
@@ -234,7 +234,7 @@ impl Hud {
                     overlay::toast(f, text, alpha);
                 }
                 if let Some(alpha) = hint_frame {
-                    overlay::exit_hint(f, exit_hint_text(pad), alpha);
+                    overlay::exit_hint(f, &exit_hint_text(pad), alpha);
                 }
                 if ring_visible {
                     ring.render(f.canvas, f.ui, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
@@ -246,19 +246,16 @@ impl Hud {
 }
 
 /// How to leave with the input in hand: the pad chord when a controller is attached.
-fn exit_hint_text(pad: bool) -> &'static str {
-    if pad {
-        "Hold L1 + R1 + Start + Select to leave"
-    } else {
-        "Hold Back to leave"
-    }
+fn exit_hint_text(pad: bool) -> String {
+    pf_l10n::client::notice_exit_hold(if pad { "L1 + R1 + Start + Select" } else { "Back" })
 }
 
 /// What the green button does next: more detail, or hide from the top tier.
-fn stats_hint(tier: StatsVerbosity) -> &'static str {
+fn stats_hint(tier: StatsVerbosity) -> String {
+    // The remote's colour key is its name on the TV, not a word to translate.
     match tier {
-        StatsVerbosity::Detailed | StatsVerbosity::Off => "Press green to hide this overlay",
-        StatsVerbosity::Compact | StatsVerbosity::Normal => "Press green for more detail",
+        StatsVerbosity::Detailed | StatsVerbosity::Off => pf_l10n::console::console_webos_stats_hide("green"),
+        StatsVerbosity::Compact | StatsVerbosity::Normal => pf_l10n::console::console_webos_stats_more("green"),
     }
 }
 
@@ -267,51 +264,52 @@ fn stats_hint(tier: StatsVerbosity) -> &'static str {
 fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant)>) -> Vec<Extra> {
     let stats = connected.stats();
     let backlog = stats.render_backlog.load(Ordering::Relaxed);
-    let mut ndl = format!(
-        "NDL feed {:.1} ms · backlog {}",
-        stats.feed_us.load(Ordering::Relaxed) as f32 / 1000.0,
+    let mut ndl = pf_l10n::console::console_webos_overlay_ndl(
+        format!("{:.1}", stats.feed_us.load(Ordering::Relaxed) as f32 / 1000.0),
         if backlog < 0 {
-            "n/a".to_string()
+            pf_l10n::console::console_webos_overlay_na().to_string()
         } else {
             backlog.to_string()
         },
     );
     if stats.holding.load(Ordering::Relaxed) {
-        ndl.push_str(" · holding");
+        ndl.push_str(" · ");
+        ndl.push_str(pf_l10n::console::console_webos_overlay_holding());
     }
     // NDL paces the picture on the plane's lead, so a lead sagging towards zero reads as stutter.
     let layout = connected.audio_layout();
     let audio = if connected.audio_route.on_ndl_plane() {
-        format!(
-            "{} {layout} · NDL · lead {} ms · av stamp {:+} ms",
+        pf_l10n::console::console_webos_overlay_audio_ndl(
             connected.audio_route.overlay_tag(),
+            layout,
             stats.audio_plane_lead_ms.load(Ordering::Relaxed),
-            stats.av_offset_ms.load(Ordering::Relaxed),
+            format!("{:+}", stats.av_offset_ms.load(Ordering::Relaxed)),
         )
     } else {
-        format!(
-            "{} {layout} · buf {} ms",
+        pf_l10n::console::console_webos_overlay_audio_buf(
             connected.audio_route.overlay_tag(),
-            connected.audio_buffer_ms()
+            layout,
+            connected.audio_buffer_ms(),
         )
     };
     // `cushion` leads: it is the only figure here that answers "is the presentation setting doing
     // anything". Jitter is the measured residual, independent of the cushion by construction, and
     // `late` is cumulative — neither moves when the setting does.
     let slack = stats.pacing_min_slack_us.load(Ordering::Relaxed);
-    let pacing = format!(
-        "pace cushion {:.1} ms · jitter {:.1} ms · late {}{}",
-        stats.pacing_cushion_us.load(Ordering::Relaxed) as f32 / 1000.0,
-        stats.pacing_jitter_us.load(Ordering::Relaxed) as f32 / 1000.0,
+    let mut pacing = pf_l10n::console::console_webos_overlay_pacing(
+        format!("{:.1}", stats.pacing_cushion_us.load(Ordering::Relaxed) as f32 / 1000.0),
+        format!("{:.1}", stats.pacing_jitter_us.load(Ordering::Relaxed) as f32 / 1000.0),
         stats.pacing_late.load(Ordering::Relaxed),
-        // Worst complete-AU margin of the last window. Negative while jitter reads healthy is a
-        // large frame finishing against the deadline its first piece set.
-        if slack == i32::MIN {
-            String::new()
-        } else {
-            format!(" · slack {:+.1} ms", slack as f32 / 1000.0)
-        },
     );
+    // Worst complete-AU margin of the last window. Negative while jitter reads healthy is a
+    // large frame finishing against the deadline its first piece set.
+    if slack != i32::MIN {
+        pacing.push_str(" · ");
+        pacing.push_str(&pf_l10n::console::console_webos_overlay_slack(format!(
+            "{:+.1}",
+            slack as f32 / 1000.0
+        )));
+    }
     let mut out = vec![Extra::detail(ndl), Extra::detail(audio), Extra::detail(pacing)];
     // The set's own headroom, in both vocabularies. CPU shows from the second sample on.
     if let Some((ticks, mem_bytes)) = crate::platform::webos::device::process_cpu_mem() {
@@ -320,15 +318,15 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
             let pct =
                 ticks.saturating_sub(prev) as f64 / crate::platform::webos::device::clock_ticks_per_sec() as f64 / secs
                     * 100.0;
-            format!("CPU {pct:.0}% · ")
+            pf_l10n::console::console_webos_overlay_cpu(format!("{pct:.0}"))
         });
         *prev_cpu = Some((ticks, Instant::now()));
+        let ram = pf_l10n::console::console_webos_overlay_ram(format!("{:.0}", mem_bytes as f64 / (1024.0 * 1024.0)));
         out.push(Extra {
-            text: format!(
-                "{}RAM {:.0} MB",
-                cpu.unwrap_or_default(),
-                mem_bytes as f64 / (1024.0 * 1024.0)
-            ),
+            text: match cpu {
+                Some(cpu) => format!("{cpu} · {ram}"),
+                None => ram,
+            },
             tier: StatsVerbosity::Detailed,
             advanced_only: false,
             role: Role::Muted,
