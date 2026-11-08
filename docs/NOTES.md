@@ -132,7 +132,7 @@ Intervals are 0.625ms slots bounding transmit waits (~77ms anchor). Slower inter
 
 Only sniff methods in `bluetooth2` API; no link-policy/QoS call (nothing persistent). One `stopSniff` doesn't hold; stack re-enters sniff within seconds. Keeper re-asserts every 250ms, immediately on >50ms gaps (motion ~2.5ms). Replies in 1-3ms. Measured: ~400 reports/s vs ~10 bursts.
 
-**Feed pad at its clock, never faster.** One report per 10.667ms, tick lands on next future interval. Overrun tick fires again immediately (catch-up undeliverable). Measured 110 reports/s vs pad's 93.75 broke speech. Pre-fill uses 2 reports/tick; stop when ring depth=target (after pre-fill, depth is clock drift).
+**Feed pad at its clock, never faster.** One report per 10.667ms, tick lands on next future interval, never fires twice at once. Measured 110 reports/s vs pad's 93.75 broke speech. Pre-fill uses 2 reports/tick; stop when ring depth=target (after pre-fill, depth is clock drift). Pre-fill hold ends at 10 reports or 40ms without a speaker frame (short sounds play what they have); ring is emptied when lane's 250ms hold expires. A skipped tick repays up to 2 reports, only from real audio in the ring (a stall must not drain the pad's FIFO for good). Silence frames go through the live encoder: the pad's Opus decoder predicts from the previous frame. USB lane: same start rule, 20ms/40ms.
 
 ## Pad audio (`0xD1`): both lanes on a Bluetooth pad
 

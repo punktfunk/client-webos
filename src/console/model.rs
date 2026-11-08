@@ -1372,6 +1372,8 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             icon: g.icon.clone().unwrap_or_default(),
             platform: None,
             stats: None,
+            // Host game overrides reach this client with a later library fetch, not today.
+            overrides: None,
             // Catalog detail the desktop's `GameEntry` carries and this client's does not, so
             // it is reported absent rather than guessed — the same rule as `launcher` above.
             developer: None,
