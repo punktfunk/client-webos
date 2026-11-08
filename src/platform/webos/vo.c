@@ -115,6 +115,7 @@ static pthread_cond_t lx_cv = PTHREAD_COND_INITIALIZER;
 static struct { double t; unsigned tag, w1, w2; } lx_ev[LX_RING];
 static struct { double t0, t1, t2; unsigned k, disp; } lx_fl[LX_RING];
 static unsigned lx_nfl, lx_dumped_ev, lx_dumped_fl;
+static int lx_started;
 
 static double lx_now(void)
 {
@@ -129,7 +130,11 @@ static void *lx_thread(void *arg)
 	for (;;) {
 		struct pollfd p = { lx_fd, POLLIN | POLLPRI, 0 };
 		int r = poll(&p, 1, 200);
-		if (r <= 0 || !(p.revents & POLLIN))
+		if (r < 0 || (p.revents & POLLNVAL)) {
+			usleep(10000);
+			continue;
+		}
+		if (r == 0 || !(p.revents & POLLIN))
 			continue;
 		memset((char *)lx_h + 8, 0, 56);
 		unsigned tag = (unsigned)lx_read_info(lx_h);
@@ -207,7 +212,8 @@ int pf_vo_open(int uhd)
 			lx_fd = *(int *)lx_h;
 			if (lx_flags && lx_read_info && lx_fd >= 0) {
 				pthread_t th;
-				pthread_create(&th, NULL, lx_thread, NULL);
+				if (!lx_started++)
+					pthread_create(&th, NULL, lx_thread, NULL);
 			} else {
 				lx_flags = 0;
 			}
@@ -258,6 +264,7 @@ void pf_vo_close(void)
 {
 	if (lx_flags)
 		lx_dump();
+	lx_k = 0;
 	if (vo_ch >= 0) {
 		vo_close(vo_ch);
 		vo_ch = -1;
