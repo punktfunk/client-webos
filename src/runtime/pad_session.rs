@@ -163,6 +163,7 @@ pub(super) fn bring_up(
         connected.client.set_pad_audio_caps(slot.index, caps);
     }
     slot.declare(connected, setting, caps);
+    punktfunk_core::audio::pad_mix::set_speaker_volume(slot.index, settings.pad_speaker_volume(&slot.key()));
 
     slot.extras.audio = registry
         .filter(|_| caps != 0)

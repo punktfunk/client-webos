@@ -60,6 +60,14 @@ impl Slot {
         }
     }
 
+    /// Stable per physical controller, unlike the wire index: `vid:pid:` plus the MAC where the
+    /// pad has one, else its name. Keys the per-pad settings.
+    pub(super) fn key(&self) -> String {
+        let (vid, pid) = (self.pad.vendor_id().unwrap_or(0), self.pad.product_id().unwrap_or(0));
+        let suffix = self.uniq.clone().unwrap_or_else(|| self.pad.name().unwrap_or_default());
+        format!("{vid:04x}:{pid:04x}:{suffix}")
+    }
+
     /// Whether this is a real `DualSense` the host builds as one — the pads with extras to route.
     pub(super) fn is_dualsense(&self, setting: GamepadType) -> bool {
         self.host_kind(setting).is_dualsense() && self.physical.is_some_and(GamepadType::is_dualsense)
@@ -160,6 +168,8 @@ impl Pads {
     pub(super) fn remove(&mut self, id: JoystickId) -> Option<Slot> {
         let i = self.slots.iter().position(|s| s.id == id)?;
         let slot = self.slots.remove(i);
+        // Wire indices are reused: the next pad on this one starts at full volume.
+        punktfunk_core::audio::pad_mix::set_speaker_volume(slot.index, 100);
         tracing::info!("controller disconnected: pad {}", slot.index);
         Some(slot)
     }
@@ -211,13 +221,14 @@ impl Pads {
         // Battery and rumble are reported absent: this client reads neither.
         self.slots.iter().map(move |s| pf_client_core::menu_nav::PadInfo {
             name: s.pad.name().unwrap_or_default(),
-            key: s.index.to_string(),
+            key: s.key(),
             pref: s.host_kind(setting).to_core(),
             steam_virtual: false,
             battery: None,
             detail: format!("Player {}", s.index + 1),
             forwarded: true,
             rumble: false,
+            audio: s.is_dualsense(setting),
         })
     }
 
