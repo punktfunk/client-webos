@@ -53,6 +53,15 @@ public:
 	// Wall time of the last frame's CPU dequant (PYROWAVE_CPU_DEQUANT=1), 0 otherwise.
 	uint32_t cpu_dequant_us() const;
 
+	// Early CPU dequant (PYROWAVE_CPU_DEQUANT=1): `count` datagram-aligned windows of
+	// `window_bytes` from frame `tag`, dequantized now; returns the blocks done. FRAG windows
+	// are left for decode. A newer tag abandons the older frame's work.
+	uint32_t early_windows(uint32_t tag, const void *windows, size_t count, size_t window_bytes);
+	// The next decode is frame `tag`: reuse its early work (returns its block count) or drop it.
+	uint32_t early_claim(uint32_t tag);
+	// PYROWAVE_EARLY_VERIFY: mismatching coefficients of the last check, -1 before any.
+	int early_verify_result() const;
+
 	// A more refined version of decode_is_ready() that allows a bit more control.
 	// The default is num_pristine_bands = 2 (the next-to-final LL band) and minimum_packet_ratio = 0.9.
 	// active_block_mask is an optional pointer.

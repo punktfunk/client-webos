@@ -669,6 +669,20 @@ pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_fr
 PYROWAVE_PUBLIC_API uint32_t
 pyrowave_decoder_cpu_dequant_us(pyrowave_decoder decoder);
 
+// Early CPU dequant of frame `tag` while it arrives: `count` datagram-aligned windows of
+// `window_bytes`. Returns the blocks dequantized. No-op without PYROWAVE_CPU_DEQUANT.
+PYROWAVE_PUBLIC_API uint32_t
+pyrowave_decoder_early_windows(pyrowave_decoder decoder, uint32_t tag, const void *windows, size_t count,
+                               size_t window_bytes);
+
+// Call before decoding frame `tag`: reuses its early work (returns its block count) or drops it.
+PYROWAVE_PUBLIC_API uint32_t
+pyrowave_decoder_early_claim(pyrowave_decoder decoder, uint32_t tag);
+
+// PYROWAVE_EARLY_VERIFY=N: mismatching coefficients of the last check, -1 before any.
+PYROWAVE_PUBLIC_API int
+pyrowave_decoder_early_verify_result(pyrowave_decoder decoder);
+
 PYROWAVE_PUBLIC_API bool
 pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
 		int num_pristine_bands, float minimum_packet_ratio,

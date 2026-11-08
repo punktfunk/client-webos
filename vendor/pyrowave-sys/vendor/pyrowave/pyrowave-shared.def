@@ -46,6 +46,9 @@ EXPORTS
 	pyrowave_decoder_push_packet_in_place
 	pyrowave_decoder_decode_is_ready
 	pyrowave_decoder_cpu_dequant_us
+	pyrowave_decoder_early_windows
+	pyrowave_decoder_early_claim
+	pyrowave_decoder_early_verify_result
 	pyrowave_decoder_decode_is_ready_with_sideband
 	pyrowave_decoder_decode_gpu_buffer
 	pyrowave_decoder_decode_cpu_buffer_synchronous

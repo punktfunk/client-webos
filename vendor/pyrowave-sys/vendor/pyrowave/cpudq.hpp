@@ -47,6 +47,7 @@ struct Dequant
 	uint16_t *base = nullptr;
 	std::vector<uint8_t> dirty;
 	std::vector<uint32_t> offs; // word offsets, UINT32_MAX = absent
+	std::vector<uint8_t> skip;  // non-empty: present blocks with skip[i] set are already done
 	bool use_neon = true;
 	bool wc = false; // write-combined destination: stage each block, then write full rows
 	bool use_runs = false;
@@ -621,8 +622,9 @@ struct Dequant
 			int zs = -1, zn = 0;
 			for (int i = 0; i < nblocks; i++)
 			{
-				const bool present = offs[i] != UINT32_MAX;
-				const bool zero = !present && dirty[i];
+				const bool absent = offs[i] == UINT32_MAX;
+				const bool present = !absent && (skip.empty() || !skip[i]);
+				const bool zero = absent && dirty[i];
 				if (zn)
 				{
 					const Plane &pl = planes[blk_plane[i]];

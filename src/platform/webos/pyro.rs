@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -95,6 +95,50 @@ static VO_SKIPPED: AtomicU64 = AtomicU64::new(0);
 pub fn note_arrival(first_ns: u64, received_ns: u64) {
     ARRIVAL[0].store(first_ns, Ordering::Relaxed);
     ARRIVAL[1].store(received_ns, Ordering::Relaxed);
+}
+
+static FEED_INDEX: AtomicU32 = AtomicU32::new(0);
+
+/// Frame index of the AU the pump is about to feed (early dequant claims by it).
+pub fn note_index(index: u32) {
+    FEED_INDEX.store(index, Ordering::Relaxed);
+}
+
+/// Windows queued before the decode thread is woken for early dequant.
+const EARLY_BATCH: usize = 48;
+
+#[derive(Default)]
+struct Early {
+    frame: u32,
+    window: usize,
+    buf: Vec<u8>,
+    n: usize,
+}
+
+static EARLY_SINK: Mutex<Weak<Shared>> = Mutex::new(Weak::new());
+
+/// Core shard tap (on unless the `no-early-dq` flag file exists): queue each arrived window for
+/// the decode thread.
+fn shard_tap(frame: u32, win: &[u8]) {
+    let Some(shared) = EARLY_SINK.lock().unwrap_or_else(PoisonError::into_inner).upgrade() else {
+        return;
+    };
+    let mut e = shared.early.lock().unwrap_or_else(PoisonError::into_inner);
+    if e.frame != frame || e.window != win.len() {
+        e.frame = frame;
+        e.window = win.len();
+        e.buf.clear();
+        e.n = 0;
+    }
+    e.buf.extend_from_slice(win);
+    e.n += 1;
+    let wake = e.n == EARLY_BATCH;
+    drop(e);
+    if wake {
+        let _next = shared.next.lock().unwrap_or_else(PoisonError::into_inner);
+        shared.early_ready.store(true, Ordering::Release);
+        shared.ready.notify_one();
+    }
 }
 
 #[derive(Default)]
@@ -653,7 +697,7 @@ struct Decoder {
     queries: vk::QueryPool,
     slots: Vec<Slot>,
     output: Arc<Output>,
-    done: Option<(mpsc::Sender<(usize, Instant, Instant, u64)>, std::thread::JoinHandle<()>)>,
+    done: Option<(mpsc::Sender<(usize, Instant, Instant, u64, u64)>, std::thread::JoinHandle<()>)>,
 }
 
 struct Lane {
@@ -665,6 +709,10 @@ struct Lane {
     record: Timing,
     cpu_dequant: Timing,
     slot_wait: Timing,
+    early: Timing,
+    early_buf: Vec<u8>,
+    early_frames: (u32, u32, u64, u64),
+    early_since: Option<Instant>,
 }
 
 struct SlotSync {
@@ -684,14 +732,15 @@ struct Completion {
 unsafe impl Send for Completion {}
 
 impl Completion {
-    fn run(self, pending: mpsc::Receiver<(usize, Instant, Instant, u64)>) {
+    fn run(self, pending: mpsc::Receiver<(usize, Instant, Instant, u64, u64)>) {
         let mut wall = Timing::default();
         let mut gpu = Timing::default();
         let mut interval = Timing::default();
         let mut gpu_decode = Timing::default();
         let mut gpu_copy = Timing::default();
+        let mut arrived = Timing::default();
         let mut last: Option<Instant> = None;
-        while let Ok((slot, started, submitted, pts_ns)) = pending.recv() {
+        while let Ok((slot, started, submitted, pts_ns, last_ns)) = pending.recv() {
             let sync = &self.slots[slot];
             let waited = unsafe {
                 self.device.wait_for_fences(&[sync.fence], true, 1_000_000_000).and_then(|()| {
@@ -713,6 +762,9 @@ impl Completion {
             let done = Instant::now();
             wall.add("pyrowave feed decode+copy wall", done - started);
             gpu.add("pyrowave submit->done", done - submitted);
+            if last_ns != 0 {
+                arrived.add("pyrowave last>decoded", Duration::from_nanos(realtime_ns().saturating_sub(last_ns)));
+            }
             let queued = last.is_some_and(|prev| prev >= submitted);
             let own = done - last.map_or(submitted, |prev| prev.max(submitted));
             let old = out.gpu_ns.load(Ordering::Relaxed);
@@ -834,7 +886,26 @@ impl Lane {
         }
     }
 
-    fn decode(&mut self, au: &[u8], aligned: bool, pts_ns: u64) -> Result<Option<Instant>> {
+    fn early_dequant(&mut self, shared: &Shared) {
+        let (frame, window, n) = {
+            let mut e = shared.early.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::swap(&mut e.buf, &mut self.early_buf);
+            let n = std::mem::take(&mut e.n);
+            (e.frame, e.window, n)
+        };
+        let Some(dec) = self.dec.as_ref() else { return };
+        if n == 0 || window != self.window {
+            return;
+        }
+        let t0 = Instant::now();
+        let done = unsafe { pw::pyrowave_decoder_early_windows(dec.pw_dec, frame, self.early_buf.as_ptr().cast(), n, window) };
+        if done > 0 {
+            self.early.add("pyrowave early dequant (batch)", t0.elapsed());
+        }
+        self.early_buf.clear();
+    }
+
+    fn decode(&mut self, au: &[u8], aligned: bool, pts_ns: u64, tag: u32, last_ns: u64) -> Result<Option<Instant>> {
         if let Some(dims) = au_dims(au, aligned, self.window) {
             if self.dec.as_ref().is_none_or(|d| d.stream != dims) {
                 self.reconfigure(dims.0, dims.1)?;
@@ -872,7 +943,31 @@ impl Lane {
         };
         let started = Instant::now();
         self.slot_wait.add("pyrowave slot wait", started - wait_from);
+        let early_blocks = unsafe { pw::pyrowave_decoder_early_claim(dec.pw_dec, tag) };
         let submitted = self.record_and_submit(slot)?;
+        {
+            let f = &mut self.early_frames;
+            f.0 += 1;
+            f.1 += u32::from(early_blocks > 0);
+            f.2 += u64::from(early_blocks);
+            if aligned {
+                f.3 += au.chunks(self.window).filter(|w| w.len() >= 4 && w[2] | w[3] != 0).count() as u64;
+            }
+            let since = *self.early_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(10) {
+                let v = self.dec.as_ref().map_or(-1, |d| unsafe { pw::pyrowave_decoder_early_verify_result(d.pw_dec) });
+                tracing::info!(
+                    "pyrowave early: {} decodes, {} with early work, {:.0} early blocks/frame, {:.1} frag windows/frame, verify {}",
+                    f.0,
+                    f.1,
+                    f.2 as f64 / f.0.max(1) as f64,
+                    f.3 as f64 / f.0.max(1) as f64,
+                    v
+                );
+                *f = Default::default();
+                self.early_since = None;
+            }
+        }
         self.record.add("pyrowave record+submit", submitted - started);
         if let Some(dec) = &self.dec {
             let us = unsafe { pw::pyrowave_decoder_cpu_dequant_us(dec.pw_dec) };
@@ -882,7 +977,7 @@ impl Lane {
         }
         let dec = self.dec.as_ref().context("no decoder")?;
         if let Some((done, _)) = &dec.done {
-            let _ = done.send((slot, started, submitted, pts_ns));
+            let _ = done.send((slot, started, submitted, pts_ns, last_ns));
         }
         Ok(Some(submitted))
     }
@@ -1481,6 +1576,8 @@ impl Drop for Lane {
 }
 
 struct Pending {
+    tag: u32,
+    last_ns: u64,
     au: Vec<u8>,
     aligned: bool,
     pts_ns: u64,
@@ -1490,24 +1587,39 @@ struct Pending {
 #[derive(Default)]
 struct Shared {
     next: Mutex<Option<Pending>>,
+    early: Mutex<Early>,
+    early_ready: AtomicBool,
     ready: Condvar,
     dead: AtomicBool,
     quit: AtomicBool,
 }
 
+enum Take {
+    Au(Pending),
+    Early,
+}
+
 impl Shared {
-    fn take(&self, until: Option<Instant>) -> Option<Pending> {
+    /// The newest AU once `until` passes; meanwhile `Take::Early` whenever arrived windows wait.
+    fn take(&self, until: Option<Instant>) -> Option<Take> {
         let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if self.quit.load(Ordering::Acquire) {
                 return None;
             }
             let now = Instant::now();
+            let held = until.is_some_and(|t| now < t);
+            if next.is_some() && !held {
+                return next.take().map(Take::Au);
+            }
+            // A held AU first: a newer frame's windows would abandon its early work.
+            if next.is_none() && self.early_ready.swap(false, Ordering::AcqRel) {
+                return Some(Take::Early);
+            }
             match until {
                 Some(t) if now < t => {
                     next = self.ready.wait_timeout(next, t - now).unwrap_or_else(PoisonError::into_inner).0;
                 }
-                _ if next.is_some() => return next.take(),
                 _ => next = self.ready.wait(next).unwrap_or_else(PoisonError::into_inner),
             }
         }
@@ -1533,8 +1645,13 @@ fn decode_thread(mut lane: Lane, shared: Arc<Shared>) {
     let mut census = Census::new();
     loop {
         let until = due.and_then(|d| d.checked_sub(record + margin()));
-        let Some(p) = shared.take(until) else {
-            break;
+        let p = match shared.take(until) {
+            None => break,
+            Some(Take::Early) => {
+                lane.early_dequant(&shared);
+                continue;
+            }
+            Some(Take::Au(p)) => p,
         };
         let started = Instant::now();
         let queued = started.saturating_duration_since(p.fed_at);
@@ -1544,7 +1661,7 @@ fn decode_thread(mut lane: Lane, shared: Arc<Shared>) {
             None => notify.add("pyrowave decode notify wake", queued),
         }
         census.tick();
-        match lane.decode(&p.au, p.aligned, p.pts_ns) {
+        match lane.decode(&p.au, p.aligned, p.pts_ns, p.tag, p.last_ns) {
             Ok(Some(submitted)) => {
                 record = (record * 7 + (submitted - started)) / 8;
                 let gpu = lane
@@ -1585,8 +1702,22 @@ impl PyroSink {
             record: Timing::default(),
             cpu_dequant: Timing::default(),
             slot_wait: Timing::default(),
+            early: Timing::default(),
+            early_buf: Vec::new(),
+            early_frames: Default::default(),
+            early_since: None,
         };
         let shared = Arc::new(Shared::default());
+        if !app_flag("no-early-dq") {
+            let _ = punktfunk_core::packet::SHARD_TAP.set(shard_tap);
+            *EARLY_SINK.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&shared);
+            if app_flag("early-dq-verify") {
+                std::env::set_var("PYROWAVE_EARLY_VERIFY", "30");
+            }
+            tracing::info!("pyrowave early dequant on (batch {EARLY_BATCH} windows)");
+        } else {
+            *EARLY_SINK.lock().unwrap_or_else(PoisonError::into_inner) = Weak::new();
+        }
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pyrowave-decode".into())
@@ -1643,6 +1774,8 @@ impl VideoSink for PyroSink {
             REPLACED.fetch_add(1, Ordering::Relaxed);
         }
         let mut p = next.take().unwrap_or(Pending {
+            tag: 0,
+            last_ns: 0,
             au: Vec::new(),
             aligned,
             pts_ns,
@@ -1653,6 +1786,8 @@ impl VideoSink for PyroSink {
         p.au.extend_from_slice(au);
         p.aligned = aligned;
         p.pts_ns = pts_ns;
+        p.tag = FEED_INDEX.load(Ordering::Relaxed);
+        p.last_ns = last;
         *next = Some(p);
         drop(next);
         self.shared.ready.notify_one();
@@ -1671,6 +1806,8 @@ mod tests {
     #[test]
     fn take_waits_for_the_deadline_and_returns_the_newest() {
         let pending = |n: u8| Pending {
+            tag: 0,
+            last_ns: 0,
             au: vec![n],
             aligned: false,
             pts_ns: u64::from(n),
@@ -1685,13 +1822,17 @@ mod tests {
             late.ready.notify_one();
         });
         let start = Instant::now();
-        let got = shared.take(Some(start + Duration::from_millis(40))).unwrap();
+        let au = |t: Option<Take>| match t {
+            Some(Take::Au(p)) => p,
+            _ => panic!("no AU"),
+        };
+        let got = au(shared.take(Some(start + Duration::from_millis(40))));
         feeder.join().unwrap();
         assert!(start.elapsed() >= Duration::from_millis(40));
         assert_eq!(got.au, vec![2]);
         *shared.next.lock().unwrap() = Some(pending(3));
         let start = Instant::now();
-        assert_eq!(shared.take(Some(start)).unwrap().au, vec![3]);
+        assert_eq!(au(shared.take(Some(start))).au, vec![3]);
         assert!(start.elapsed() < Duration::from_millis(20));
     }
 

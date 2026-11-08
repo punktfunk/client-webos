@@ -82,6 +82,23 @@ struct Decoder::Impl final : public WaveletBuffers
 	uint32_t cpu_dq_us = 0;
 	bool cpu_dq_setup();
 	bool cpu_dq_fill(CommandBuffer &cmd);
+	bool cpu_dq_into(int slot, const uint8_t *pay, bool listed);
+	int cpu_free_slot(int avoid) const;
+	// Early dequant: windows of frame `early_tag` dequantized into `early_slot` while it arrives.
+	int gpu_slot[2] = { -1, -1 };
+	int early_slot = -1;
+	uint32_t early_tag = 0, claimed_tag = 0;
+	bool early_use = false, any_claimed = false;
+	std::vector<uint8_t> early_done;
+	std::vector<uint32_t> early_offs, early_pay;
+	std::vector<std::pair<uint16_t *, int>> early_ptrs; // per plane, the early slot's mapping
+	uint32_t early_done_blocks = 0;
+	int early_verify = getenv("PYROWAVE_EARLY_VERIFY") ? atoi(getenv("PYROWAVE_EARLY_VERIFY")) : 0;
+	int early_verify_n = 0;
+	int early_verify_bad = -1;
+	uint32_t early_windows(uint32_t tag, const uint8_t *wins, size_t count, size_t wbytes);
+	uint32_t early_claim(uint32_t tag);
+	void early_check(int slot);
 	~Impl()
 	{
 		hq.pool.stop();
@@ -537,22 +554,21 @@ bool Decoder::Impl::cpu_dq_setup()
 	return true;
 }
 
-bool Decoder::Impl::cpu_dq_fill(CommandBuffer &cmd)
+int Decoder::Impl::cpu_free_slot(int avoid) const
 {
-	const auto now_us = [] {
-		return std::chrono::duration_cast<std::chrono::microseconds>(
-				std::chrono::steady_clock::now().time_since_epoch()).count();
-	};
-	const auto t0 = now_us();
-	cpu_slot = (cpu_slot + 1) % CpuRing;
-	const int slot = cpu_slot;
+	for (int k = 1; k <= CpuRing; k++)
+	{
+		int s = (cpu_slot + k) % CpuRing;
+		if (s != gpu_slot[0] && s != gpu_slot[1] && s != avoid)
+			return s;
+	}
+	return (cpu_slot + 1) % CpuRing;
+}
 
-	// The NEON reader may read a few bytes past the last block.
-	const size_t payload_words = payload_data_cpu.size();
-	payload_data_cpu.resize(payload_words + 4, 0);
-	hq.offs = dequant_offset_buffer_cpu;
+// Dequantize into ring slot `slot`: hq.pool.work as built (listed), else every block hq.run picks.
+bool Decoder::Impl::cpu_dq_into(int slot, const uint8_t *pay, bool listed)
+{
 	hq.dirty.swap(cpu_dirty[slot]);
-
 	uint8_t *bases[NumComponents][DecompositionLevels] = {};
 	for (int c = 0; c < NumComponents; c++)
 		for (int l = 0; l < DecompositionLevels; l++)
@@ -571,17 +587,191 @@ bool Decoder::Impl::cpu_dq_fill(CommandBuffer &cmd)
 		ok = ok && lay.rowPitch % 2 == 0;
 	}
 	if (ok)
-		hq.run(reinterpret_cast<const uint8_t *>(payload_data_cpu.data()));
-
+	{
+		if (listed)
+			hq.pool.run(&hq, pay);
+		else
+			hq.run(pay);
+	}
 	for (int c = 0; c < NumComponents; c++)
 		for (int l = 0; l < DecompositionLevels; l++)
 			if (cpu_lin[slot][c][l])
 				device->unmap_image_memory(*cpu_lin[slot][c][l], MEMORY_ACCESS_WRITE_BIT);
 	hq.dirty.swap(cpu_dirty[slot]);
-	payload_data_cpu.resize(payload_words);
+	return ok;
+}
+
+uint32_t Decoder::Impl::early_windows(uint32_t tag, const uint8_t *wins, size_t count, size_t wbytes)
+{
+	if (!cpu_dq_ready || hq.use_runs || !hq.wc || wbytes < 8)
+		return 0;
+	// Already decoded, or older than the frame in progress.
+	if (any_claimed && int32_t(tag - claimed_tag) <= 0)
+		return 0;
+	if (early_slot >= 0 && tag != early_tag)
+	{
+		if (int32_t(tag - early_tag) < 0)
+			return 0;
+		early_slot = -1; // abandoned: the slot's dirty map still describes what it holds
+	}
+	if (early_slot < 0)
+	{
+		early_slot = cpu_free_slot(-1);
+		early_tag = tag;
+		early_done.assign(hq.nblocks, 0);
+		early_offs.assign(hq.nblocks, UINT32_MAX);
+		early_pay.clear();
+		early_done_blocks = 0;
+		// Coherent memory (hq.wc): mapped once for the frame, no flush owed.
+		early_ptrs.clear();
+		for (auto &p : hq.planes)
+		{
+			auto *base = static_cast<uint8_t *>(device->map_image_memory(*cpu_lin[early_slot][p.comp][p.level], MEMORY_ACCESS_WRITE_BIT));
+			VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, uint32_t(p.band) };
+			VkSubresourceLayout lay;
+			device->get_device_table().vkGetImageSubresourceLayout(device->get_device(),
+			                                                       cpu_lin[early_slot][p.comp][p.level]->get_image(), &sub, &lay);
+			if (lay.rowPitch % 2 != 0)
+			{
+				early_slot = -1;
+				return 0;
+			}
+			early_ptrs.emplace_back(reinterpret_cast<uint16_t *>(base + lay.offset), int(lay.rowPitch / 2));
+		}
+	}
+	auto &work = hq.pool.work;
+	work.clear();
+	for (size_t w = 0; w < count; w++)
+	{
+		const uint8_t *win = wins + w * wbytes;
+		uint16_t used, kind;
+		memcpy(&used, win, 2);
+		memcpy(&kind, win + 2, 2);
+		if (kind != 0 || used == 0 || size_t(used) + 4 > wbytes)
+			continue;
+		const uint8_t *p = win + 4;
+		size_t size = used;
+		while (size >= 8)
+		{
+			uint32_t w0, w1;
+			memcpy(&w0, p, 4);
+			memcpy(&w1, p + 4, 4);
+			if (w0 >> 31)
+			{
+				p += 8;
+				size -= 8;
+				continue;
+			}
+			uint32_t pw = (w0 >> 16) & 0xfff;
+			uint32_t bi = w1 >> 8;
+			if (pw < 2 || pw * 4 > size || bi >= uint32_t(hq.nblocks))
+				break;
+			if (!early_done[bi])
+			{
+				early_done[bi] = 1;
+				early_offs[bi] = uint32_t(early_pay.size());
+				size_t at = early_pay.size();
+				early_pay.resize(at + pw);
+				memcpy(early_pay.data() + at, p, pw * 4);
+				work.push_back(int(bi));
+			}
+			p += pw * 4;
+			size -= pw * 4;
+		}
+	}
+	if (work.empty())
+		return 0;
+	// The NEON reader may read a few bytes past the last block.
+	const size_t words = early_pay.size();
+	early_pay.resize(words + 4, 0);
+	for (size_t i = 0; i < hq.planes.size(); i++)
+	{
+		hq.planes[i].ptr = early_ptrs[i].first;
+		hq.planes[i].ostride = early_ptrs[i].second;
+		hq.planes[i].clip = true;
+	}
+	hq.offs.swap(early_offs);
+	hq.dirty.swap(cpu_dirty[early_slot]);
+	hq.pool.run(&hq, reinterpret_cast<const uint8_t *>(early_pay.data()));
+	hq.dirty.swap(cpu_dirty[early_slot]);
+	hq.offs.swap(early_offs);
+	early_pay.resize(words);
+	early_done_blocks += uint32_t(work.size());
+	return uint32_t(work.size());
+}
+
+uint32_t Decoder::Impl::early_claim(uint32_t tag)
+{
+	any_claimed = true;
+	claimed_tag = tag;
+	early_use = early_slot >= 0 && early_tag == tag;
+	if (early_slot >= 0 && int32_t(early_tag - tag) < 0)
+		early_slot = -1;
+	return early_use ? early_done_blocks : 0;
+}
+
+// PYROWAVE_EARLY_VERIFY=N: every Nth early frame, dequantize the whole AU again on one thread into
+// a heap buffer and compare it with the slot. early_verify_bad = mismatching halves of the last check.
+void Decoder::Impl::early_check(int slot)
+{
+	cpudq::Dequant ref;
+	ref.init(width, height);
+	ref.wc = false;
+	std::vector<uint16_t> buf(ref.total_halves + 64);
+	ref.bind_contiguous(buf.data());
+	ref.offs = dequant_offset_buffer_cpu;
+	ref.run(reinterpret_cast<const uint8_t *>(payload_data_cpu.data()));
+	int bad = 0;
+	for (size_t i = 0; i < hq.planes.size(); i++)
+	{
+		auto &p = hq.planes[i];
+		auto &r = ref.planes[i];
+		auto *base = static_cast<uint8_t *>(device->map_image_memory(*cpu_lin[slot][p.comp][p.level], MEMORY_ACCESS_READ_BIT));
+		VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, uint32_t(p.band) };
+		VkSubresourceLayout lay;
+		device->get_device_table().vkGetImageSubresourceLayout(device->get_device(),
+		                                                       cpu_lin[slot][p.comp][p.level]->get_image(), &sub, &lay);
+		auto *img = reinterpret_cast<const uint16_t *>(base + lay.offset);
+		for (int y = 0; y < p.h; y++)
+			for (int x = 0; x < p.w; x++)
+				bad += img[size_t(y) * (lay.rowPitch / 2) + x] != r.ptr[size_t(y) * r.ostride + x];
+		device->unmap_image_memory(*cpu_lin[slot][p.comp][p.level], MEMORY_ACCESS_READ_BIT);
+	}
+	early_verify_bad = bad;
+	LOGI("early dequant verify: %d mismatching coefficients\n", bad);
+}
+
+bool Decoder::Impl::cpu_dq_fill(CommandBuffer &cmd)
+{
+	const auto now_us = [] {
+		return std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+	};
+	const auto t0 = now_us();
+	const bool early = early_use && early_slot >= 0;
+	early_use = false;
+	const int slot = early ? early_slot : cpu_free_slot(early_slot);
+	if (early)
+		early_slot = -1;
+
+	// The NEON reader may read a few bytes past the last block.
+	const size_t payload_words = payload_data_cpu.size();
+	payload_data_cpu.resize(payload_words + 4, 0);
+	hq.offs = dequant_offset_buffer_cpu;
+	if (early)
+		hq.skip.swap(early_done);
+	bool ok = cpu_dq_into(slot, reinterpret_cast<const uint8_t *>(payload_data_cpu.data()), false);
+	if (early)
+		hq.skip.swap(early_done);
 	cpu_dq_us = uint32_t(now_us() - t0);
+	if (ok && early && early_verify > 0 && ++early_verify_n % early_verify == 0)
+		early_check(slot);
+	payload_data_cpu.resize(payload_words);
 	if (!ok)
 		return false;
+	cpu_slot = slot;
+	gpu_slot[1] = gpu_slot[0];
+	gpu_slot[0] = slot;
 
 	for (int c = 0; c < NumComponents; c++)
 		for (int l = 0; l < DecompositionLevels; l++)
@@ -1693,6 +1883,21 @@ bool Decoder::decode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views)
 uint32_t Decoder::cpu_dequant_us() const
 {
 	return impl->cpu_dq_us;
+}
+
+uint32_t Decoder::early_windows(uint32_t tag, const void *windows, size_t count, size_t window_bytes)
+{
+	return impl->early_windows(tag, static_cast<const uint8_t *>(windows), count, window_bytes);
+}
+
+uint32_t Decoder::early_claim(uint32_t tag)
+{
+	return impl->early_claim(tag);
+}
+
+int Decoder::early_verify_result() const
+{
+	return impl->early_verify_bad;
 }
 
 bool Decoder::decode_is_ready(bool allow_partial_frame) const

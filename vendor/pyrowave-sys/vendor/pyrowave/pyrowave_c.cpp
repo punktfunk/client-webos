@@ -1757,6 +1757,22 @@ uint32_t pyrowave_decoder_cpu_dequant_us(pyrowave_decoder decoder)
 	return decoder->decoder.cpu_dequant_us();
 }
 
+uint32_t pyrowave_decoder_early_windows(pyrowave_decoder decoder, uint32_t tag, const void *windows, size_t count,
+                                        size_t window_bytes)
+{
+	return decoder->decoder.early_windows(tag, windows, count, window_bytes);
+}
+
+uint32_t pyrowave_decoder_early_claim(pyrowave_decoder decoder, uint32_t tag)
+{
+	return decoder->decoder.early_claim(tag);
+}
+
+int pyrowave_decoder_early_verify_result(pyrowave_decoder decoder)
+{
+	return decoder->decoder.early_verify_result();
+}
+
 bool pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
 		int num_pristine_bands, float minimum_packet_ratio,
 		const uint32_t *active_block_mask, size_t word_count)
