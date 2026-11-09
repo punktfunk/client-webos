@@ -6,7 +6,9 @@ use std::ops::ControlFlow;
 use super::*;
 use crate::core::dial::PadRoute;
 use crate::runtime::overlay::ConfirmAction;
+use pf_client_core::shortcuts::{Event as Edge, Out};
 use sdl3::event::Event;
+use sdl3::joystick::JoystickId;
 
 impl Stream {
     /// Routes one SDL event. `now` is the tick's, for the remote gate; `osk` is whether the
@@ -109,6 +111,7 @@ impl Stream {
                     }
                     // An unplugged pad sends no releases: lift what the host holds, then
                     // free the index so a replug or another pad can take it.
+                    live::flush_shortcuts(cx.connected, cx.settings, &mut slot);
                     slot.release_held(cx.connected);
                     cx.connected.send_input(&gamepad::remove_event(slot.index));
                     // Handing a vanished pad back can wait on a Bluetooth reply or a card
@@ -193,31 +196,17 @@ impl Stream {
                 }
             }
             Event::GamepadButtonDown { which, button, .. } | Event::GamepadButtonUp { which, button, .. } => {
-                let down = matches!(event, Event::GamepadButtonDown { .. });
-                let open = self.ring.open();
-                let Some(slot) = cx.pads.get_mut(which) else {
+                // A button the wire has no bit for is neither forwarded nor part of a shortcut.
+                let (Some(slot), Some(bit)) = (cx.pads.get_mut(which), gamepad::button_bit(button)) else {
                     return ControlFlow::Continue(());
                 };
-                if !open {
-                    slot.chord.set(button, down);
-                }
-                // A button the wire has no bit for is not forwarded and cannot
-                // work the chord either.
-                let Some(bit) = gamepad::button_bit(button) else {
-                    return ControlFlow::Continue(());
+                // The shortcuts read every edge first, under the open dial too.
+                let edge = match event {
+                    Event::GamepadButtonDown { .. } => Edge::Press(bit),
+                    _ => Edge::Release(bit),
                 };
-                // Forwarded buttons still reach the host: the hold requirement is what
-                // keeps game input and the disconnect shortcut apart.
-                match slot.dial.button(bit, down, open) {
-                    PadRoute::Forward => {
-                        cx.connected.send_input(&gamepad::bit_event(bit, down, slot.index));
-                    }
-                    PadRoute::Open => self.toggle_ring(cx),
-                    PadRoute::Menu(ev) => {
-                        self.ring.menu(ev);
-                    }
-                    PadRoute::Drop => {}
-                }
+                let outs = slot.shortcuts.step(edge, now);
+                self.pad_out(cx, which, outs)?;
             }
             Event::GamepadAxisMotion { which, axis, value, .. } => {
                 let open = self.ring.open();
@@ -295,5 +284,54 @@ impl Stream {
             _ => {}
         }
         ControlFlow::Continue(())
+    }
+
+    /// Every pad's shortcut clock: a hold that came due fires, an owed tap release goes out.
+    pub(super) fn tick_pad_shortcuts(&mut self, cx: &mut Cx<'_>) -> ControlFlow<StreamOutcome> {
+        let now = Instant::now();
+        let due: Vec<(JoystickId, Vec<Out>)> = cx
+            .pads
+            .iter_mut()
+            .map(|slot| (slot.id, slot.shortcuts.tick(now)))
+            .filter(|(_, outs)| !outs.is_empty())
+            .collect();
+        for (id, outs) in due {
+            self.pad_out(cx, id, outs)?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// What pad `id`'s shortcut engine put out. A forward or lift goes through the dial, which
+    /// sends it to the host or keeps it while open; a fired shortcut acts whatever is open.
+    fn pad_out(&mut self, cx: &mut Cx<'_>, id: JoystickId, outs: Vec<Out>) -> ControlFlow<StreamOutcome> {
+        for out in outs {
+            match out {
+                Out::Forward(bit, down) => self.pad_button(cx, id, bit, down),
+                Out::Lift(bits) => {
+                    for bit in bits {
+                        self.pad_button(cx, id, bit, false);
+                    }
+                }
+                Out::Fire(action, phase) => {
+                    let pad = cx.pads.get_mut(id).map_or(0, |slot| slot.index);
+                    self.pad_shortcut(cx, pad, &action, phase)?;
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pad_button(&mut self, cx: &mut Cx<'_>, id: JoystickId, bit: u32, down: bool) {
+        let open = self.ring.open();
+        let Some(slot) = cx.pads.get_mut(id) else {
+            return;
+        };
+        match slot.dial.button(bit, down, open) {
+            PadRoute::Forward => cx.connected.send_input(&gamepad::bit_event(bit, down, slot.index)),
+            PadRoute::Menu(ev) => {
+                self.ring.menu(ev);
+            }
+            PadRoute::Drop => {}
+        }
     }
 }

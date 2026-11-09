@@ -4,6 +4,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use pf_client_core::shortcuts::{Device, Engine, Shortcuts};
+
 use super::pads::{Pads, Slot};
 use crate::platform::webos::dualsense::{self, Feedback, Link};
 use crate::platform::webos::{gamepad, usb_audio};
@@ -236,11 +238,11 @@ impl Slot {
         self.declared = Some(kind);
     }
 
-    /// A new session: the handshake built pad 0 as `handshake_kind` and nothing else yet, and no
-    /// shortcut or dial state carries over.
-    pub(super) fn begin_session(&mut self, handshake_kind: GamepadType) {
+    /// A new session: the handshake built pad 0 as `handshake_kind` and nothing else yet, no
+    /// dial state carries over, and the pad runs this session's `shortcuts`.
+    pub(super) fn begin_session(&mut self, handshake_kind: GamepadType, shortcuts: &Shortcuts) {
         self.declared = (self.index == 0).then_some(handshake_kind);
-        self.chord.clear();
+        self.shortcuts = Engine::new(&shortcuts.bindings, Device::Pad);
         self.dial.clear();
     }
 

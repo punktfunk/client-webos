@@ -429,7 +429,7 @@ struct Stream {
     // ---- the dial and the stop dialog ---------------------------------------------------------
     /// "Stop streaming?" — 0 = "Disconnect" focused, 1 = "Cancel" (default on open — safer).
     disconnect: ConfirmDialog,
-    /// The quick-action dial: Select+A on the pad or a held Yellow, drawn over the video
+    /// The quick-action dial: a pad shortcut or a held Yellow, drawn over the video
     /// (`core::dial`).
     ring: pf_console_ui::Ring,
     ring_was_open: bool,
