@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 
 use super::dl;
 use crate::services::pcm_write::{self, WriteError};
+use crate::session::pad_audio::speaker_start_ready;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ASOUND_LIB: &CStr = c"libasound.so.2";
@@ -204,6 +205,10 @@ impl Drop for PadSink {
 /// long enough that the write rate is nowhere near the pad's per-millisecond packet rate.
 const CHUNK_FRAMES: usize = 240;
 
+/// Stereo samples the speaker ring holds before a burst plays: 20 ms, two host frames of cushion
+/// so the ring does not run dry between arrivals. A shorter burst starts once the lane is quiet.
+const SPEAKER_START_SAMPLES: usize = 960;
+
 /// Spawns the writer for a wired pad's `0xD1` lanes, or `None` when the card cannot be opened.
 ///
 /// `snd_pcm_writei` blocks until the card takes the chunk, so it is the clock: there is no tick to
@@ -249,8 +254,18 @@ pub fn spawn(
             let mut speaker = vec![0f32; CHUNK_FRAMES * 2];
             let mut coils = vec![0f32; CHUNK_FRAMES * 2];
             let mut out = vec![0i16; CHUNK_FRAMES * CHANNELS];
+            // The speaker plays from a primed ring: a burst waits for its cushion, an empty ring
+            // re-arms the wait. The coil lane zero-fills a shortfall, which is right for haptics.
+            let mut speaker_live = false;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                envelope.take_speaker_pcm(&mut speaker);
+                let queued = envelope.speaker_queued();
+                speaker_live = queued > 0
+                    && (speaker_live || speaker_start_ready(queued, envelope.speaker_idle_ms(), SPEAKER_START_SAMPLES));
+                if speaker_live {
+                    envelope.take_speaker_pcm(&mut speaker);
+                } else {
+                    speaker.fill(0.0);
+                }
                 envelope.take_coils_pcm(&mut coils);
                 let q = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
                 for (i, frame) in out.chunks_exact_mut(CHANNELS).enumerate() {

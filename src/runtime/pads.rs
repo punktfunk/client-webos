@@ -5,10 +5,10 @@
 //! is dead for navigation too. Indices are lowest-free and stable for a slot's life, so an unplug
 //! frees only its own index and a game never sees players shuffle.
 
+use pf_client_core::shortcuts::{Device, Engine, Shortcuts};
 use sdl3::gamepad::Gamepad;
 use sdl3::joystick::JoystickId;
 
-use super::input::DisconnectChord;
 use crate::core::dial::PadDial;
 use crate::platform::webos::gamepad;
 use crate::services::store::GamepadType;
@@ -26,7 +26,7 @@ pub(super) struct Slot {
     /// The kind the host was last told this slot is; `None` before it has heard of it.
     pub(super) declared: Option<GamepadType>,
     /// Per pad: two pads' halves of a chord are not one person holding it.
-    pub(super) chord: DisconnectChord,
+    pub(super) shortcuts: Engine,
     pub(super) dial: PadDial,
     /// `SDL_GetGamepadPath` and serial: what ties this pad to its own `DualSense` link.
     pub(super) path: Option<String>,
@@ -60,6 +60,14 @@ impl Slot {
         }
     }
 
+    /// Stable per physical controller, unlike the wire index: `vid:pid:` plus the MAC where the
+    /// pad has one, else its name. Keys the per-pad settings.
+    pub(super) fn key(&self) -> String {
+        let (vid, pid) = (self.pad.vendor_id().unwrap_or(0), self.pad.product_id().unwrap_or(0));
+        let suffix = self.uniq.clone().unwrap_or_else(|| self.pad.name().unwrap_or_default());
+        format!("{vid:04x}:{pid:04x}:{suffix}")
+    }
+
     /// Whether this is a real `DualSense` the host builds as one — the pads with extras to route.
     pub(super) fn is_dualsense(&self, setting: GamepadType) -> bool {
         self.host_kind(setting).is_dualsense() && self.physical.is_some_and(GamepadType::is_dualsense)
@@ -70,6 +78,8 @@ impl Slot {
 pub(super) struct Pads {
     /// In wire-index order, so the first is player 1.
     slots: Vec<Slot>,
+    /// The last stream's pad shortcuts ([`crate::core::dial::pad_shortcuts`]): a pad that joins runs them.
+    shortcuts: Shortcuts,
 }
 
 /// Lowest free wire index, or `None` when every slot is taken.
@@ -120,7 +130,7 @@ impl Pads {
                 face,
                 physical,
                 declared: None,
-                chord: DisconnectChord::default(),
+                shortcuts: Engine::new(&self.shortcuts.bindings, Device::Pad),
                 dial: PadDial::with_face(face.map(|b| gamepad::button_bit(b).unwrap_or(0))),
                 path,
                 serial,
@@ -160,6 +170,8 @@ impl Pads {
     pub(super) fn remove(&mut self, id: JoystickId) -> Option<Slot> {
         let i = self.slots.iter().position(|s| s.id == id)?;
         let slot = self.slots.remove(i);
+        // Wire indices are reused: the next pad on this one starts at full volume.
+        punktfunk_core::audio::pad_mix::set_speaker_volume(slot.index, 100);
         tracing::info!("controller disconnected: pad {}", slot.index);
         Some(slot)
     }
@@ -186,16 +198,17 @@ impl Pads {
         self.slots.is_empty()
     }
 
-    /// Whether any pad has held the disconnect/quit chord for `hold`.
-    pub(super) fn chord_held(&self, hold: std::time::Duration) -> bool {
-        self.slots.iter().any(|s| s.chord.held_for(hold))
+    /// A new session: every pad, and each one that arrives during it, runs `shortcuts`.
+    pub(super) fn begin_session(&mut self, shortcuts: Shortcuts, handshake_kind: GamepadType) {
+        self.shortcuts = shortcuts;
+        for slot in &mut self.slots {
+            slot.begin_session(handshake_kind, &self.shortcuts);
+        }
     }
 
-    /// Forgets every pad's held chord, so a shortcut fires once per hold.
-    pub(super) fn clear_chords(&mut self) {
-        for slot in &mut self.slots {
-            slot.chord.clear();
-        }
+    /// The shortcuts this stream's pads run, for the hints that name them.
+    pub(super) fn shortcuts(&self) -> &Shortcuts {
+        &self.shortcuts
     }
 
     /// The first pad this client recognizes — what `Automatic` mirrors.
@@ -208,16 +221,17 @@ impl Pads {
         &self,
         setting: GamepadType,
     ) -> impl Iterator<Item = pf_client_core::menu_nav::PadInfo> + '_ {
-        // Battery and rumble are reported absent: this client reads neither.
+        // Battery, rumble and per-pad audio are reported absent: this client reads none of them.
         self.slots.iter().map(move |s| pf_client_core::menu_nav::PadInfo {
             name: s.pad.name().unwrap_or_default(),
-            key: s.index.to_string(),
+            key: s.key(),
             pref: s.host_kind(setting).to_core(),
             steam_virtual: false,
             battery: None,
             detail: format!("Player {}", s.index + 1),
             forwarded: true,
             rumble: false,
+            audio: s.is_dualsense(setting),
         })
     }
 

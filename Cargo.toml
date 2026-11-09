@@ -48,14 +48,15 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Same revision for shared types.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "b58dc3cfe152c48c584c8e2f77dc05d08f6aeb12", features = ["quic", "chacha-aws-lc-rs", "aes-aws-lc-rs", "l10n"] }
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "b58dc3cfe152c48c584c8e2f77dc05d08f6aeb12", default-features = false }
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", features = ["quic", "chacha-aws-lc-rs", "aes-aws-lc-rs", "l10n"] }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", default-features = false }
+
 # The words the kit and the core show; this client reads the `client` and `console` parts too.
-pf-l10n = { git = "https://git.unom.io/unom/punktfunk", rev = "b58dc3cfe152c48c584c8e2f77dc05d08f6aeb12", default-features = false, features = ["client", "console", "host"] }
+pf-l10n = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", default-features = false, features = ["client", "console", "host"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-cros-codecs = { git = "https://git.unom.io/unom/punktfunk", rev = "b58dc3cfe152c48c584c8e2f77dc05d08f6aeb12" }
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "b58dc3cfe152c48c584c8e2f77dc05d08f6aeb12", default-features = false, features = ["gl"] }
+cros-codecs = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a" }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", default-features = false, features = ["gl"] }
 sdl3 = { version = "0.20", default-features = false }
 # Disable pkg-config: buildroot mangles the SDL prefix outside its sysroot.
 # build.rs supplies SDL3_PREFIX for direct linking.

@@ -132,7 +132,7 @@ Intervals are 0.625ms slots bounding transmit waits (~77ms anchor). Slower inter
 
 Only sniff methods in `bluetooth2` API; no link-policy/QoS call (nothing persistent). One `stopSniff` doesn't hold; stack re-enters sniff within seconds. Keeper re-asserts every 250ms, immediately on >50ms gaps (motion ~2.5ms). Replies in 1-3ms. Measured: ~400 reports/s vs ~10 bursts.
 
-**Feed pad at its clock, never faster.** One report per 10.667ms, tick lands on next future interval. Overrun tick fires again immediately (catch-up undeliverable). Measured 110 reports/s vs pad's 93.75 broke speech. Pre-fill uses 2 reports/tick; stop when ring depth=target (after pre-fill, depth is clock drift).
+**Feed pad at its clock, never faster.** One report per 10.667ms, tick lands on next future interval, never fires twice at once. Measured 110 reports/s vs pad's 93.75 broke speech. Pre-fill uses 2 reports/tick; stop when ring depth=target (after pre-fill, depth is clock drift). Pre-fill hold ends at 10 reports or 40ms without a speaker frame (short sounds play what they have); ring is emptied when lane's 250ms hold expires. A skipped tick repays up to 2 reports, only from real audio in the ring (a stall must not drain the pad's FIFO for good). Silence frames go through the live encoder: the pad's Opus decoder predicts from the previous frame. USB lane: same start rule, 20ms/40ms.
 
 ## Pad audio (`0xD1`): both lanes on a Bluetooth pad
 
@@ -160,7 +160,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 - **Magic Remote Back needs `SDL_WEBOS_ACCESS_POLICY_KEYS_BACK`** before window creation. Same for Home/Guide. Launcher ribbon needs `SDL_WEBOS_ACCESS_POLICY_RIBBON=false`.
 - **Access-policy hints are all-or-nothing,** latched at window creation; cannot scope to stream only.
 - **Held Back is the EXIT key (375); a short tap is ordinary Back.** Don't time it; webOS detects the long-press. Poll `WEBOS_EXIT_SCANCODE` (edge-detected), open dialog on rising edge. Short stays Esc/back-nav. Needs both `KEYS_EXIT` and `KEYS_BACK`, or gesture SIGTERMs app.
-- **The gamepad shortcut is a 1s hold of L1+R1+Start+Select** (`runtime::input::DisconnectChord`), every client's escape chord. It opens disconnect and is also forwarded as real game input. Chord cleared on fire/unplug (dialog swallows events, unplugged pad sends no releases).
+- **Pad shortcuts run on `pf_client_core::shortcuts::Engine`**, one per pad (`runtime::pads::Slot`), from the settings' `shortcuts` blob or the webOS defaults (`core::dial::pad_shortcuts`): Select+A opens the dial, a 1s hold of L1+R1+Start+Select opens disconnect. The chord's last button is held back while armed; the rest reach the game and are lifted when it fires. Flushed on the dialog, focus loss and unplug (no releases arrive then).
 - **Hidden window gets no pointer input.** Keep mapped, fully transparent `RGBA(0,0,0,0)` so NDL shows through (not `.hide()`).
 - **Two independent cursors** — webOS + host over network. Three levers (order matters): `EVIOCGRAB` on evdev (starves compositor), `SDL_webOSCursorVisibility`, `show_cursor`.
   - **`SDL_webOSCursorVisibility(true)` shows.** The compositor keeps the last value after the app exits, and `wl_display_disconnect` drops unsent requests, so quit pumps events once after the hand-back.
