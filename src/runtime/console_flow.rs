@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use pf_client_core::console::{OverlayAction, PointerButton, PointerInput, SessionPhase};
 use pf_client_core::menu_nav::{MenuEvent, MenuNav, MenuSample, PadInfo};
-use pf_console_ui::{Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, InputSource, Key, Platform, Viewport};
+use pf_console_ui::{
+    Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, InputSource, Key, PadTestState, Platform, Viewport,
+};
 
 use super::*;
 use crate::console::Service;
@@ -108,6 +110,8 @@ pub(super) fn run(
     perf.mark(if opened_on_a_shelf { "library" } else { "home" });
     let mut nav = MenuNav::new();
     let mut sample = MenuSample::default();
+    // The input test's last reading, so an unchanged one is not sent again.
+    let mut test_last: Option<PadReading> = None;
     let mut pads: Vec<PadInfo> = Vec::new();
     // The open pad's name, or `None` when what SDL has open is the Magic Remote. Refreshed on
     // hotplug only to avoid per-frame string allocations.
@@ -299,12 +303,15 @@ pub(super) fn run(
 
         // Every open pad through the shared synthesizer, so repeats, dead zone and hysteresis
         // match every other client rather than being re-invented here. The remote is never
-        // opened; its buttons still reach the shell, as keys.
+        // opened; its buttons still reach the shell, as keys, and its Back leaves the input test.
         if !open_pads.is_empty() {
             sample = merge_samples(open_pads.iter().map(pad_sample));
         }
         menu_out.clear();
-        nav.poll(&sample, Instant::now(), &mut menu_out);
+        let test = service.pad_test.then(|| pad_reading(open_pads));
+        if let Some(state) = step_pads(&mut nav, &mut test_last, &sample, test, Instant::now(), &mut menu_out) {
+            handles.console.set_pad_test(state);
+        }
         for ev in menu_out.drain(..) {
             console.menu(ev, InputSource::Pad);
         }
@@ -678,6 +685,100 @@ fn merge_samples(samples: impl Iterator<Item = MenuSample>) -> MenuSample {
     out
 }
 
+/// The menu pads as the input test reads them: wire bits held on any pad, and the SDL axes
+/// (LX LY RX RY LT RT) of the pad pushed furthest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PadReading {
+    buttons: u32,
+    axes: [i16; 6],
+}
+
+fn pad_reading(pads: &pads::Pads) -> PadReading {
+    use sdl3::gamepad::Button;
+    use sdl3::sys::gamepad::{SDL_GamepadButton, SDL_GAMEPAD_BUTTON_COUNT};
+    let mut reading = PadReading::default();
+    let mut furthest = -1i64;
+    for slot in pads.iter() {
+        for bit in (0..SDL_GAMEPAD_BUTTON_COUNT.0)
+            .filter_map(|i| Button::from_ll(SDL_GamepadButton(i)))
+            .filter(|&b| slot.pad.button(b))
+            .filter_map(gamepad::button_bit)
+        {
+            reading.buttons |= bit;
+        }
+        let axes = super::pad_session::PAD_AXES.map(|a| slot.pad.axis(a));
+        let reach: i64 = axes.iter().map(|&v| i64::from(v).pow(2)).sum();
+        if reach > furthest {
+            furthest = reach;
+            reading.axes = axes;
+        }
+    }
+    reading
+}
+
+/// The input test's names for a reading: Xbox positions, the drawn pads' paddle names, and a
+/// trigger past half travel as held. Sticks run −1…1 with +y down, as SDL reports them.
+fn pad_test_state(r: PadReading) -> PadTestState {
+    use punktfunk_core::input::gamepad as wire;
+    const NAMES: [(u32, &str); 21] = [
+        (wire::BTN_A, "A"),
+        (wire::BTN_B, "B"),
+        (wire::BTN_X, "X"),
+        (wire::BTN_Y, "Y"),
+        (wire::BTN_LB, "LB"),
+        (wire::BTN_RB, "RB"),
+        (wire::BTN_BACK, "Back"),
+        (wire::BTN_START, "Start"),
+        (wire::BTN_GUIDE, "Guide"),
+        (wire::BTN_LS_CLICK, "LS"),
+        (wire::BTN_RS_CLICK, "RS"),
+        (wire::BTN_DPAD_UP, "Up"),
+        (wire::BTN_DPAD_DOWN, "Down"),
+        (wire::BTN_DPAD_LEFT, "Left"),
+        (wire::BTN_DPAD_RIGHT, "Right"),
+        (wire::BTN_TOUCHPAD, "Touchpad"),
+        (wire::BTN_MISC1, "Misc"),
+        (wire::BTN_PADDLE1, "R4"),
+        (wire::BTN_PADDLE2, "L4"),
+        (wire::BTN_PADDLE3, "R5"),
+        (wire::BTN_PADDLE4, "L5"),
+    ];
+    const AXES: [&str; 6] = ["LX", "LY", "RX", "RY", "LT", "RT"];
+    let axes = r.axes.map(|v| (f32::from(v) / 32767.0).clamp(-1.0, 1.0));
+    let mut held: Vec<String> = NAMES
+        .iter()
+        .filter(|(bit, _)| r.buttons & bit != 0)
+        .map(|(_, name)| (*name).to_string())
+        .collect();
+    for (name, v) in [("LT", axes[4]), ("RT", axes[5])] {
+        if v > 0.5 {
+            held.push(name.to_string());
+        }
+    }
+    let axes = AXES.iter().zip(axes).map(|(n, v)| ((*n).to_string(), v)).collect();
+    PadTestState { held, axes }
+}
+
+/// One poll of the menu pads. While the input test is on (`test` is the pads' reading) they feed
+/// it instead of the menu: the reading comes back when it differs from `last`, and `nav` resets,
+/// so what is still held when the test ends is adopted rather than fired.
+fn step_pads(
+    nav: &mut MenuNav,
+    last: &mut Option<PadReading>,
+    sample: &MenuSample,
+    test: Option<PadReading>,
+    now: Instant,
+    out: &mut Vec<MenuEvent>,
+) -> Option<PadTestState> {
+    let Some(reading) = test else {
+        *last = None;
+        nav.poll(sample, now, out);
+        return None;
+    };
+    nav.reset();
+    (last.replace(reading) != Some(reading)).then(|| pad_test_state(reading))
+}
+
 /// Window pixels to surface pixels. One is what SDL reports pointer events in, the other is
 /// what the shell hit-tests and what Skia drew — and webOS is documented to hand back a
 /// drawable that is not the window that was asked for. Both are 1080p on the sets seen so far,
@@ -745,4 +846,51 @@ fn editing_key(k: sdl3::keyboard::Keycode) -> Option<Key> {
         K::Tab => Key::Tab,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use punktfunk_core::input::gamepad as wire;
+
+    #[test]
+    fn a_reading_takes_the_input_tests_names() {
+        let state = pad_test_state(PadReading {
+            buttons: wire::BTN_A | wire::BTN_BACK | wire::BTN_PADDLE2,
+            // LX full left, LY full down as SDL reports it, LT short of half travel, RT past it.
+            axes: [i16::MIN, i16::MAX, 0, 0, 16_000, 17_000],
+        });
+        assert_eq!(state.held, ["A", "Back", "L4", "RT"]);
+        let names: Vec<&str> = state.axes.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["LX", "LY", "RX", "RY", "LT", "RT"]);
+        assert_eq!(state.axes[0].1, -1.0);
+        assert_eq!(state.axes[1].1, 1.0, "+y is down");
+        assert!(state.axes[4].1 < 0.5 && state.axes[5].1 > 0.5);
+    }
+
+    #[test]
+    fn the_pads_move_no_menu_while_the_test_is_on() {
+        let (mut nav, mut last, mut out, now) = (MenuNav::new(), None, Vec::new(), Instant::now());
+        let idle = MenuSample::default();
+        let b = MenuSample {
+            buttons: [false, true, false, false, false, false],
+            ..MenuSample::default()
+        };
+        let held_b = PadReading {
+            buttons: wire::BTN_B,
+            ..PadReading::default()
+        };
+        step_pads(&mut nav, &mut last, &idle, None, now, &mut out);
+        assert!(step_pads(&mut nav, &mut last, &b, Some(held_b), now, &mut out).is_some());
+        assert!(
+            step_pads(&mut nav, &mut last, &b, Some(held_b), now, &mut out).is_none(),
+            "an unchanged reading is not sent again"
+        );
+        // The test ends under a held B: adopted, not a Back.
+        step_pads(&mut nav, &mut last, &b, None, now, &mut out);
+        assert!(out.is_empty());
+        step_pads(&mut nav, &mut last, &idle, None, now, &mut out);
+        step_pads(&mut nav, &mut last, &b, None, now, &mut out);
+        assert_eq!(out, [MenuEvent::Back]);
+    }
 }

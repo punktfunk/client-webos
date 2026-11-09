@@ -4,6 +4,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use pf_client_core::shortcuts::{Device, Engine, Shortcuts};
+
 use super::pads::{Pads, Slot};
 use crate::platform::webos::dualsense::{self, Feedback, Link};
 use crate::platform::webos::{gamepad, usb_audio};
@@ -15,8 +17,8 @@ use crate::session::Connected;
 /// How many copies of an arrival to send: it rides unreliable datagrams with no retransmit.
 const ARRIVAL_SENDS: usize = 3;
 
-/// Every pad axis, for releasing a pad and for re-sending held sticks.
-const PAD_AXES: [sdl3::gamepad::Axis; 6] = [
+/// Every pad axis, for releasing a pad, re-sending held sticks and the console's input test.
+pub(super) const PAD_AXES: [sdl3::gamepad::Axis; 6] = [
     sdl3::gamepad::Axis::LeftX,
     sdl3::gamepad::Axis::LeftY,
     sdl3::gamepad::Axis::RightX,
@@ -236,11 +238,11 @@ impl Slot {
         self.declared = Some(kind);
     }
 
-    /// A new session: the handshake built pad 0 as `handshake_kind` and nothing else yet, and no
-    /// shortcut or dial state carries over.
-    pub(super) fn begin_session(&mut self, handshake_kind: GamepadType) {
+    /// A new session: the handshake built pad 0 as `handshake_kind` and nothing else yet, no
+    /// dial state carries over, and the pad runs this session's `shortcuts`.
+    pub(super) fn begin_session(&mut self, handshake_kind: GamepadType, shortcuts: &Shortcuts) {
         self.declared = (self.index == 0).then_some(handshake_kind);
-        self.chord.clear();
+        self.shortcuts = Engine::new(&shortcuts.bindings, Device::Pad);
         self.dial.clear();
     }
 

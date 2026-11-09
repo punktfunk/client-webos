@@ -3,7 +3,8 @@
 //!
 //! A tick is a fixed sequence of steps, each its own method, run in this order:
 //! 1. the quit signal, and a HID mouse coming up ([`Stream::adopt_hid_pointer`]);
-//! 2. the remote's own nodes, then SDL's events ([`Stream::handle_event`]);
+//! 2. the remote's own nodes, then SDL's events ([`Stream::handle_event`]), then each pad's
+//!    shortcut clock ([`Stream::tick_pad_shortcuts`]);
 //! 3. the dial: its open/close edge, its facts and its commands ([`Stream::tick_ring`]);
 //! 4. the stop dialog's openers and its hand-over of input ([`Stream::tick_dialog_shortcuts`]);
 //! 5. the colour keys' actions and the hold toast ([`Stream::tick_remote_actions`]);
@@ -17,7 +18,9 @@ use std::ops::ControlFlow;
 use super::*;
 use crate::core::dial::Press;
 use crate::platform::webos::input::{WEBOS_EXIT_SCANCODE, WEBOS_HOME_SCANCODE};
+use pf_client_core::overlay_actions::{OverlayConfig, RingPlatform, SlotId};
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
+use pf_client_core::shortcuts::{Action, Out, Phase};
 use punktfunk_core::hud::StatsVerbosity;
 
 /// A synthetic system-button tap holds this long, so the host sees the press.
@@ -144,9 +147,10 @@ impl App {
         self.pads.sync(&self.game_controller);
         let pad_routes = pads::PadRoutes::default();
         self.pads.publish_routes(&pad_routes);
-        for slot in self.pads.iter_mut() {
-            slot.begin_session(settings.gamepad_type());
-        }
+        self.pads.begin_session(
+            crate::core::dial::pad_shortcuts(&settings.shortcuts, &settings.overlay_actions),
+            settings.gamepad_type(),
+        );
         let ids: Vec<sdl3::joystick::JoystickId> = self.pads.iter().map(|slot| slot.id).collect();
         for id in ids {
             pad_session::bring_up(
@@ -322,6 +326,7 @@ impl Stream {
             note_focus(&event);
             self.handle_event(cx, event, now, osk)?;
         }
+        self.tick_pad_shortcuts(cx)?;
         self.tick_ring(cx)?;
         self.tick_dialog_shortcuts(cx);
         self.tick_remote_actions(cx, osk);
@@ -452,7 +457,10 @@ impl Stream {
                     tracing::warn!("dial: mode request: {e}");
                 }
             }
-            RingCommand::Shortcut(keys) => send_shortcut(cx.connected, &keys),
+            RingCommand::Shortcut(keys) => {
+                send_keys(cx.connected, &keys, true);
+                send_keys(cx.connected, &keys, false);
+            }
             RingCommand::TapButton(bit) => {
                 // Pad 0 may be unplugged while another pad holds the dial.
                 let pad = cx.pads.first().map_or(0, |slot| slot.index);
@@ -488,12 +496,53 @@ impl Stream {
                     .client
                     .set_invert_scroll(!cx.connected.client.invert_scroll());
             }
+            // No window to resize or minimize, and no pointer the dial captures.
+            RingCommand::ToggleCapture
+            | RingCommand::ToggleMouseMode
+            | RingCommand::ToggleFullscreen
+            | RingCommand::Minimize => tracing::debug!(?cmd, "dial: nothing to do on a TV"),
         }
         ControlFlow::Continue(())
     }
 
-    /// What opens the stop dialog — the pad chord, the EXIT gesture — and its hold on input,
-    /// plus the remote's Home key.
+    /// One fired pad shortcut. Quick actions and End stream open the dial and the stop dialog;
+    /// a key-like action holds its button or keys on the host while its chord is held; the rest
+    /// act as their dial slots.
+    pub(super) fn pad_shortcut(
+        &mut self,
+        cx: &mut Cx<'_>,
+        pad: u8,
+        action: &Action,
+        phase: Phase,
+    ) -> ControlFlow<StreamOutcome> {
+        tracing::info!(?action, ?phase, "pad shortcut");
+        match (action, phase) {
+            (Action::Ring, _) => self.toggle_ring(cx),
+            (Action::Slot(SlotId::EndStream), _) => {
+                if !self.disconnect.is_open() {
+                    self.disconnect.open(1, cx.fonts, cx.display);
+                }
+            }
+            (_, Phase::Down | Phase::Up) => hold_keys(cx.connected, cx.settings, pad, action, phase == Phase::Down),
+            (_, Phase::Tap) => {
+                hold_keys(cx.connected, cx.settings, pad, action, true);
+                match system_button(action) {
+                    Some(bit) => self.tap_up = Some((bit, pad, Instant::now() + TAP_PRESS)),
+                    None => hold_keys(cx.connected, cx.settings, pad, action, false),
+                }
+            }
+            (Action::Slot(slot), Phase::Once) => {
+                if let Some(cmd) = RingCommand::for_slot(slot) {
+                    return self.ring_command(cx, cmd);
+                }
+            }
+            (Action::Unknown(_), Phase::Once) => {}
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// What opens the stop dialog from the remote — the EXIT gesture — and its hold on input,
+    /// plus the remote's Home key. A pad opens it through [`Self::pad_shortcut`].
     fn tick_dialog_shortcuts(&mut self, cx: &mut Cx<'_>) {
         // An open dialog swallows pointer input from here on, so no release ever arrives for
         // whatever is down. Done here rather than at each `open` site so every path into the
@@ -503,12 +552,6 @@ impl Stream {
                 cx.connected.release_input();
             }
             self.buttons.release_held(|ev| cx.connected.send_input(ev));
-        }
-        // Chord held long enough — open the dialog, then forget it so it fires once per hold.
-        if !self.disconnect.is_open() && cx.pads.chord_held(EXIT_HOLD) {
-            tracing::info!("disconnect shortcut held — opening dialog");
-            cx.pads.clear_chords();
-            self.disconnect.open(1, cx.fonts, cx.display);
         }
         // EXIT gesture (held Back) opens the dialog; a short tap is Esc (`events`).
         if exit_gesture_fired(&mut self.exit_held) && !self.disconnect.is_open() {
@@ -520,17 +563,17 @@ impl Stream {
             self.ring.input(RingInput::Cancel);
         }
         // The dialog swallows every pad event while it is up, so it takes the pads the way
-        // the dial does: whatever the host holds — the chord's own four buttons included —
-        // is released on the way in. On the way out each pad's bookkeeping starts over, since
-        // presses and releases made inside the dialog never reached it (a release the host
-        // already had is harmless; a stale "held" bit would swallow the next real release),
-        // and the sticks are re-sent because SDL reports only changes.
+        // the dial does: whatever the host holds is released on the way in. On the way out
+        // each pad's bookkeeping starts over, since presses and releases made inside the dialog
+        // never reached it (a release the host already had is harmless; a stale "held" bit
+        // would swallow the next real release), and the sticks are re-sent because SDL reports
+        // only changes.
         let dialog_open = self.disconnect.is_open();
         if dialog_open != self.dialog_was_open {
             self.dialog_was_open = dialog_open;
             for slot in cx.pads.iter_mut() {
                 if dialog_open {
-                    slot.chord.clear();
+                    flush_shortcuts(cx.connected, cx.settings, slot);
                     slot.release_held(cx.connected);
                 } else {
                     slot.dial.clear();
@@ -684,7 +727,7 @@ impl Stream {
     /// own, and a key forgotten while held would take its next auto-repeat for a fresh press.
     pub(super) fn release_all(&mut self, cx: &mut Cx<'_>) {
         for slot in cx.pads.iter_mut() {
-            slot.chord.clear();
+            flush_shortcuts(cx.connected, cx.settings, slot);
             slot.release_held(cx.connected);
         }
         cx.connected.release_input();
@@ -729,33 +772,66 @@ pub(super) fn ring_facts(
     }
 }
 
-/// A dial shortcut: every key down in order, then up in reverse. A key this build cannot name
-/// sends nothing, like the other clients.
-fn send_shortcut(connected: &session::Connected, keys: &[String]) {
-    let vks: Vec<u8> = keys
+/// A dial shortcut's keys: every key down in order, or up in reverse. A key this build cannot
+/// name sends nothing, like the other clients.
+fn send_keys(connected: &session::Connected, keys: &[String], down: bool) {
+    let mut vks: Vec<u8> = keys
         .iter()
         .filter_map(|k| pf_client_core::overlay_actions::key_vk(k))
         .collect();
     if vks.is_empty() || vks.len() != keys.len() {
         return;
     }
-    let key = |vk: u8, down: bool| punktfunk_core::input::InputEvent {
-        kind: if down {
-            punktfunk_core::input::InputKind::KeyDown
-        } else {
-            punktfunk_core::input::InputKind::KeyUp
-        },
-        _pad: [0; 3],
-        code: u32::from(vk),
-        x: 0,
-        y: 0,
-        flags: 0,
-    };
-    for &vk in &vks {
-        connected.send_input(&key(vk, true));
+    if !down {
+        vks.reverse();
     }
-    for &vk in vks.iter().rev() {
-        connected.send_input(&key(vk, false));
+    for vk in vks {
+        connected.send_input(&punktfunk_core::input::InputEvent {
+            kind: if down {
+                punktfunk_core::input::InputKind::KeyDown
+            } else {
+                punktfunk_core::input::InputKind::KeyUp
+            },
+            _pad: [0; 3],
+            code: u32::from(vk),
+            x: 0,
+            y: 0,
+            flags: 0,
+        });
+    }
+}
+
+/// The host pad button a shortcut taps: Guide, or Quick access's `MISC1`.
+fn system_button(action: &Action) -> Option<u32> {
+    match action {
+        Action::Slot(slot) => match RingCommand::for_slot(slot) {
+            Some(RingCommand::TapButton(bit)) => Some(bit),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A key-like shortcut down or up on the host: its system button on `pad`, or the keys of a
+/// key combination in the dial's blob.
+fn hold_keys(connected: &session::Connected, settings: &store::Settings, pad: u8, action: &Action, down: bool) {
+    if let Some(bit) = system_button(action) {
+        connected.send_input(&gamepad::bit_event(bit, down, pad));
+    } else if let Action::Slot(SlotId::Shortcut(id)) = action {
+        let ring = OverlayConfig::parse(&settings.overlay_actions, RingPlatform::Desktop);
+        if let Some(shortcut) = ring.shortcut(id) {
+            send_keys(connected, &shortcut.keys, down);
+        }
+    }
+}
+
+/// Forgets what `slot`'s shortcut engine holds, for when its releases will not arrive: a held
+/// key-like shortcut comes up. The buttons it forwarded are `Slot::release_held`'s to lift.
+pub(super) fn flush_shortcuts(connected: &session::Connected, settings: &store::Settings, slot: &mut pads::Slot) {
+    for out in slot.shortcuts.flush() {
+        if let Out::Fire(action, Phase::Up) = out {
+            hold_keys(connected, settings, slot.index, &action, false);
+        }
     }
 }
 
