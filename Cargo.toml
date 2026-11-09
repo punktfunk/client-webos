@@ -48,8 +48,9 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Same revision for shared types.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", features = ["quic", "chacha-aws-lc-rs", "l10n"] }
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", features = ["quic", "chacha-aws-lc-rs", "aes-aws-lc-rs", "l10n"] }
 pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", default-features = false }
+
 # The words the kit and the core show; this client reads the `client` and `console` parts too.
 pf-l10n = { git = "https://git.unom.io/unom/punktfunk", rev = "9eb2eb64113b6848e921a7153edd2248b8f61d7a", default-features = false, features = ["client", "console", "host"] }
 
