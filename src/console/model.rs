@@ -112,6 +112,8 @@ pub(crate) struct Service {
     pair: Vec<Receiver<PairOutcome>>,
     /// Set for the wake worker to see; taking it is how a cancel or a second wake stops it.
     wake_cancel: Option<Arc<AtomicBool>>,
+    /// The console's input test is on: the menu pads feed it instead of the menu.
+    pub(crate) pad_test: bool,
 }
 
 impl Service {
@@ -137,6 +139,7 @@ impl Service {
             art: None,
             pair: Vec::new(),
             wake_cancel: None,
+            pad_test: false,
         }
     }
 
@@ -371,6 +374,8 @@ impl Service {
             } => self.speed_test(key, addr, port, &fp_hex, host_name),
             // The pad grants and rumble tests are Android's `InputDevice` API.
             ConsoleCmd::PadAction { action, .. } => tracing::info!("console: no pad action {action} on webOS"),
+            // The menu loop reads it each poll (`console_flow::step_pads`).
+            ConsoleCmd::PadTest { on } => self.pad_test = on,
             ConsoleCmd::UnpairHost { key } => self.unpair_host(&key),
             ConsoleCmd::SavePreset { id, name, overrides } => self.save_preset(id, name, overrides),
             ConsoleCmd::DeletePreset { id } => self.delete_preset(&id),
@@ -423,14 +428,12 @@ impl Service {
             //   and every Resume badge stays off — exactly how the shell draws a host too old
             //   to answer it. Wiring one needs the status shape, not just another request.
             // - `SetClipboard`: the shell offers shared clipboard on no TV but Android's.
-            // - `PadTest`: the shell offers the input test on Android and Apple only.
             // - `PromptAnswer`: this client raises no prompt, so no answer can arrive.
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
-            | ConsoleCmd::PadTest { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
             | ConsoleCmd::Install { .. } => {}

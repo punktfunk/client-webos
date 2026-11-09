@@ -17,8 +17,8 @@ use crate::session::Connected;
 /// How many copies of an arrival to send: it rides unreliable datagrams with no retransmit.
 const ARRIVAL_SENDS: usize = 3;
 
-/// Every pad axis, for releasing a pad and for re-sending held sticks.
-const PAD_AXES: [sdl3::gamepad::Axis; 6] = [
+/// Every pad axis, for releasing a pad, re-sending held sticks and the console's input test.
+pub(super) const PAD_AXES: [sdl3::gamepad::Axis; 6] = [
     sdl3::gamepad::Axis::LeftX,
     sdl3::gamepad::Axis::LeftY,
     sdl3::gamepad::Axis::RightX,
