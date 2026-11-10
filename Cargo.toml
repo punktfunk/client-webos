@@ -68,12 +68,12 @@ pyrowave-sys = { git = "https://git.unom.io/unom/punktfunk", rev = "bd072336f79c
 ash = "0.38"
 
 [patch."https://git.unom.io/unom/punktfunk"]
-pyrowave-sys = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
-pf-console-ui = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
-pf-client-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
-punktfunk-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
-cros-codecs = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
-fec-rs = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+pyrowave-sys = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
+pf-console-ui = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
+pf-client-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
+punktfunk-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
+cros-codecs = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
+fec-rs = { git = "https://github.com/zampierilucas/punktfunk", rev = "1a715ec520f0b22657d08c5ad0fa6f5df361469a" }
 
 [features]
 # Host tests build SDL3 from source; webOS links the prebuilt fork.
