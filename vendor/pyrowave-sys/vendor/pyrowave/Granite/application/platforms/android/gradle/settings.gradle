@@ -1,3 +1,0 @@
-include 'granite'
-project(':granite').projectDir = file('$$GRANITE_ANDROID_ACTIVITY_PATH$$')
-include '$$APP$$'

@@ -64,16 +64,16 @@ libc = "0.2"
 miniz_oxide = "0.8"
 # Keep default features/textlayout for the prebuilt Skia archive.
 skia-safe = { version = "0.153", features = ["gl", "textlayout"] }
-pyrowave-sys = { git = "https://git.unom.io/unom/punktfunk", rev = "bd072336f79cd75d392c2ce6d314a4a2309a7fae" }
+pyrowave-sys = { git = "https://git.unom.io/unom/punktfunk", rev = "bd072336f79cd75d392c2ce6d314a4a2309a7fae", features = ["fp16-math"] }
 ash = "0.38"
 
 [patch."https://git.unom.io/unom/punktfunk"]
-pyrowave-sys = { path = "vendor/pyrowave-sys" }
-pf-console-ui = { git = "https://github.com/zampierilucas/punktfunk", rev = "19b9360e661e8bb6414d74757515423fe0dfca39" }
-pf-client-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "19b9360e661e8bb6414d74757515423fe0dfca39" }
-punktfunk-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "19b9360e661e8bb6414d74757515423fe0dfca39" }
-cros-codecs = { git = "https://github.com/zampierilucas/punktfunk", rev = "19b9360e661e8bb6414d74757515423fe0dfca39" }
-fec-rs = { git = "https://github.com/zampierilucas/punktfunk", rev = "19b9360e661e8bb6414d74757515423fe0dfca39" }
+pyrowave-sys = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+pf-console-ui = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+pf-client-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+punktfunk-core = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+cros-codecs = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
+fec-rs = { git = "https://github.com/zampierilucas/punktfunk", rev = "8667bf663f09b853958bbf0b433a1684904d0a9e" }
 
 [features]
 # Host tests build SDL3 from source; webOS links the prebuilt fork.

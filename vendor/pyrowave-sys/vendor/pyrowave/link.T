@@ -1,4 +1,0 @@
-{
-  global: pyrowave_*;
-  local: *;
-};
