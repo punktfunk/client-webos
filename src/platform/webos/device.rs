@@ -439,6 +439,11 @@ mod tests {
     fn the_ui_language_is_read_from_the_locale_settings() {
         let reply = r#"{"returnValue":true,"settings":{"localeInfo":{"locales":{"UI":"de-DE","TV":"en-US"}}}}"#;
         assert_eq!(ui_tag(reply).as_deref(), Some("de-DE"));
+        // webOS writes Chinese with its script, which picks Simplified or Traditional.
+        for tag in ["ja-JP", "ko-KR", "zh-Hans-CN", "zh-Hant-TW", "zh-Hant-HK"] {
+            let reply = format!(r#"{{"settings":{{"localeInfo":{{"locales":{{"UI":"{tag}"}}}}}}}}"#);
+            assert_eq!(ui_tag(&reply).as_deref(), Some(tag));
+        }
         for none in [
             r#"{"returnValue":false}"#,
             r#"{"settings":{"localeInfo":{"locales":{"UI":""}}}}"#,
