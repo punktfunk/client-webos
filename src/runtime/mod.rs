@@ -174,6 +174,7 @@ fn spawn_connect(
                     audio_route: settings.audio_route(),
                     present_priority: settings.present_priority(),
                     display_hdr: settings.hdr_display().hdr_meta(),
+                    screen_wish: punktfunk_core::quic::v2::hello::ScreenWish::parse(&settings.host_screen),
                 },
                 &worker_attempt,
             )

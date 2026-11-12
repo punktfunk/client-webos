@@ -12,10 +12,11 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pf_client_core::display_targets::{Pick, Targets};
 use pf_console_ui::{
     ConsoleCmd, ConsoleHandles, HostAction, HostRow, LibraryGame, LibraryPhase, PairPhase, PairStatus, ProfilesAnswer,
     RequestKey, SpeedPhase, Stale, WakeStatus,
@@ -24,7 +25,7 @@ use punktfunk_core::client::NativeClient;
 
 use crate::core::model::{GameEntry, KnownHost};
 use crate::services::discovery::{DiscoveredHost, Discovery};
-use crate::services::library::{self, GamesLoaded, LibraryError, DEFAULT_MGMT_PORT};
+use crate::services::library::{self, GamesLoaded, LibraryError, ScreensAnswer, DEFAULT_MGMT_PORT};
 use crate::services::logs::{upload_to_host, HostTarget};
 use crate::services::power::{self, PowerRights};
 use crate::services::store::console::ConsoleStore;
@@ -35,6 +36,10 @@ use crate::services::{budget, profiles, wol};
 /// cadence; this `SoC` probes sequentially on one thread rather than in parallel, so the sweep
 /// itself is the slow part, not the interval.
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
+
+/// The floor between two asks of one host's screens. `in_use_by` moves as other devices start
+/// and end streams; each ask is a TLS handshake, so this is the rate limit, as on the desktop.
+const SCREENS_EVERY: Duration = Duration::from_secs(20);
 
 /// How often [`Service::tick`] does its work. The desktop's service loop runs at this cadence on
 /// its own thread; here it shares the render loop, and rebuilding the rows means cloning the
@@ -65,6 +70,7 @@ fn chip(p: &pf_client_core::presets::StreamPreset) -> pf_console_ui::PresetChip 
         // Speed test uses this; a pinned profile is the layer its host streams at,
         // so the shell must not write the global default instead.
         bitrate_kbps: p.overrides.bitrate_kbps,
+        host_screen: p.overrides.host_screen.clone(),
     }
 }
 
@@ -76,6 +82,8 @@ struct SweepTarget {
     port: u16,
     mgmt: u16,
     fingerprint: Option<[u8; 32]>,
+    /// Ask this paired host for its screens too, if it answers.
+    screens: bool,
 }
 
 /// One host's sweep answer: is it up, and (for a paired one) what it lets this TV do to it.
@@ -98,6 +106,12 @@ pub(crate) struct Service {
     /// does not blink off while the next round runs.
     reachable: HashMap<String, bool>,
     rights: HashMap<String, PowerRights>,
+    /// Row key → the host's last `/display/targets` answer, and when it was last asked. Workers
+    /// answer on `screens_tx`: the sweep, a host card's library fetch, a pick's read-back.
+    screens: HashMap<String, Targets>,
+    screens_asked: HashMap<String, Instant>,
+    screens_tx: Sender<ScreensAnswer>,
+    screens_rx: Receiver<ScreensAnswer>,
     sweep: Option<Receiver<Swept>>,
     last_sweep: Option<Instant>,
     /// When [`Self::tick`] last did its work — see [`SERVICE_EVERY`].
@@ -122,6 +136,7 @@ impl Service {
         // `settings.json`, an address changed elsewhere — so its covers are reconciled on every
         // bring-up, not only when a host is forgotten here.
         store.with(|s| crate::services::art::reconcile_host_caches(&s.known_hosts));
+        let (screens_tx, screens_rx) = std::sync::mpsc::channel();
         Self {
             handles,
             store,
@@ -130,6 +145,10 @@ impl Service {
             discovered: Vec::new(),
             reachable: HashMap::new(),
             rights: HashMap::new(),
+            screens: HashMap::new(),
+            screens_asked: HashMap::new(),
+            screens_tx,
+            screens_rx,
             sweep: None,
             last_sweep: None,
             last_tick: None,
@@ -176,6 +195,7 @@ impl Service {
             self.rows_dirty |= self.discovered.len() != before;
         }
         self.drain_sweep();
+        self.drain_screens();
         self.drain_games();
         self.drain_art();
         self.drain_pair();
@@ -209,7 +229,7 @@ impl Service {
     /// followed by its pinned profile cards, then discovered-but-unsaved ones. A pinned card
     /// shares its host's live state; its key rides the profile id behind a NUL, as the
     /// desktop's does.
-    // Inputs: persisted hosts/profiles, adverts, reachability, rights.
+    // Inputs: persisted hosts/profiles, adverts, reachability, rights, screens.
     // Store revision and rows_dirty gate updates; game arrivals affect no row fields.
     fn rows(&self) -> Vec<HostRow> {
         let state = self.store.snapshot();
@@ -302,8 +322,8 @@ impl Service {
             game_presets: h.game_presets.clone(),
             profile: h.profile.clone(),
             running: String::new(),
-            // No `/display/targets` client: the shell shows no Screen section.
-            screens: None,
+            // The Screen section and the presets' Host screen row; a pin shares it via `row`.
+            screens: self.screens.get(&key).filter(|_| h.is_paired()).cloned(),
             key,
         }
     }
@@ -436,6 +456,14 @@ impl Service {
             } => self.fetch_avatar(addr, mgmt, &fp_hex, url),
             ConsoleCmd::WakeProfile { addr, mgmt, fp_hex, id } => self.wake_profile(addr, mgmt, &fp_hex, id),
             ConsoleCmd::SetProfile { key, profile } => self.set_profile(&key, profile),
+            ConsoleCmd::SetScreen {
+                addr,
+                mgmt,
+                fp_hex,
+                screen,
+                topology,
+                label,
+            } => self.set_screen(addr, mgmt, &fp_hex, Pick { screen, topology }, label),
             // Nothing to do here, each for its own reason:
             // - `RefreshRunning`: no `/api/v1/status` client, so the running set stays empty
             //   and every Resume badge stays off — exactly how the shell draws a host too old
@@ -445,13 +473,11 @@ impl Service {
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
-            // - `SetScreen`: no row here carries `screens`, so the shell has no Screen section.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
-            | ConsoleCmd::Install { .. }
-            | ConsoleCmd::SetScreen { .. } => {}
+            | ConsoleCmd::Install { .. } => {}
         }
     }
 
@@ -624,6 +650,8 @@ impl Service {
             );
             return;
         };
+        // A host card opening: its screens too, when due.
+        let screens = self.screens_due(fp_hex).then(|| self.screens_tx.clone());
         let rx = library::load_games_async(
             addr.to_string(),
             port,
@@ -631,6 +659,7 @@ impl Service {
             self.identity.clone(),
             Some(pin),
             budget::REQUEST,
+            screens,
         );
         self.games = Some((req, rx));
     }
@@ -887,12 +916,16 @@ impl Service {
         let targets: Vec<SweepTarget> = state
             .known_hosts
             .iter()
-            .map(|h| SweepTarget {
-                key: shared::known_host_key(h),
-                addr: h.addr.clone(),
-                port: h.port,
-                mgmt: h.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
-                fingerprint: h.fingerprint(),
+            .map(|h| {
+                let key = shared::known_host_key(h);
+                SweepTarget {
+                    screens: h.is_paired() && self.screens_due(&key),
+                    key,
+                    addr: h.addr.clone(),
+                    port: h.port,
+                    mgmt: h.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
+                    fingerprint: h.fingerprint(),
+                }
             })
             .collect();
         if targets.is_empty() {
@@ -902,6 +935,7 @@ impl Service {
         let (tx, rx) = std::sync::mpsc::channel();
         self.sweep = Some(rx);
         let identity = self.identity.clone();
+        let screens = self.screens_tx.clone();
         // One thread for the whole sweep, probing sequentially: the host count is a handful,
         // and a thread per host would spike this SoC's three cores for a presence dot.
         std::thread::Builder::new()
@@ -917,6 +951,10 @@ impl Service {
                     let rights = (online && t.fingerprint.is_some())
                         .then(|| power::probe_rights(&t.addr, t.mgmt, &identity, t.fingerprint).ok())
                         .flatten();
+                    if online && t.screens {
+                        let answer = library::fetch_targets(&t.addr, t.mgmt, &identity, t.fingerprint);
+                        let _ = screens.send((t.key.clone(), answer));
+                    }
                     if tx
                         .send(Swept {
                             key: t.key,
@@ -956,6 +994,58 @@ impl Service {
         if done {
             self.sweep = None;
         }
+    }
+
+    /// Whether one host's screens are due an ask ([`SCREENS_EVERY`]), marking them asked if so.
+    fn screens_due(&mut self, key: &str) -> bool {
+        let due = self.screens_asked.get(key).is_none_or(|t| t.elapsed() >= SCREENS_EVERY);
+        if due {
+            self.screens_asked.insert(key.to_string(), Instant::now());
+        }
+        due
+    }
+
+    /// Fold in the screens answers: a miss takes the section away, as a host without the route has none.
+    fn drain_screens(&mut self) {
+        while let Ok((key, answer)) = self.screens_rx.try_recv() {
+            self.rows_dirty |= match answer {
+                Some(t) => {
+                    let changed = self.screens.get(&key) != Some(&t);
+                    self.screens.insert(key, t);
+                    changed
+                }
+                None => self.screens.remove(&key).is_some(),
+            };
+        }
+    }
+
+    /// Write a Screen row's pick on a worker, then read the host's rows back for the card. Only
+    /// a refusal says anything, worded as a failed host action; the pick shows once the rows land.
+    fn set_screen(&mut self, addr: String, mgmt: u16, fp_hex: &str, pick: Pick, label: String) {
+        // The shell offers the section on paired hosts only, so a missing pin is a stale row.
+        let Some(pin) = shared::parse_fp(fp_hex) else {
+            return;
+        };
+        self.screens_asked.insert(fp_hex.to_string(), Instant::now());
+        let (key, identity, console, screens) = (
+            fp_hex.to_string(),
+            self.identity.clone(),
+            self.handles.console.clone(),
+            self.screens_tx.clone(),
+        );
+        std::thread::Builder::new()
+            .name("punktfunk-webos-console-screen".into())
+            .spawn(move || {
+                if let Err(why) = library::put_pick(&addr, mgmt, &identity, Some(pin), &pick) {
+                    tracing::warn!("console: screen pick {pick:?} refused: {why}");
+                    console.set_notice(pf_l10n::client::hostcard_action_failed(&label, why));
+                }
+                // A miss here keeps the rows up: the pick may still have landed.
+                if let Some(rows) = library::fetch_targets(&addr, mgmt, &identity, Some(pin)) {
+                    let _ = screens.send((key, Some(rows)));
+                }
+            })
+            .ok();
     }
 
     /// Whether this host answered its last check. Unknown counts as down: a host that has never
