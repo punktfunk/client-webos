@@ -302,6 +302,8 @@ impl Service {
             game_presets: h.game_presets.clone(),
             profile: h.profile.clone(),
             running: String::new(),
+            // No `/display/targets` client: the shell shows no Screen section.
+            screens: None,
             key,
         }
     }
@@ -432,11 +434,13 @@ impl Service {
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
+            // - `SetScreen`: no row here carries `screens`, so the shell has no Screen section.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
-            | ConsoleCmd::Install { .. } => {}
+            | ConsoleCmd::Install { .. }
+            | ConsoleCmd::SetScreen { .. } => {}
         }
     }
 
@@ -1333,6 +1337,7 @@ fn discovered_row(d: &DiscoveredHost) -> HostRow {
         // Needs `/api/v1/status`, which this client does not ask — the same reason
         // `LibraryGame::running` is false here. Empty renders as no line.
         running: String::new(),
+        screens: None,
     }
 }
 
