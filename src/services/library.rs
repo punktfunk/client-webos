@@ -9,6 +9,7 @@ use ureq::unversioned::resolver::DefaultResolver;
 use ureq::unversioned::transport::{Connector as _, TcpConnector};
 
 use crate::services::pinned_tls::PinnedTlsConnector;
+use pf_client_core::display_targets::{Pick, Targets};
 
 pub use crate::core::model::GameEntry;
 
@@ -72,13 +73,17 @@ impl std::fmt::Display for LibraryError {
 impl LibraryError {
     /// The sentence as the tail of another: `Couldn't load the profiles — the host isn't answering`.
     pub fn phrase(&self) -> String {
-        let line = self.to_string();
-        let line = line.strip_suffix('.').unwrap_or(&line);
-        let mut chars = line.chars();
-        chars
-            .next()
-            .map_or_else(String::new, |c| c.to_lowercase().chain(chars).collect())
+        phrase(&self.to_string())
     }
+}
+
+/// A sentence as the tail of another: lowercase first letter, no closing period.
+fn phrase(line: &str) -> String {
+    let line = line.strip_suffix('.').unwrap_or(line);
+    let mut chars = line.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_lowercase().chain(chars).collect())
 }
 
 /// `https://addr:port`, IPv6 literals bracketed.
@@ -239,8 +244,12 @@ pub struct GamesLoaded {
     pub result: Result<Vec<GameEntry>, LibraryError>,
 }
 
+/// One host's [`fetch_targets`] answer, keyed by its pinned fingerprint's hex.
+pub type ScreensAnswer = (String, Option<Targets>);
+
 /// Spawns background thread to run `fetch_games` under `budget` (avoids UI freeze from network
 /// blocking). Safe to switch hosts before finish: receiver drop causes thread's send to fail.
+/// With `screens`, the same thread then asks a pinned host for its screens and answers there.
 pub fn load_games_async(
     host: String,
     port: u16,
@@ -248,6 +257,7 @@ pub fn load_games_async(
     identity: (String, String),
     fingerprint: Option<[u8; 32]>,
     budget: std::time::Duration,
+    screens: Option<std::sync::mpsc::Sender<ScreensAnswer>>,
 ) -> std::sync::mpsc::Receiver<GamesLoaded> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
@@ -255,15 +265,75 @@ pub fn load_games_async(
         .spawn(move || {
             let result = fetch_games(&host, mgmt_port, &identity, fingerprint, budget);
             let _ = tx.send(GamesLoaded {
-                host,
+                host: host.clone(),
                 port,
                 mgmt_port,
                 fingerprint,
                 result,
             });
+            if let (Some(screens), Some(pin)) = (screens, fingerprint) {
+                let answer = fetch_targets(&host, mgmt_port, &identity, Some(pin));
+                let _ = screens.send((punktfunk_core::fp::hex(&pin), answer));
+            }
         })
         .expect("spawn library-fetch thread");
     rx
+}
+
+/// `GET /api/v1/display/targets`: the screens this host offers this device, as it sent them.
+/// `None` on any miss, a host without the route included: then the card has no Screen section.
+pub(crate) fn fetch_targets(
+    addr: &str,
+    mgmt_port: u16,
+    identity: &(String, String),
+    pin: Option<[u8; 32]>,
+) -> Option<Targets> {
+    let path = "/api/v1/display/targets";
+    match get_json::<Option<Targets>>(addr, mgmt_port, identity, pin, path, crate::services::budget::REQUEST) {
+        Ok(targets) => targets,
+        Err(e) => {
+            tracing::debug!("display targets ({addr}:{mgmt_port}): {e:?}");
+            None
+        }
+    }
+}
+
+/// The write of a Screen row's pick: the path of this device's own row, named by the
+/// fingerprint of `cert_pem`, and the pick's JSON, `topology` left out when it has none.
+fn pick_request(cert_pem: &str, pick: &Pick) -> Result<(String, String), LibraryError> {
+    let device = punktfunk_core::quic::endpoint::fingerprint_of_pem(cert_pem)
+        .map_err(|e| LibraryError::Identity(format!("client cert: {e}")))?;
+    let path = format!("/api/v1/display/clients/{}", punktfunk_core::fp::hex(&device));
+    Ok((path, serde_json::json!(pick).to_string()))
+}
+
+/// `PUT` a Screen row's pick on this device's row. `Err` is why not, as the tail of a sentence:
+/// the host's own words for a refusal it names (403 `screen_choice_not_granted`), else the lane's.
+pub(crate) fn put_pick(
+    addr: &str,
+    mgmt_port: u16,
+    identity: &(String, String),
+    pin: Option<[u8; 32]>,
+    pick: &Pick,
+) -> Result<(), String> {
+    let (path, body) = pick_request(&identity.0, pick).map_err(|e| e.phrase())?;
+    let url = format!("{}{path}", base_url(addr, mgmt_port));
+    let mut answer = agent(identity, pin)
+        .map_err(|e| e.phrase())?
+        .put(url.as_str())
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(body.as_str())
+        .map_err(|e| classify(e).phrase())?;
+    let code = answer.status().as_u16();
+    if (200..300).contains(&code) {
+        return Ok(());
+    }
+    let said = answer.body_mut().read_to_string().unwrap_or_default();
+    Err(pf_client_core::host_text::api_error(&said)
+        .map_or_else(|| classify(ureq::Error::StatusCode(code)).phrase(), |s| phrase(&s)))
 }
 
 /// Content types this build can decode. CDNs ignoring this header (Steam) send WebP, caught
@@ -515,6 +585,65 @@ mod tests {
             LibraryError::PinMismatch.phrase(),
             "host certificate changed — pair again with a PIN"
         );
+    }
+
+    /// The host's answer reaches the card whole, `may_choose` and `role` included; `null` is
+    /// no section.
+    #[test]
+    fn a_targets_answer_parses_as_the_host_sent_it() {
+        use pf_client_core::display_targets::{DisplayTarget, Role};
+        let answer = |body: &str| {
+            let body = ureq::Body::builder()
+                .mime_type("application/json")
+                .data(body.to_string());
+            read_json::<Option<Targets>>(Ok(ureq::http::Response::new(body))).expect("the answer reads")
+        };
+        let t = answer(
+            r#"{"locked": false, "may_choose": false, "host_default": "own", "yours": null,
+                "targets": [{"id": "HDMI-A-1", "label": "LG TV", "connector": "HDMI-A-1"}],
+                "role": {"yours": "second", "host_default": "only", "offered": ["only", "second", "new"]}}"#,
+        )
+        .expect("an answer");
+        assert!(!t.may_choose);
+        assert_eq!(t.current(), &DisplayTarget::Own);
+        let role = t.role.expect("a role");
+        assert_eq!((role.yours, role.host_default), (Some(Role::Second), Role::Only));
+        assert_eq!(
+            role.offered,
+            [Role::Only, Role::Second],
+            "a word this build lacks drops out"
+        );
+        assert_eq!(answer("null"), None);
+    }
+
+    /// The pick writes this device's own row: the screen, and the topology only when it has one.
+    #[test]
+    fn a_pick_writes_its_screen_and_topology_to_this_devices_row() {
+        use pf_client_core::display_targets::DisplayTarget;
+        let (cert, _) = punktfunk_core::quic::endpoint::generate_identity().expect("an identity");
+        let device = punktfunk_core::quic::endpoint::fingerprint_of_pem(&cert).expect("a fingerprint");
+        let second = Pick {
+            screen: DisplayTarget::Own,
+            topology: Some("extend".into()),
+        };
+        let (path, body) = pick_request(&cert, &second).expect("a request");
+        assert_eq!(
+            path,
+            format!("/api/v1/display/clients/{}", punktfunk_core::fp::hex(&device))
+        );
+        assert_eq!(body, r#"{"screen":"own","topology":"extend"}"#);
+        let tv = Pick {
+            screen: DisplayTarget::Monitor("HDMI-A-1".into()),
+            topology: None,
+        };
+        assert_eq!(
+            pick_request(&cert, &tv).expect("a request").1,
+            r#"{"screen":{"monitor":"HDMI-A-1"}}"#
+        );
+        assert!(matches!(
+            pick_request("not a cert", &tv),
+            Err(LibraryError::Identity(_))
+        ));
     }
 
     #[test]
