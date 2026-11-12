@@ -51,6 +51,7 @@ pub(super) fn run(
 
     let opts = ConsoleOptions {
         device_name: "webOS TV".into(),
+        device_code: pf_client_core::trust::device_code(identity),
         version: Some(format!(
             "{} \u{b7} core {}",
             crate::core::VERSION,
