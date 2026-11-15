@@ -11,6 +11,7 @@ pub mod shared;
 mod writer;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -29,10 +30,15 @@ fn path() -> PathBuf {
     app_dir().join("settings.json")
 }
 
+/// Set by a [`load`] that found the document and could not read it: [`save`] then refuses,
+/// so one bad read never replaces every pairing with defaults.
+static UNREADABLE: AtomicBool = AtomicBool::new(false);
+
 /// Loads the whole persisted document. Absent, unreadable and unparseable all answer with
-/// defaults — a torn file must not take the app down (`services::atomic` is what prevents one).
+/// defaults: a bad file must not take the app down.
 pub fn load() -> Persisted {
-    let mut state = read_document(&path());
+    let (mut state, readable) = read_document(&path());
+    UNREADABLE.store(!readable, Ordering::Relaxed);
     stamp_version(&mut state);
     // A document written on a more capable TV can hold HEVC, HDR and 7.1 on a device with none
     // of them — leaving a *set* value whose row the UI hides.
@@ -40,25 +46,31 @@ pub fn load() -> Persisted {
     state
 }
 
-/// The document at `path`, or defaults. No migration: a document this build cannot read is
-/// renamed to `settings.json.bad` first, because the version stamp right after would write the
-/// defaults over the only copy of every paired host.
-fn read_document(path: &Path) -> Persisted {
+/// The document at `path` or defaults, and whether a save may replace it. No migration: a
+/// document that does not parse is renamed to `settings.json.bad` first, because the version
+/// stamp right after would write the defaults over the only copy of every paired host. One
+/// that exists but can't be read stays as it is, and nothing is saved over it.
+fn read_document(path: &Path) -> (Persisted, bool) {
     let why = match std::fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<Persisted>(&bytes) {
-            Ok(state) => return state,
+            Ok(state) => return (state, true),
             Err(e) => e.to_string(),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Persisted::default(),
-        Err(e) => e.to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Persisted::default(), true),
+        Err(e) => {
+            tracing::warn!(error = %e, "settings.json not read, so nothing is saved over it");
+            return (Persisted::default(), false);
+        }
     };
     let mut aside = path.as_os_str().to_os_string();
     aside.push(".bad");
     match std::fs::rename(path, &aside) {
-        Ok(()) => tracing::warn!(%why, "settings.json unreadable — kept as settings.json.bad, starting from defaults"),
-        Err(e) => tracing::warn!(%why, "settings.json unreadable and not set aside: {e}"),
+        Ok(()) => {
+            tracing::warn!(%why, "settings.json did not parse — kept as settings.json.bad, starting from defaults")
+        }
+        Err(e) => tracing::warn!(%why, "settings.json did not parse and was not set aside: {e}"),
     }
-    Persisted::default()
+    (Persisted::default(), true)
 }
 
 /// Brings [`Persisted::version`] up to this build's.
@@ -77,7 +89,12 @@ fn stamp_version(state: &mut Persisted) {
 }
 
 /// Writes the whole document: its `settings` object is the shared schema verbatim (see [`shared`]).
+/// Refused while the document on disk could not be read.
 pub fn save(state: &Persisted) -> Result<()> {
+    anyhow::ensure!(
+        !UNREADABLE.load(Ordering::Relaxed),
+        "settings.json exists but can't be read"
+    );
     let json = serde_json::to_string_pretty(state).context("serialize app state")?;
     crate::services::atomic::write(&path(), &json, "settings.json")
 }
@@ -86,22 +103,32 @@ pub fn save(state: &Persisted) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A document this build cannot parse is kept beside the defaults, never overwritten by them.
+    /// A document this build cannot parse is kept beside the defaults, never overwritten by
+    /// them. One that can't be read stays where it is, and saving is off.
     #[test]
-    fn an_unreadable_document_is_set_aside() {
+    fn only_a_missing_or_broken_document_may_be_replaced() {
         let dir = std::env::temp_dir().join(format!("pf-webos-store-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc = dir.join("settings.json");
-        assert_eq!(read_document(&doc), Persisted::default(), "absent reads as defaults");
+        assert_eq!(
+            read_document(&doc),
+            (Persisted::default(), true),
+            "absent reads as defaults"
+        );
         assert!(!dir.join("settings.json.bad").exists(), "nothing to set aside");
 
         std::fs::write(&doc, br#"{"known_hosts": 7}"#).unwrap();
-        assert_eq!(read_document(&doc), Persisted::default());
+        assert_eq!(read_document(&doc), (Persisted::default(), true));
         assert!(!doc.exists());
         assert_eq!(
             std::fs::read(dir.join("settings.json.bad")).unwrap(),
             br#"{"known_hosts": 7}"#
         );
+
+        // A directory under the name: it exists, and no read succeeds.
+        std::fs::create_dir_all(&doc).unwrap();
+        assert_eq!(read_document(&doc), (Persisted::default(), false));
+        assert!(doc.exists(), "left where it is");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
