@@ -274,6 +274,60 @@ impl Bus {
         Ok(())
     }
 
+    /// One call whose reply payload the caller needs: pumps until it lands or `within` runs out.
+    pub fn call_text(&self, uri: &CStr, payload: &CStr, within: std::time::Duration) -> Result<String> {
+        unsafe extern "C" fn on_text(_sh: Handle, reply: Message, ctx: *mut c_void) -> bool {
+            let Ok(f) = fns() else { return true };
+            // SAFETY: `ctx` is a leaked-on-timeout `Mutex` that outlives every callback.
+            let slot = unsafe { &*ctx.cast::<Mutex<Option<String>>>() };
+            // SAFETY: `reply` is the live message the hub delivered for this callback.
+            let p = unsafe { (f.message_payload)(reply) };
+            let text = if p.is_null() {
+                String::new()
+            } else {
+                // SAFETY: LS2 payloads are NUL-terminated JSON owned by the message for the callback.
+                unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+            };
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+            true
+        }
+        let slot: &'static Mutex<Option<String>> = Box::leak(Box::new(Mutex::new(None)));
+        let mut err = LsError {
+            error_code: 0,
+            message: std::ptr::null_mut(),
+            _rest: [0; 14],
+        };
+        let mut token: Token = 0;
+        // SAFETY: as in `call`; `slot` is leaked so a reply arriving after the deadline lands safely.
+        let ok = unsafe {
+            (self.fns.error_init)(&mut err);
+            (self.fns.call_one_reply)(
+                self.handle,
+                uri.as_ptr(),
+                payload.as_ptr(),
+                on_text,
+                std::ptr::from_ref(slot).cast_mut().cast(),
+                &mut token,
+                &mut err,
+            )
+        };
+        if !ok {
+            let msg = describe(&err);
+            // SAFETY: initialised by `LSErrorInit` above.
+            unsafe { (self.fns.error_free)(&mut err) };
+            bail!("LSCallOneReply failed: {msg}");
+        }
+        let got = super::poll_until(within, || {
+            self.pump();
+            slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+        });
+        if !got {
+            bail!("no reply within {within:?}");
+        }
+        let text = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        Ok(text.unwrap_or_default())
+    }
+
     /// Dispatches every reply that has arrived; returns without blocking.
     pub fn pump(&self) {
         // SAFETY: `context` is live for the life of `self`; non-blocking iteration.
