@@ -103,13 +103,31 @@ fn card_in(cards: &str, usb_path: Option<&str>) -> Option<u32> {
             found.push((index, detail));
         }
     }
-    match needle {
-        Some(needle) => found
+    match (needle, usb_path) {
+        (Some(needle), Some(path)) => found
             .iter()
             .find(|(_, detail)| detail.contains(&needle))
-            .map(|(index, _)| *index),
-        None => (found.len() == 1).then(|| found[0].0),
+            .map(|(index, _)| *index)
+            .or_else(|| truncated_match(&found, path)),
+        _ => (found.len() == 1).then(|| found[0].0),
     }
+}
+
+/// ALSA keeps a card's long name in 80 bytes, so `Sony Interactive Entertainment DualSense
+/// Wireless Controller at <usb_path>, <speed>` loses its tail on a host controller with a long
+/// name: an LG C1 (webOS 6, kernel 4.4) reads `… at usb-generic-ehc`, with neither the whole path
+/// nor the comma the exact match wants. A cut line still names a prefix of the path; it counts
+/// when exactly one card's prefix fits, so two pads on one controller stay apart.
+fn truncated_match(found: &[(u32, &str)], path: &str) -> Option<u32> {
+    let mut fits = found.iter().filter(|(_, detail)| {
+        let detail = detail.trim_end();
+        match detail.rsplit_once(" at ") {
+            Some((_, tail)) => !tail.contains(',') && tail.len() >= 3 && path.starts_with(tail),
+            None => false,
+        }
+    });
+    let first = fits.next()?;
+    fits.next().is_none().then_some(first.0)
 }
 
 /// An open playback stream on a wired pad's audio card.
@@ -319,5 +337,28 @@ mod tests {
         assert_eq!(card_in(CARDS, Some("usb-xhci-hcd.1.auto-1")), Some(0));
         assert_eq!(card_in(CARDS, Some("usb-xhci-hcd.1.auto-3")), None);
         assert_eq!(card_in(CARDS, None), None, "two cards and no path is ambiguous");
+    }
+
+    #[test]
+    fn a_long_name_cut_at_80_bytes_still_matches() {
+        // An LG C1 (webOS 6): the host controller's name pushes the path past ALSA's 80 bytes.
+        const C1: &str = " 0 [lg115x    ]: lg115x - lg115x
+ 1 [LGSIC     ]: LGSIC - LGSIC
+ 2 [Controller]: USB-Audio - DualSense Wireless Controller
+                 Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
+";
+        assert_eq!(card_in(C1, Some("usb-generic-ehci.0-1")), Some(2));
+        assert_eq!(
+            card_in(C1, Some("usb-xhci-hcd.1.auto-1")),
+            None,
+            "a different controller is not this card"
+        );
+        // Two pads cut to the same prefix: no guess.
+        const TWO: &str = " 0 [Controller]: USB-Audio - DualSense Wireless Controller
+                 Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
+ 1 [Controller_1]: USB-Audio - DualSense Wireless Controller
+                 Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
+";
+        assert_eq!(card_in(TWO, Some("usb-generic-ehci.0-1")), None);
     }
 }
