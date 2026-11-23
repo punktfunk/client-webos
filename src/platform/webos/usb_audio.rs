@@ -347,18 +347,18 @@ mod tests {
  2 [Controller]: USB-Audio - DualSense Wireless Controller
                  Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
 ";
-        assert_eq!(card_in(C1, Some("usb-generic-ehci.0-1")), Some(2));
-        assert_eq!(
-            card_in(C1, Some("usb-xhci-hcd.1.auto-1")),
-            None,
-            "a different controller is not this card"
-        );
         // Two pads cut to the same prefix: no guess.
         const TWO: &str = " 0 [Controller]: USB-Audio - DualSense Wireless Controller
                  Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
  1 [Controller_1]: USB-Audio - DualSense Wireless Controller
                  Sony Interactive Entertainment DualSense Wireless Controller at usb-generic-ehc
 ";
+        assert_eq!(card_in(C1, Some("usb-generic-ehci.0-1")), Some(2));
+        assert_eq!(
+            card_in(C1, Some("usb-xhci-hcd.1.auto-1")),
+            None,
+            "a different controller is not this card"
+        );
         assert_eq!(card_in(TWO, Some("usb-generic-ehci.0-1")), None);
     }
 }
