@@ -8,6 +8,11 @@
 //!
 //! One pad feeds the uplink at a time: the host decodes a single mono stream, and two encoders
 //! with their own `seq` would interleave into noise.
+//!
+//! The pad's mute button is this lane's to answer. Nothing on the host acts on it — a PS5 mutes
+//! in its own system software, and Windows has no equivalent — so a press toggles the mute here:
+//! frames stop going out, and the pad's mute LED and hardware mic mute follow, set over its
+//! hidraw node the way `hid-playstation` sets them.
 
 use std::ffi::{c_char, c_int, c_ulong, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +36,21 @@ const RATE: u32 = 48_000;
 /// What the card is asked to buffer: a mic frame's worth twice over, so a late read does not
 /// overrun, and short enough that the voice is not noticeably behind.
 const LATENCY_US: u32 = 20_000;
+
+/// USB input report `0x01`: the byte holding the mute button (report id included), and its bit.
+const INPUT_REPORT_ID: u8 = 0x01;
+const MUTE_BUTTON_AT: usize = 10;
+const MUTE_BUTTON_BIT: u8 = 0x04;
+
+/// USB output report `0x02`, laid out as `dualsense::build_usb_report`'s common block: the second
+/// valid-flag byte, the mute LED and the power-save byte whose bit 4 mutes the mic in hardware.
+const OUTPUT_REPORT_LEN: usize = 63;
+const OUT_VALID_FLAG1: usize = 2;
+const FLAG1_MUTE_LED: u8 = 0x01;
+const FLAG1_POWER_SAVE: u8 = 0x02;
+const OUT_MUTE_LED: usize = 9;
+const OUT_POWER_SAVE: usize = 10;
+const POWER_SAVE_MIC_MUTE: u8 = 0x10;
 
 /// Whether a pad already feeds the uplink this session.
 static TAKEN: AtomicBool = AtomicBool::new(false);
@@ -167,6 +187,74 @@ fn to_mono(interleaved: &[i16], channels: usize) -> impl Iterator<Item = f32> + 
     })
 }
 
+/// The pad's hidraw node, read for the mute button and written for its LED. Every reader of a
+/// hidraw node gets every report, so this takes nothing from the other readers.
+struct MuteButton {
+    fd: libc::c_int,
+    held: bool,
+}
+
+impl MuteButton {
+    fn open(path: &str) -> Option<Self> {
+        let c_path = CString::new(path).ok()?;
+        // SAFETY: `c_path` is NUL-terminated and outlives the call.
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        (fd >= 0).then_some(Self { fd, held: false })
+    }
+
+    /// Reads every queued report; `true` if the button went down since the last call.
+    fn pressed(&mut self) -> bool {
+        let mut buf = [0u8; 64];
+        let mut pressed = false;
+        loop {
+            // SAFETY: `buf` is a live local of the length passed; the descriptor is open.
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+            let Ok(len) = usize::try_from(n) else { break };
+            if len == 0 {
+                break;
+            }
+            if let Some(held) = mute_held(&buf[..len]) {
+                pressed |= held && !self.held;
+                self.held = held;
+            }
+        }
+        pressed
+    }
+
+    /// Sets the pad's mute LED and hardware mic mute to `muted`.
+    fn show(&self, muted: bool) {
+        let report = mute_report(muted);
+        // SAFETY: `report` is a live local; the descriptor is open.
+        let n = unsafe { libc::write(self.fd, report.as_ptr().cast(), report.len()) };
+        if usize::try_from(n).ok() != Some(report.len()) {
+            tracing::debug!("pad mic: mute LED report not written");
+        }
+    }
+}
+
+impl Drop for MuteButton {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor came from `open` and is closed exactly once.
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// Whether the mute button is held in a USB input report, or `None` for any other report.
+fn mute_held(report: &[u8]) -> Option<bool> {
+    (report.len() > MUTE_BUTTON_AT && report[0] == INPUT_REPORT_ID)
+        .then(|| report[MUTE_BUTTON_AT] & MUTE_BUTTON_BIT != 0)
+}
+
+/// The output report that sets only the mute LED and the hardware mic mute.
+fn mute_report(muted: bool) -> [u8; OUTPUT_REPORT_LEN] {
+    let mut r = [0u8; OUTPUT_REPORT_LEN];
+    r[0] = 0x02;
+    r[OUT_VALID_FLAG1] = FLAG1_MUTE_LED | FLAG1_POWER_SAVE;
+    r[OUT_MUTE_LED] = u8::from(muted);
+    r[OUT_POWER_SAVE] = if muted { POWER_SAVE_MIC_MUTE } else { 0 };
+    r
+}
+
 /// Releases the uplink when the capture thread ends, whichever way it ends.
 struct Claim;
 
@@ -176,13 +264,14 @@ impl Drop for Claim {
     }
 }
 
-/// Starts capturing pad `pad`'s microphone on `card` onto the session's mic uplink, or `None`
-/// when another pad already feeds it or the thread cannot start. A card that refuses capture is
-/// logged by the thread and ends it.
+/// Starts capturing pad `pad`'s microphone on `card` onto the session's mic uplink, its mute
+/// button read off the hidraw node at `node`, or `None` when another pad already feeds the uplink
+/// or the thread cannot start. A card that refuses capture is logged by the thread and ends it.
 pub fn spawn(
     client: Arc<NativeClient>,
     stop: Arc<AtomicBool>,
     card: u32,
+    node: String,
     pad: u8,
 ) -> Option<std::thread::JoinHandle<()>> {
     if TAKEN.swap(true, Ordering::AcqRel) {
@@ -190,7 +279,7 @@ pub fn spawn(
     }
     let spawned = std::thread::Builder::new().name("pad-mic".into()).spawn(move || {
         let _claim = Claim;
-        capture(&client, &stop, card, pad);
+        capture(&client, &stop, card, &node, pad);
     });
     match spawned {
         Ok(thread) => Some(thread),
@@ -201,7 +290,7 @@ pub fn spawn(
     }
 }
 
-fn capture(client: &NativeClient, stop: &AtomicBool, card: u32, pad: u8) {
+fn capture(client: &NativeClient, stop: &AtomicBool, card: u32, node: &str, pad: u8) {
     let source = match PadSource::open(card) {
         Ok(source) => source,
         Err(e) => {
@@ -221,8 +310,23 @@ fn capture(client: &NativeClient, stop: &AtomicBool, card: u32, pad: u8) {
         source.name,
         source.channels
     );
+    let mut button = MuteButton::open(node);
+    if button.is_none() {
+        tracing::info!("pad {pad}: no hidraw node for the mic's mute button");
+    }
+    let mut muted = false;
+    if let Some(button) = &button {
+        button.show(muted);
+    }
     let mut buf = vec![0i16; FRAME_SAMPLES * source.channels];
     while !stop.load(Ordering::Relaxed) {
+        if button.as_mut().is_some_and(MuteButton::pressed) {
+            muted = !muted;
+            if let Some(button) = &button {
+                button.show(muted);
+            }
+            tracing::info!("pad {pad}: microphone {}", if muted { "muted" } else { "live" });
+        }
         let frames = match source.read(&mut buf) {
             Ok(frames) => frames,
             Err(e) => {
@@ -234,16 +338,39 @@ fn capture(client: &NativeClient, stop: &AtomicBool, card: u32, pad: u8) {
             continue;
         }
         mic.push(to_mono(&buf[..frames * source.channels], source.channels));
-        mic.drain(false, |seq, pts, packet| {
+        mic.drain(muted, |seq, pts, packet| {
             let _ = client.send_mic(seq, pts, packet.to_vec());
         });
+    }
+    // A mute this lane set is not left on the pad for whatever uses it next.
+    if let (Some(button), true) = (&button, muted) {
+        button.show(false);
     }
     tracing::info!("pad {pad}: microphone off after {} frames", mic.sent);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::to_mono;
+    use super::{mute_held, mute_report, to_mono, MUTE_BUTTON_AT};
+
+    #[test]
+    fn the_mute_button_is_read_off_input_reports_only() {
+        let mut report = [0u8; 64];
+        report[0] = 0x01;
+        assert_eq!(mute_held(&report), Some(false));
+        report[MUTE_BUTTON_AT] = 0x04;
+        assert_eq!(mute_held(&report), Some(true));
+        report[0] = 0x31;
+        assert_eq!(mute_held(&report), None);
+    }
+
+    #[test]
+    fn the_mute_report_sets_only_the_led_and_mic_mute() {
+        let on = mute_report(true);
+        assert_eq!((on[0], on[1], on[2], on[9], on[10]), (0x02, 0, 0x03, 1, 0x10));
+        let off = mute_report(false);
+        assert_eq!((off[9], off[10]), (0, 0));
+    }
 
     #[test]
     fn a_stereo_pair_folds_to_its_mean() {
