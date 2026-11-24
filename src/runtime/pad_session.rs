@@ -199,10 +199,12 @@ pub(super) fn bring_up(
             if let (Some(card), true) = (card, mic_granted) {
                 let stop = Arc::new(AtomicBool::new(false));
                 slot.extras.mic =
-                    pad_mic::spawn(connected.client.clone(), stop.clone(), card, slot.index).map(|thread| UsbWriter {
-                        stop,
-                        thread: Some(thread),
-                    });
+                    pad_mic::spawn(connected.client.clone(), stop.clone(), card, path.clone(), slot.index).map(
+                        |thread| UsbWriter {
+                            stop,
+                            thread: Some(thread),
+                        },
+                    );
             }
             if let (Some(envelope), Some(card)) = (envelope, card) {
                 let stop = Arc::new(AtomicBool::new(false));
