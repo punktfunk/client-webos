@@ -8,7 +8,7 @@ use pf_client_core::shortcuts::{Device, Engine, Shortcuts};
 
 use super::pads::{Pads, Slot};
 use crate::platform::webos::dualsense::{self, Feedback, Link};
-use crate::platform::webos::{gamepad, hidraw_sensors, usb_audio};
+use crate::platform::webos::{gamepad, hidraw_sensors, pad_mic, usb_audio};
 use crate::services::join::{join_with_timeout, SHUTDOWN_JOIN_TIMEOUT};
 use crate::services::store::{GamepadType, Settings};
 use crate::session::pad_audio::{self, Envelope, Envelopes};
@@ -35,6 +35,8 @@ pub(super) struct Extras {
     usb_audio: Option<UsbWriter>,
     /// A wired pad's gyro and accelerometer, for a kernel that publishes no motion node.
     sensors: Option<hidraw_sensors::Reader>,
+    /// A wired pad's microphone on the session's mic uplink.
+    mic: Option<UsbWriter>,
 }
 
 impl Extras {
@@ -46,7 +48,7 @@ impl Extras {
         // As `retire`: unfiled here, because the index is taken again as soon as this returns.
         self.audio = None;
         let extras = std::mem::take(self);
-        if extras.feedback.is_none() && extras.usb_audio.is_none() && extras.sensors.is_none() {
+        if extras.feedback.is_none() && extras.usb_audio.is_none() && extras.sensors.is_none() && extras.mic.is_none() {
             return;
         }
         let spawned = std::thread::Builder::new()
@@ -62,7 +64,7 @@ impl Extras {
         // Unfiled here, not on the thread: the index may be taken again before that thread runs.
         self.audio = None;
         let extras = std::mem::take(self);
-        if extras.feedback.is_some() || extras.usb_audio.is_some() || extras.sensors.is_some() {
+        if extras.feedback.is_some() || extras.usb_audio.is_some() || extras.sensors.is_some() || extras.mic.is_some() {
             let _ = std::thread::Builder::new()
                 .name("pad-retire".into())
                 .spawn(move || drop(extras));
@@ -190,6 +192,17 @@ pub(super) fn bring_up(
                 let input = connected.input();
                 slot.extras.sensors =
                     hidraw_sensors::Reader::spawn(&path, slot.index, move |rich| input.send_rich(rich));
+            }
+            // The pad's microphone rides the same card; the host's grant is checked as a courtesy
+            // (it enforces its own).
+            let mic_granted = connected.client.access_grants() & punktfunk_core::quic::GRANT_MIC != 0;
+            if let (Some(card), true) = (card, mic_granted) {
+                let stop = Arc::new(AtomicBool::new(false));
+                slot.extras.mic =
+                    pad_mic::spawn(connected.client.clone(), stop.clone(), card, slot.index).map(|thread| UsbWriter {
+                        stop,
+                        thread: Some(thread),
+                    });
             }
             if let (Some(envelope), Some(card)) = (envelope, card) {
                 let stop = Arc::new(AtomicBool::new(false));
