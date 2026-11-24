@@ -1,156 +1,194 @@
-//! The wired `DualSense`'s HID output path: `/dev/hidraw*`.
+//! A wired `DualSense`'s motion sensors, read straight off its hidraw node.
 //!
-//! **Why this exists next to the Luna route.** Everything in [`super::dualsense`] reaches the pad
-//! through `com.webos.service.bluetooth2`, which a USB pad is not on — it has no Bluetooth link to
-//! address, even though `hid-playstation` still publishes its MAC as `U: Uniq=` (see
-//! `dualsense::bluetooth_address`). The kernel's hidraw node is what reaches a wired pad, and it needs no
-//! service, no CRC and no sniff: one 63-byte `0x02` report per write (`dualsense::USB_REPORT_LEN`).
-//!
-//! **The node exists, contrary to what this client used to record.** An earlier probe concluded
-//! the jail had no hidraw at all; it ran with no pad plugged in, and `hid-playstation` only creates
-//! a node for a device that is actually there. With a pad attached the jail exposes
-//! `/dev/hidraw0`, `root:jailer` and read-write — the same group the app runs in (verified on a
-//! G5, webOS 10.3, non-rooted). There is no `/sys/class/hidraw` in the jail, so the node is found
-//! by asking each candidate what it is rather than by walking sysfs.
+//! `hid-playstation` normally publishes the gyro and accelerometer as an evdev node of their own
+//! ("… Motion Sensors"), which [`super::evdev`] claims and forwards. Some TV kernels publish only
+//! the pad node: an LG C1 (webOS 6.5, kernel 4.4) lists a lone `DualSense` entry in
+//! `/proc/bus/input/devices`, so gyro aiming never reached the host (`rich=0`). The samples are
+//! still in every USB input report, and hidraw hands each report to every reader that has the node
+//! open, so reading it here takes nothing from SDL or the kernel's own input path.
 
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use punktfunk_core::quic::RichInput;
 
-use super::gamepad::{DUALSENSE_EDGE_PID, DUALSENSE_PID, SONY_VID};
-use super::ioctl;
+/// The USB input report's id, and the length the pad sends it at.
+const INPUT_REPORT_ID: u8 = 0x01;
+const INPUT_REPORT_LEN: usize = 64;
 
-/// `BUS_USB` as hidraw reports it. A Bluetooth pad also has a hidraw node, but its reports carry
-/// the `0x31` framing and CRC of the Luna route, so this transport deliberately claims USB only.
-const BUS_USB: u32 = 0x03;
+/// Offset of the first sensor axis in report `0x01`, report id included: three gyro then three
+/// accelerometer axes, little-endian `i16`. These are the pad's raw report units — the scale the
+/// host's virtual pad replays as it is, so they cross the wire unscaled.
+const SENSORS_AT: usize = 16;
 
-/// How many `/dev/hidraw*` nodes to ask about. The jail has published exactly one so far; a
-/// handful covers a set with other HID devices attached without walking a sysfs that isn't there.
-const MAX_NODES: u8 = 10;
+/// Shortest gap between two sends. A pad on a 1000 Hz dongle reports every millisecond; half
+/// that rate is what the evdev route sends at, and a datagram per report would buy nothing.
+const MIN_INTERVAL: Duration = Duration::from_millis(2);
 
-/// `HIDIOCGRAWINFO`: `_IOR('H', 0x03, struct hidraw_devinfo)`, which is `{u32 bus, s16 vendor,
-/// s16 product}` — 8 bytes.
-const HIDIOCGRAWINFO: libc::c_ulong = ioctl::ioc(ioctl::READ, b'H', 0x03, 8);
+/// How long one `poll` waits, which bounds how late the reader notices its stop flag.
+const POLL_MS: libc::c_int = 100;
 
-/// `HIDIOCGRAWPHYS(len)`'s number: `_IOC(_IOC_READ, 'H', 0x05, len)`.
-const HIDIOCGRAWPHYS: u8 = 0x05;
-/// `HIDIOCGRAWUNIQ(len)`'s number: `_IOC(_IOC_READ, 'H', 0x08, len)`. Newer kernels only; a miss
-/// falls back.
-const HIDIOCGRAWUNIQ: u8 = 0x08;
-
-/// What `HIDIOCGRAWINFO` fills in.
-#[repr(C)]
-#[derive(Default)]
-struct DevInfo {
-    bustype: u32,
-    vendor: i16,
-    product: i16,
+/// Whether the kernel publishes a motion node, which the evdev reader then forwards. Reading the
+/// sensors here as well would send every sample twice. An unreadable file reads as "no".
+pub fn has_motion_node() -> bool {
+    std::fs::read_to_string("/proc/bus/input/devices").is_ok_and(|devices| devices.contains("Motion Sensors"))
 }
 
-/// An open `/dev/hidraw*` for a wired `DualSense`.
-pub struct Hidraw {
-    fd: libc::c_int,
-    /// Kept for the log line that says which node was claimed; nodes are not stable across replug.
-    pub path: String,
+/// One sample — `(gyro, accel)` — out of a USB input report, or `None` for any other report.
+pub fn parse(report: &[u8]) -> Option<([i16; 3], [i16; 3])> {
+    if report.len() < SENSORS_AT + 12 || report[0] != INPUT_REPORT_ID {
+        return None;
+    }
+    let axis = |i: usize| i16::from_le_bytes([report[SENSORS_AT + 2 * i], report[SENSORS_AT + 2 * i + 1]]);
+    Some(([axis(0), axis(1), axis(2)], [axis(3), axis(4), axis(5)]))
 }
 
-impl Hidraw {
-    fn open(path: &str, flags: libc::c_int) -> Option<Self> {
+/// A read-only descriptor, closed on drop.
+struct Fd(libc::c_int);
+
+impl Fd {
+    fn open(path: &str) -> Option<Self> {
         let c_path = CString::new(path).ok()?;
         // SAFETY: `c_path` is NUL-terminated and outlives the call.
-        let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_NONBLOCK | libc::O_CLOEXEC) };
-        (fd >= 0).then(|| Self {
-            fd,
-            path: path.to_string(),
-        })
-    }
-
-    /// The wired `DualSense` at `path`, or `None` when that node is anything else.
-    ///
-    /// Opened read-write: a node that only opens read-only is no use here, and taking it anyway
-    /// would report success for a transport that cannot carry a single effect.
-    pub fn open_wired(path: &str) -> Option<Self> {
-        Self::open(path, libc::O_RDWR).filter(Self::is_wired_dualsense)
-    }
-
-    /// Every wired `DualSense` node the jail exposes, with its `Uniq` where the kernel reports one.
-    pub fn wired() -> Vec<(Self, Option<String>)> {
-        (0..MAX_NODES)
-            .filter_map(|n| Self::open_wired(&format!("/dev/hidraw{n}")))
-            .map(|node| {
-                let uniq = node.uniq();
-                (node, uniq)
-            })
-            .collect()
-    }
-
-    /// The device's `Uniq` (a `DualSense`'s MAC), lowercased.
-    pub fn uniq_of(path: &str) -> Option<String> {
-        Self::open(path, libc::O_RDONLY)?.uniq()
-    }
-
-    /// The USB device path the kernel built this node's `phys` from (`usb-<host>-<port>`), the
-    /// same string USB audio names its card by — which is what ties a pad to its own card.
-    pub fn usb_path(&self) -> Option<String> {
-        let phys = self.string_ioctl(HIDIOCGRAWPHYS)?;
-        phys.split("/input")
-            .next()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-    }
-
-    fn uniq(&self) -> Option<String> {
-        self.string_ioctl(HIDIOCGRAWUNIQ)
-            .map(|u| u.trim().to_ascii_lowercase())
-            .filter(|u| !u.is_empty())
-    }
-
-    /// One of hidraw's variable-length string queries (`_IOC(_IOC_READ, 'H', nr, len)`), up to its NUL.
-    fn string_ioctl(&self, nr: u8) -> Option<String> {
-        let mut buf = [0u8; 128];
-        let request = ioctl::ioc(ioctl::READ, b'H', u32::from(nr), buf.len() as u32);
-        // SAFETY: `buf` is a live local of the length the request encodes.
-        let rc = unsafe { libc::ioctl(self.fd, request, buf.as_mut_ptr()) };
-        if rc <= 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        std::str::from_utf8(&buf[..end]).ok().map(str::to_string)
-    }
-
-    /// Whether this node is a `DualSense` on USB, per the driver's own answer.
-    fn is_wired_dualsense(&self) -> bool {
-        let mut info = DevInfo::default();
-        // SAFETY: `info` is a live local of exactly the size the ioctl writes.
-        let rc = unsafe { libc::ioctl(self.fd, HIDIOCGRAWINFO, &raw mut info) };
-        rc >= 0
-            && info.bustype == BUS_USB
-            && info.vendor as u16 == SONY_VID
-            && [DUALSENSE_PID, DUALSENSE_EDGE_PID].contains(&(info.product as u16))
-    }
-
-    /// Writes one output report. `report[0]` is the report id.
-    ///
-    /// A short write is a failure, not a partial send: the pad reads a report whole, and half of
-    /// one is a malformed effect rather than a slower one.
-    pub fn write_report(&self, report: &[u8]) -> Result<()> {
-        // SAFETY: `report` is a live slice; the fd is owned by `self` and open until `Drop`.
-        let n = unsafe { libc::write(self.fd, report.as_ptr().cast(), report.len()) };
-        if n < 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("write to {}: {err}", self.path);
-        }
-        if n as usize != report.len() {
-            bail!("short write to {}: {n} of {} bytes", self.path, report.len());
-        }
-        Ok(())
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        (fd >= 0).then_some(Self(fd))
     }
 }
 
-impl Drop for Hidraw {
+impl Drop for Fd {
     fn drop(&mut self) {
-        // SAFETY: `fd` came from `open` and is closed exactly once.
-        unsafe { libc::close(self.fd) };
+        // SAFETY: the descriptor came from `open` and is closed exactly once.
+        unsafe { libc::close(self.0) };
+    }
+}
+
+/// The thread that forwards one pad's motion samples. Dropping it stops and joins the thread.
+pub struct Reader {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Reader {
+    /// Starts forwarding pad `pad`'s samples from the hidraw node at `path` through `send`, or
+    /// `None` when the node cannot be opened for reading.
+    pub fn spawn(path: &str, pad: u8, send: impl Fn(RichInput) + Send + 'static) -> Option<Self> {
+        let fd = Fd::open(path)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("ds5-sensors".into())
+            .spawn(move || read_loop(&fd, pad, &flag, &send))
+            .ok()?;
+        tracing::info!("pad {pad}: motion sensors read off the pad's hidraw node ({path})");
+        Some(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Reads reports until `stop` or the node goes away, sending the newest sample when it moved.
+fn read_loop(fd: &Fd, pad: u8, stop: &AtomicBool, send: &impl Fn(RichInput)) {
+    let mut buf = [0u8; INPUT_REPORT_LEN];
+    let mut pending = None;
+    let mut sent = None;
+    let mut sent_at: Option<Instant> = None;
+    while !stop.load(Ordering::Relaxed) {
+        let mut pfd = libc::pollfd {
+            fd: fd.0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is a live local and the count matches.
+        let rc = unsafe { libc::poll(&raw mut pfd, 1, POLL_MS) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if rc == 0 {
+            continue;
+        }
+        if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            break;
+        }
+        if !drain(fd, &mut buf, &mut pending) {
+            break;
+        }
+        let Some(sample) = pending else { continue };
+        if sent == Some(sample) {
+            pending = None;
+            continue;
+        }
+        if sent_at.is_some_and(|at| at.elapsed() < MIN_INTERVAL) {
+            continue;
+        }
+        let (gyro, accel) = sample;
+        send(RichInput::Motion { pad, gyro, accel });
+        sent = Some(sample);
+        sent_at = Some(Instant::now());
+        pending = None;
+    }
+    tracing::info!("pad {pad}: hidraw motion reader stopped");
+}
+
+/// Reads every queued report, keeping the newest sample in `pending`. `false` once the node is
+/// gone (an unplugged pad reads as an error other than "try again").
+fn drain(fd: &Fd, buf: &mut [u8; INPUT_REPORT_LEN], pending: &mut Option<([i16; 3], [i16; 3])>) -> bool {
+    loop {
+        // SAFETY: `buf` is a live local of the length passed; the descriptor is open.
+        let n = unsafe { libc::read(fd.0, buf.as_mut_ptr().cast(), buf.len()) };
+        match usize::try_from(n) {
+            Ok(0) => return false,
+            Ok(len) => {
+                if let Some(sample) = parse(&buf[..len]) {
+                    *pending = Some(sample);
+                }
+            }
+            Err(_) => {
+                let err = std::io::Error::last_os_error();
+                return matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse, INPUT_REPORT_LEN, SENSORS_AT};
+
+    #[test]
+    fn a_usb_input_report_yields_its_gyro_then_accel() {
+        let mut report = [0u8; INPUT_REPORT_LEN];
+        report[0] = 0x01;
+        let axes: [i16; 6] = [1, -2, 300, -8192, 8192, -32768];
+        for (i, value) in axes.iter().enumerate() {
+            report[SENSORS_AT + 2 * i..SENSORS_AT + 2 * i + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(parse(&report), Some(([1, -2, 300], [-8192, 8192, -32768])));
+    }
+
+    #[test]
+    fn other_reports_and_short_reads_are_ignored() {
+        let mut report = [0u8; INPUT_REPORT_LEN];
+        report[0] = 0x31;
+        assert_eq!(parse(&report), None, "a Bluetooth-framed report is not this layout");
+        report[0] = 0x01;
+        assert_eq!(parse(&report[..SENSORS_AT + 11]), None);
     }
 }
