@@ -21,9 +21,8 @@
 //! the symbols are there is decided by the `dlsym` probe in `ndl` (the second, decisive gate).
 use std::sync::OnceLock;
 
-use anyhow::bail;
-
 use crate::core::caps::VideoCaps;
+use crate::core::media::DecoderBlocked;
 
 /// TV capabilities detected at runtime (best-effort; missing sources fall back safely).
 #[derive(Clone, Debug)]
@@ -316,15 +315,14 @@ pub fn jail_config_broken() -> bool {
     })
 }
 
-/// Refuse to open `backend` when the jailer config is known-broken — the failure is the same for
-/// every direct-media backend, and it's clearer here than as a black screen later.
-pub fn ensure_jail_ok(backend: &str) -> anyhow::Result<()> {
+/// Refuses a decoder load on a TV whose sandbox hides the decoder's device. A refusal with a
+/// reason beats the black screen the load would give.
+pub fn ensure_jail_ok() -> anyhow::Result<()> {
     if jail_config_broken() {
-        bail!(
-            "this TV's jailer config leaves /dev/rtkmem unreadable (machine {}), so {backend} \
-             cannot reach the decoder",
-            machine_name().unwrap_or_else(|| "unknown".into()),
-        );
+        return Err(DecoderBlocked {
+            machine: machine_name().unwrap_or_else(|| "unknown".into()),
+        }
+        .into());
     }
     Ok(())
 }

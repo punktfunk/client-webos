@@ -1,9 +1,12 @@
-//! User-facing sentences for `punktfunk-core`'s error and rejection types.
+//! User-facing sentences for `punktfunk-core`'s error and rejection types, and for a refusal
+//! this client raises itself.
 //!
 //! A host's refusal is worded by `pf_client_core::trust`; the rest come from `pf-l10n`. Without
 //! this, failures render as Debug strings (e.g. "connect: Rejected(Busy)").
 use pf_client_core::trust;
 use punktfunk_core::PunktfunkError;
+
+use crate::core::media::DecoderBlocked;
 
 /// Why connect/probe failed (distinguishes rejection from transport trouble). A host's own
 /// sentence knows more than its reason code, so `trust` lets it win.
@@ -33,8 +36,12 @@ pub fn access_message(err: &PunktfunkError) -> String {
     }
 }
 
-/// Extract `PunktfunkError` from anyhow chain for user-facing messages.
+/// The sentence for a failed connect. A blocked decoder and a `PunktfunkError` have their own
+/// words under any context; anything else reads as its log text.
 pub fn friendly(err: &anyhow::Error) -> String {
+    if err.is::<DecoderBlocked>() {
+        return pf_l10n::console::console_webos_decoder_blocked().into();
+    }
     err.downcast_ref::<PunktfunkError>()
         .map_or_else(|| format!("{err:#}"), connect_message)
 }
@@ -50,5 +57,13 @@ mod tests {
         assert_eq!(connect_message(&said), "Seat 2 is in use.");
         let silent = PunktfunkError::Rejected(RejectReason::NoSeat, " ".into());
         assert_eq!(connect_message(&silent), "All seats are taken.");
+    }
+
+    #[test]
+    fn a_blocked_decoder_names_its_fix_and_the_log_keeps_the_device() {
+        let blocked = DecoderBlocked { machine: "k5lp".into() };
+        let err = anyhow::Error::new(blocked).context("NDL v1 load");
+        assert_eq!(friendly(&err), pf_l10n::console::console_webos_decoder_blocked());
+        assert!(format!("{err:#}").contains("/dev/rtkmem unreadable (machine k5lp)"));
     }
 }
