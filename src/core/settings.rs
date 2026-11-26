@@ -62,6 +62,8 @@ pub trait TvSettings {
     fn hdr_frame_avg_nits(&self) -> u16;
     fn hdr_black_code(&self) -> u16;
     fn hdr_calibrated(&self) -> bool;
+    /// Switch the TV to its game picture mode while streaming. On unless turned off.
+    fn game_picture(&self) -> bool;
     fn audio_route(&self) -> AudioRoutePref;
     fn set_audio_route(&mut self, route: AudioRoutePref);
     /// The panel volume to advertise — see [`HdrDisplay`].
@@ -123,6 +125,10 @@ impl TvSettings for Settings {
 
     fn hdr_calibrated(&self) -> bool {
         get(self, key!("hdr_calibrated")).unwrap_or(false)
+    }
+
+    fn game_picture(&self) -> bool {
+        get(self, key!("game_picture")).unwrap_or(true)
     }
 
     fn audio_route(&self) -> AudioRoutePref {
@@ -217,8 +223,12 @@ mod tests {
         assert_eq!(s.gamepad_type(), GamepadType::DualSense);
         assert!(s.extra.contains_key("webos.audio_route"));
         assert_eq!(s.hdr_display(), HdrDisplay::DEFAULT);
+        assert!(s.game_picture());
+        s.extra.insert("webos.game_picture".into(), false.into());
+        assert!(!s.game_picture());
         let json = serde_json::to_value(&s).unwrap();
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.audio_route(), AudioRoutePref::NdlOpus);
+        assert!(!back.game_picture());
     }
 }
