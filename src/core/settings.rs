@@ -50,7 +50,6 @@ fn local_codec(name: &str) -> CodecPref {
 pub trait TvSettings {
     /// Capture is a switch here and a two-name mode in the shared schema.
     fn cursor_capture(&self) -> bool;
-    fn set_cursor_capture(&mut self, capture: bool);
     fn codec_pref(&self) -> CodecPref;
     fn set_codec_pref(&mut self, codec: CodecPref);
     fn gamepad_type(&self) -> GamepadType;
@@ -81,10 +80,6 @@ pub trait TvSettings {
 impl TvSettings for Settings {
     fn cursor_capture(&self) -> bool {
         self.mouse_mode != "desktop"
-    }
-
-    fn set_cursor_capture(&mut self, capture: bool) {
-        self.mouse_mode = if capture { "capture" } else { "desktop" }.to_string();
     }
 
     fn codec_pref(&self) -> CodecPref {
@@ -198,10 +193,12 @@ impl TvSettings for Settings {
     }
 }
 
-/// The document a fresh install starts from: the shared defaults with this TV's own rows.
+/// The document a fresh install starts from: the shared defaults with this TV's own rows, and
+/// Desktop mouse mode, where the Magic Remote aims the TV's arrow.
 pub fn default_document() -> Settings {
     let mut s = Settings::default();
     s.set_hdr_display(HdrDisplay::DEFAULT, false);
+    s.mouse_mode = pf_client_core::trust::MouseMode::Desktop.as_name().into();
     s
 }
 
@@ -212,9 +209,9 @@ mod tests {
     #[test]
     fn tv_rows_round_trip_under_their_prefix() {
         let mut s = default_document();
+        assert!(!s.cursor_capture(), "a TV starts in Desktop mode");
+        s.mouse_mode = "capture".into();
         assert!(s.cursor_capture());
-        s.set_cursor_capture(false);
-        assert_eq!(s.mouse_mode, "desktop");
         s.set_audio_route(AudioRoutePref::NdlOpus);
         s.set_codec_pref(CodecPref::Hevc);
         s.set_gamepad_type(GamepadType::DualSense);

@@ -17,9 +17,7 @@ use anyhow::{Context, Result};
 
 use crate::core::VERSION;
 
-pub use crate::core::model::{
-    seed_new_host_profiles, upsert_known_host, AudioRoutePref, CodecPref, ExitAction, GamepadType, Persisted,
-};
+pub use crate::core::model::{AudioRoutePref, CodecPref, ExitAction, GamepadType, Persisted};
 pub use crate::core::settings::TvSettings;
 pub use crate::services::paths::app_dir;
 pub use identity::load_or_create_identity;
@@ -34,12 +32,14 @@ fn path() -> PathBuf {
 /// so one bad read never replaces every pairing with defaults.
 static UNREADABLE: AtomicBool = AtomicBool::new(false);
 
-/// Loads the whole persisted document. Absent, unreadable and unparseable all answer with
-/// defaults: a bad file must not take the app down.
+/// Loads the whole persisted document, migrated ([`shared::migrate_mouse_mode`]) and stamped.
+/// Absent, unreadable and unparseable all answer with defaults: a bad file must not take the
+/// app down.
 pub fn load() -> Persisted {
     let (mut state, readable) = read_document(&path());
     UNREADABLE.store(!readable, Ordering::Relaxed);
-    stamp_version(&mut state);
+    let migrated = shared::migrate_mouse_mode(&mut state);
+    stamp_version(&mut state, migrated);
     // A document written on a more capable TV can hold HEVC, HDR and 7.1 on a device with none
     // of them — leaving a *set* value whose row the UI hides.
     state.settings.clamp_to_caps();
@@ -73,12 +73,13 @@ fn read_document(path: &Path) -> (Persisted, bool) {
     (Persisted::default(), true)
 }
 
-/// Brings [`Persisted::version`] up to this build's.
+/// Brings [`Persisted::version`] up to this build's, and saves when that or a migration
+/// (`migrated`) changed the document.
 ///
 /// Written synchronously so it happens once — `StateWriter`'s baseline is taken after this,
 /// and an unstamped document that never gets saved would stamp again on every launch.
-fn stamp_version(state: &mut Persisted) {
-    if state.version.as_deref() == Some(VERSION) {
+fn stamp_version(state: &mut Persisted, migrated: bool) {
+    if !migrated && state.version.as_deref() == Some(VERSION) {
         return;
     }
     state.version = Some(VERSION.to_string());
