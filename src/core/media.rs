@@ -28,6 +28,26 @@ impl std::fmt::Display for NotReady {
 
 impl std::error::Error for NotReady {}
 
+/// Load refused: the TV's app sandbox hides the decoder's device from this app. The TV's owner
+/// can fix that, so `core::errors::friendly` gives it its own sentence.
+#[derive(Debug)]
+pub struct DecoderBlocked {
+    /// SoC/board codename, for the log.
+    pub machine: String,
+}
+
+impl std::fmt::Display for DecoderBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this TV's jailer config leaves /dev/rtkmem unreadable (machine {})",
+            self.machine
+        )
+    }
+}
+
+impl std::error::Error for DecoderBlocked {}
+
 /// Video backend capabilities. Every `false` disables a stage behaviour; avoids per-backend
 /// matches scattered across the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
