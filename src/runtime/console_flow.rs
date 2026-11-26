@@ -67,6 +67,8 @@ pub(super) fn run(
         av1_ok: crate::core::caps::video_caps()
             .codec_prefs()
             .contains(&crate::core::model::CodecPref::Av1),
+        // The HDR row turns on without asking first.
+        hdr_no_headroom: false,
         store: Some(store.clone()),
         platform: Platform::WebOS,
         gpu_cache_bytes: crate::console::GPU_CACHE_BYTES,
@@ -75,6 +77,8 @@ pub(super) fn run(
         profiles: true,
         // `Service` has no password prompt: a locked profile is dialled as it stands.
         prompts_unlock: false,
+        // `Service` answers no `SetHidden` or `FetchHidden`: no title offers Hide for me.
+        hides: false,
         // The same list `run` set the language from, for the kit's own `set_languages`.
         languages: crate::platform::webos::device::ui_languages().to_vec(),
     };

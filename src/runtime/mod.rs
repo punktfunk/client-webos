@@ -121,6 +121,7 @@ fn stream_mode(settings: &store::Settings, native: Mode) -> Mode {
         } else {
             settings.refresh_hz
         },
+        refresh_mhz: 0,
     }
 }
 
@@ -407,6 +408,7 @@ mod tests {
             width: 3840,
             height: 2160,
             refresh_hz: 60,
+            refresh_mhz: 0,
         };
         let mut s = store::Settings::default();
         assert_eq!(stream_mode(&s, panel), panel, "the document's default is Native");
@@ -421,7 +423,8 @@ mod tests {
             Mode {
                 width: 1280,
                 height: 720,
-                refresh_hz: 120
+                refresh_hz: 120,
+                refresh_mhz: 0,
             }
         );
     }

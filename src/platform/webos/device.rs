@@ -281,6 +281,7 @@ pub fn native_mode() -> punktfunk_core::config::Mode {
         width,
         height,
         refresh_hz: 60,
+        refresh_mhz: 0,
     }
 }
 
