@@ -761,7 +761,8 @@ fn pad_test_state(r: PadReading) -> PadTestState {
         }
     }
     let axes = AXES.iter().zip(axes).map(|(n, v)| ((*n).to_string(), v)).collect();
-    PadTestState { held, axes }
+    // The pad read is the one the pads list shows, so it names no other kind.
+    PadTestState { held, axes, pref: None }
 }
 
 /// One poll of the menu pads. While the input test is on (`test` is the pads' reading) they feed

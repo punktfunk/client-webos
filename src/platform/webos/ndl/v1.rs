@@ -86,7 +86,7 @@ impl NdlV1Video {
         if codec != NdlCodec::H264 {
             bail!("NDL v1 decodes H.264 only (asked for {codec:?}) — see platform::webos::ndl::v1");
         }
-        device::ensure_jail_ok("NDL v1")?;
+        device::ensure_jail_ok()?;
         let fns = ffi::v1()?;
         ensure_init(app_id, false)?;
         let mut info = ffi::V1VideoInfo {
