@@ -186,6 +186,8 @@ pub struct ConnectParams {
     pub display_hdr: quic::HdrMeta,
     /// The host profile to play as; `None` lets the host choose.
     pub profile: Option<String>,
+    /// The role or monitor the preset asks the host for; `None` takes the host card's pick.
+    pub screen_wish: Option<quic::v2::hello::ScreenWish>,
 }
 
 /// One `quic::CODEC_*` bit, or 0 where the preference names no single codec.
@@ -304,6 +306,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         pin: params.pin,
         identity: Some(params.identity.clone()),
         profile: params.profile.clone(),
+        screen_wish: params.screen_wish.clone(),
         // LG's video path reads every stream as studio range, and NDL has no range to set.
         studio_range: true,
         studio_range_hdr: true,

@@ -78,6 +78,8 @@ struct VideoPump {
     reformat: Arc<Mutex<Option<punktfunk_core::session::Frame>>>,
     /// The rate the stage paces for — compared against `client.mode()` on every frame.
     stream_hz: u32,
+    /// Newest AU index taken; see [`is_late`].
+    newest: Option<u32>,
     /// Core's cumulative drop count as of the last frame, to edge-detect new drops.
     last_dropped_seen: u64,
     /// Frame-index gaps pre-cover the reassembler's delayed drop accounting.
@@ -116,6 +118,7 @@ impl VideoPump {
             is_hdr,
             audio_rides_plane,
             reformat,
+            newest: None,
             last_dropped_seen,
             drop_credit: 0,
             drop_credit_expiry: None,
@@ -172,6 +175,12 @@ impl VideoPump {
     }
 
     fn on_frame(&mut self, frame: &punktfunk_core::session::Frame) {
+        // Dropped before `note_loss`, so a drop count it would have read rolls to the next frame.
+        if let Some(newest) = self.newest.filter(|&n| is_late(frame.frame_index, n)) {
+            tracing::info!("late frame {} dropped: frame {newest} came first", frame.frame_index);
+            return;
+        }
+        self.newest = Some(frame.frame_index);
         // Core points `mode()` at a delivered switch before that switch's first frame reaches us.
         let hz = self.client.mode().refresh_hz;
         if hz != self.stream_hz {
@@ -563,4 +572,26 @@ struct WindowFigures {
     held: Duration,
     min_slack_us: Option<i32>,
     cadence: CadenceTrace,
+}
+
+/// AU `index` arrived after `newest`, a later one: a resend that missed its hold, or a reordered
+/// burst. NDL would apply its reference set after the newer picture's and evict that picture, so
+/// the frames predicting from it decode from a missing reference. Core's own recovery driver
+/// refuses the same AUs. Wrap-aware; a later piece of the newest AU repeats its index.
+fn is_late(index: u32, newest: u32) -> bool {
+    index != newest && newest.wrapping_sub(index) < u32::MAX / 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_late;
+
+    #[test]
+    fn only_an_index_behind_the_newest_is_late() {
+        assert!(is_late(6, 7));
+        assert!(is_late(u32::MAX, 1), "behind across the wrap");
+        assert!(!is_late(7, 7), "a later piece of the same AU");
+        assert!(!is_late(9, 7), "a gap ahead is loss, not lateness");
+        assert!(!is_late(1, u32::MAX), "ahead across the wrap");
+    }
 }

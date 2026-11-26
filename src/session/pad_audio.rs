@@ -34,6 +34,15 @@ pub const CAP_SPEAKER: u8 = 0x02;
 pub const SPEAKER_IN_SAMPLES: usize = 512;
 /// Speaker ring bound, ~400 ms of stereo: a stalled sender drops the oldest.
 const SPEAKER_RING_MAX: usize = 48_000 * 2 * 4 / 10;
+/// No speaker frame for this long ends a burst: the host sends one every 10 ms, so the next is
+/// not coming soon. A lane waiting to start plays what it holds instead of waiting for more.
+pub const SPEAKER_QUIET_MS: u64 = 40;
+
+/// Whether a speaker lane waiting to start may play: the ring holds `prefill` stereo samples, or
+/// the burst is over (`idle_ms` since the last frame) and a short sound will never reach them.
+pub fn speaker_start_ready(queued: usize, idle_ms: u64, prefill: usize) -> bool {
+    queued >= prefill || idle_ms >= SPEAKER_QUIET_MS
+}
 
 /// Stereo 48 kHz; a 20 ms frame is the largest Opus can carry in one packet.
 const MAX_FRAME_SAMPLES: usize = 960 * 2;
@@ -199,6 +208,22 @@ impl Envelope {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
             / 2
+    }
+
+    /// Milliseconds since the last speaker frame; `u64::MAX` before the first.
+    pub fn speaker_idle_ms(&self) -> u64 {
+        match self.last_speaker_ms.load(Ordering::Relaxed) {
+            u64::MAX => u64::MAX,
+            last => self.now_ms().saturating_sub(last),
+        }
+    }
+
+    /// Drops everything queued, so the tail of one burst cannot play at the next one's onset.
+    pub fn clear_speaker(&self) {
+        self.speaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// One report's worth of speaker PCM (`SPEAKER_IN_SAMPLES` stereo samples), or `false` when
@@ -441,7 +466,14 @@ fn pump(client: &NativeClient, stop: &AtomicBool, envelopes: &Envelopes) -> Resu
                 // and dropped (the lane is not declared then, so this is the rare race at start).
                 if envelope.coils_owned() && !frame.opus.is_empty() {
                     match lane.speaker.decode_float(&frame.opus, &mut pcm, false) {
-                        Ok(samples) => envelope.push_speaker(&pcm[..samples * 2]),
+                        Ok(samples) => {
+                            // The player's per-pad speaker volume, applied before the ring.
+                            let gain = punktfunk_core::audio::pad_mix::speaker_gain(pad);
+                            if gain != 1.0 {
+                                pcm[..samples * 2].iter_mut().for_each(|s| *s *= gain);
+                            }
+                            envelope.push_speaker(&pcm[..samples * 2]);
+                        }
                         Err(e) => tracing::debug!("pad audio: speaker decode failed: {e}"),
                     }
                 }
@@ -549,6 +581,33 @@ mod tests {
         assert_eq!(out[15], [0, 0], "zero-filled past the 15 frames that arrived");
         assert!(!env.take_coils(&mut out), "drained");
         assert_eq!(env.take_change(), None, "owned coils keep the motor envelope idle");
+    }
+
+    #[test]
+    fn a_short_sound_starts_once_its_burst_is_over() {
+        const PREFILL: usize = 5120;
+        assert!(!speaker_start_ready(2000, 10, PREFILL), "still arriving: keep filling");
+        assert!(speaker_start_ready(PREFILL, 0, PREFILL), "the pre-fill is there");
+        assert!(
+            speaker_start_ready(2000, SPEAKER_QUIET_MS, PREFILL),
+            "quiet: play what it has"
+        );
+        assert!(
+            speaker_start_ready(0, u64::MAX, PREFILL),
+            "never heard from is quiet too"
+        );
+    }
+
+    #[test]
+    fn the_speaker_ring_reports_idle_time_and_empties_on_demand() {
+        let env = Envelope::new();
+        assert_eq!(env.speaker_idle_ms(), u64::MAX, "no frame yet");
+        env.push_speaker(&[0.5; 960]);
+        assert_eq!(env.speaker_queued(), 480);
+        std::thread::sleep(Duration::from_millis(SPEAKER_QUIET_MS + 5));
+        assert!(env.speaker_idle_ms() >= SPEAKER_QUIET_MS);
+        env.clear_speaker();
+        assert_eq!(env.speaker_queued(), 0, "nothing stale survives into the next burst");
     }
 
     #[test]

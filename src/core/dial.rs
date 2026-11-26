@@ -1,8 +1,8 @@
 //! The in-stream quick-action dial's pad side, in wire bits so it tests without SDL.
 //!
-//! Select+A opens the dial, and so does a held Yellow on the remote ([`TapHold`]), for a stream
-//! with no pad on this TV. A never reaches the host, and neither does its release. Opening
-//! releases whatever the host still holds, and while the dial is open every press drives it
+//! A pad shortcut opens the dial ([`pad_shortcuts`]), and so does a held Yellow on the remote
+//! ([`TapHold`]), for a stream with no pad on this TV. Opening releases whatever the host still
+//! holds, and while the dial is open every press the shortcut engine forwards drives it
 //! instead. Buttons still down when it closes stay the dial's until they release, so the B that
 //! closed it never lands in the game.
 //!
@@ -12,19 +12,36 @@
 use std::time::{Duration, Instant};
 
 use pf_client_core::menu_nav::{ring_sector, MenuDir, MenuEvent};
+use pf_client_core::overlay_actions::{OverlayConfig, RingPlatform, SlotId};
+use pf_client_core::shortcuts::{resolve, Action, Client, Shortcuts};
 use punktfunk_core::input::gamepad::{
-    BTN_A, BTN_B, BTN_BACK, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_DPAD_UP, BTN_X, BTN_Y,
+    BTN_A, BTN_B, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_DPAD_UP, BTN_X, BTN_Y,
 };
 
-/// What the stream loop does with one pad button edge.
+/// The pad shortcuts a stream runs: the stored `shortcuts` blob or this TV's defaults, less
+/// the actions this client cannot take. A key combination needs its keys in the `ring` blob.
+pub fn pad_shortcuts(blob: &str, ring: &str) -> Shortcuts {
+    use SlotId as S;
+    let ring = OverlayConfig::parse(ring, RingPlatform::Desktop);
+    let mut shortcuts = resolve(blob, Client::WebOS, false, "");
+    shortcuts.bindings.retain(|b| match &b.action {
+        Action::Slot(S::Shortcut(id)) => ring.shortcut(id).is_some(),
+        Action::Ring
+        | Action::Slot(
+            S::EndStream | S::DisconnectLinger | S::Stats | S::Keyboard | S::Guide | S::Qam | S::PadMouse | S::PadType,
+        ) => true,
+        _ => false,
+    });
+    shortcuts
+}
+
+/// What the stream loop does with one pad button edge the shortcut engine forwarded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PadRoute {
     /// Send it to the host as usual.
     Forward,
     /// The dial owns it; send nothing.
     Drop,
-    /// Select+A: open the dial.
-    Open,
     /// The dial is open: feed it this.
     Menu(MenuEvent),
 }
@@ -80,10 +97,6 @@ impl PadDial {
             }
             self.owned |= bit;
             return self.menu_for(bit).map_or(PadRoute::Drop, PadRoute::Menu);
-        }
-        if down && bit == self.face[0] && self.held & BTN_BACK != 0 {
-            self.owned |= bit;
-            return PadRoute::Open;
         }
         if down {
             self.sent |= bit;
@@ -195,6 +208,8 @@ impl TapHold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pf_client_core::shortcuts::{Device, Engine, Event, Out, Phase, HOLD};
+    use punktfunk_core::input::gamepad::{BTN_BACK, BTN_GUIDE, BTN_LB, BTN_RB, BTN_START};
 
     #[test]
     fn a_short_press_taps_on_release() {
@@ -229,22 +244,67 @@ mod tests {
         assert_eq!(k.poll(t + YELLOW_HOLD), None);
     }
 
-    #[test]
-    fn select_then_a_opens_and_keeps_both_a_edges() {
-        let mut d = PadDial::default();
-        assert_eq!(d.button(BTN_BACK, true, false), PadRoute::Forward);
-        assert_eq!(d.button(BTN_A, true, false), PadRoute::Open);
-        assert_eq!(d.opened(), BTN_BACK, "the host still holds Select");
-        assert_eq!(d.button(BTN_A, false, true), PadRoute::Drop);
-        assert_eq!(d.button(BTN_BACK, false, true), PadRoute::Drop);
+    fn engine() -> Engine {
+        Engine::new(&pad_shortcuts("", "").bindings, Device::Pad)
     }
 
     #[test]
-    fn a_alone_or_a_first_is_game_input() {
-        let mut d = PadDial::default();
-        assert_eq!(d.button(BTN_A, true, false), PadRoute::Forward);
-        assert_eq!(d.button(BTN_BACK, true, false), PadRoute::Forward);
-        assert_eq!(d.button(BTN_A, false, false), PadRoute::Forward);
+    fn select_then_a_opens_the_dial_and_a_never_reaches_the_host() {
+        let (mut e, t) = (engine(), Instant::now());
+        assert_eq!(e.step(Event::Press(BTN_BACK), t), [Out::Forward(BTN_BACK, true)]);
+        assert_eq!(
+            e.step(Event::Press(BTN_A), t),
+            [Out::Lift(vec![BTN_BACK]), Out::Fire(Action::Ring, Phase::Once)]
+        );
+        assert!(e.step(Event::Release(BTN_A), t).is_empty());
+        assert!(e.step(Event::Release(BTN_BACK), t).is_empty());
+    }
+
+    #[test]
+    fn a_alone_is_game_input() {
+        let (mut e, t) = (engine(), Instant::now());
+        assert_eq!(e.step(Event::Press(BTN_A), t), [Out::Forward(BTN_A, true)]);
+        assert_eq!(e.step(Event::Release(BTN_A), t), [Out::Forward(BTN_A, false)]);
+    }
+
+    #[test]
+    fn only_the_full_chord_held_a_second_ends_the_stream() {
+        let t = Instant::now();
+        let mut e = engine();
+        for b in [BTN_LB, BTN_RB, BTN_START, BTN_BACK] {
+            e.step(Event::Press(b), t);
+        }
+        assert!(e.tick(t + HOLD / 2).is_empty());
+        assert_eq!(
+            e.tick(t + HOLD),
+            [
+                Out::Lift(vec![BTN_LB, BTN_RB, BTN_START]),
+                Out::Fire(Action::Slot(SlotId::EndStream), Phase::Once)
+            ]
+        );
+        assert!(e.tick(t + HOLD * 2).is_empty(), "once per hold");
+        for partial in [
+            &[BTN_GUIDE][..],
+            &[BTN_LB, BTN_RB],
+            &[BTN_START, BTN_BACK],
+            &[BTN_GUIDE, BTN_LB, BTN_RB, BTN_START],
+        ] {
+            let mut e = engine();
+            for &b in partial {
+                e.step(Event::Press(b), t);
+            }
+            assert!(e.tick(t + HOLD).is_empty(), "{partial:?} fired");
+        }
+    }
+
+    #[test]
+    fn actions_this_tv_cannot_take_are_dropped() {
+        let blob = r#"{"v":1,"bindings":[
+            {"on":"pad","keys":["lb","rb"],"do":"fullscreen"},
+            {"on":"pad","keys":["lb","x"],"do":"stats"},
+            {"on":"pad","keys":["lb","y"],"do":"mystery"}]}"#;
+        let kept: Vec<Action> = pad_shortcuts(blob, "").bindings.into_iter().map(|b| b.action).collect();
+        assert_eq!(kept, [Action::Slot(SlotId::Stats)]);
     }
 
     #[test]

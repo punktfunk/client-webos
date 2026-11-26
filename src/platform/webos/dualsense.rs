@@ -35,7 +35,7 @@ use punktfunk_core::quic::HidOutput;
 use super::ls2;
 use super::proc_input;
 use crate::services::feedback::{Mailbox, Pending, Received};
-use crate::session::pad_audio::{Envelope, COIL_REPORT_FRAMES, SPEAKER_IN_SAMPLES};
+use crate::session::pad_audio::{speaker_start_ready, Envelope, COIL_REPORT_FRAMES, SPEAKER_IN_SAMPLES};
 
 /// Counts trigger effects folded in, so a "triggers do nothing" report can be told apart from a
 /// title that never sends one. A debug aid: it must not change what is written to the pad.
@@ -67,7 +67,8 @@ const SPEAKER_FRAME_LEN: usize = 200;
 /// Samples per speaker frame after the 512 → 480 resample.
 const SPEAKER_OUT_SAMPLES: usize = 480;
 /// Speaker reports sent ahead before steady cadence: the pad's FIFO then holds ~100 ms, which
-/// rides out the link's residual 35–45 ms scheduling gaps (measured; sniff off).
+/// rides out the link's residual 35–45 ms scheduling gaps (measured; sniff off). A burst that
+/// ends short of it plays what it has.
 const SPEAKER_PREFILL: usize = 10;
 /// The five config bytes of the audio report's `0x11` sub-packet ("audio buffer length").
 const AUDIO_CONFIG: u8 = 64;
@@ -512,24 +513,41 @@ fn resample_frame(pcm: &[f32], out: &mut [f32]) {
     }
 }
 
-/// The next tick strictly after `now`, in whole [`COIL_TICK`] steps from `tick`.
+/// The next tick strictly after `now`, in whole [`COIL_TICK`] steps from `tick`, and how many
+/// whole ticks passed unserved on the way (`tick` itself is the one being served).
 ///
-/// Whole steps hold the pad's phase, and landing in the FUTURE is what stops a tick whose work
-/// overran from firing again at once — each catch-up report is one the pad's clock has no room
-/// for, and it goes out carrying silence.
-fn advance_tick(mut tick: Instant, now: Instant) -> Instant {
+/// Whole steps hold the pad's phase, and landing in the FUTURE keeps an overrun from firing
+/// again at once; the skipped count is what [`reports_for_tick`] repays from real audio.
+fn advance_tick(mut tick: Instant, now: Instant) -> (Instant, usize) {
+    let mut steps: usize = 0;
     while tick <= now {
         tick += COIL_TICK;
+        steps += 1;
     }
-    tick
+    (tick, steps.saturating_sub(1))
 }
+
+/// Speaker reports for one tick: `base` (1, or 2 while the pre-fill drains), plus up to two for
+/// the `skipped` ticks. Each extra needs a whole report of real audio beyond those already
+/// counted, so a catch-up never carries silence.
+fn reports_for_tick(base: usize, skipped: usize, queued: usize) -> usize {
+    let mut n = base;
+    for _ in 0..skipped.min(2) {
+        if queued < (n + 1) * SPEAKER_IN_SAMPLES {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// One frame of silence in, for the speaker encoder.
+const SILENCE_PCM: [f32; SPEAKER_IN_SAMPLES * 2] = [0.0; SPEAKER_IN_SAMPLES * 2];
 
 /// The speaker encoder: 512 stereo samples per report resampled to 480, Opus 160 kbit/s CBR at
 /// complexity 0 — the settings both working implementations use, and the ones this `SoC` affords.
 struct SpeakerLane {
     encoder: opus::Encoder,
-    /// An encoded frame of silence, sent when the ring is short so the pad's clock keeps running.
-    silence: [u8; SPEAKER_FRAME_LEN],
     resampled: Vec<f32>,
 }
 
@@ -544,18 +562,16 @@ impl SpeakerLane {
         encoder
             .set_complexity(0)
             .map_err(|e| anyhow::anyhow!("complexity: {e}"))?;
-        let mut lane = Self {
+        Ok(Self {
             encoder,
-            silence: [0; SPEAKER_FRAME_LEN],
             resampled: vec![0.0; SPEAKER_OUT_SAMPLES * 2],
-        };
-        let zeros = [0f32; SPEAKER_IN_SAMPLES * 2];
-        lane.silence = lane.encode(&zeros);
-        Ok(lane)
+        })
     }
 
     /// One report's frame from 512 stereo samples: linear 512 → 480, then a CBR frame padded or
     /// cut to exactly 200 bytes (CBR lands there by itself; the guard is for a short first frame).
+    /// A failed encode leaves the frame all zero bytes. Every frame, silence included, goes
+    /// through this one encoder: the pad's decoder predicts from the previous frame it got.
     fn encode(&mut self, pcm: &[f32]) -> [u8; SPEAKER_FRAME_LEN] {
         resample_frame(pcm, &mut self.resampled);
         let mut out = [0u8; SPEAKER_FRAME_LEN];
@@ -700,6 +716,14 @@ const MIN_SEND_INTERVAL: Duration = Duration::from_millis(250);
 /// powered off mid-session) every later update would otherwise repeat the same line for as
 /// long as the game keeps changing effects.
 fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelope>>) {
+    // The tick shares a small SoC with video decode; a refusal (the jail may deny it) is harmless.
+    // SAFETY: no pointers; `who` 0 names this thread.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, -10) } != 0 {
+        tracing::debug!(
+            "DualSense feedback: thread priority unchanged ({})",
+            std::io::Error::last_os_error()
+        );
+    }
     // In-process bus first: one function call per report instead of a spawn. Its failure is the
     // normal state on a TV whose hub refuses the registration, and the spawn route still works
     // there — so it is logged as information and the throttle stays at the spawn-safe value.
@@ -744,6 +768,8 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
     // `true` while the pad plays the speaker lane: cleared when it goes quiet, so the next burst
     // pre-fills again instead of starting from an empty pad buffer.
     let mut speaker_live = false;
+    // Whether the lane was within its hold last tick: falling out of it empties the ring.
+    let mut speaker_was_on = false;
     // Ticks still allowed to send two reports, so the pre-fill reaches the pad's FIFO.
     let mut prefill_left: usize = 0;
     // The state the audio report's sub-packet carries: the last one applied.
@@ -829,44 +855,62 @@ fn sender_loop(address: &str, mailbox: &Mailbox<State>, coils: Option<Arc<Envelo
         if let (Some(envelope), Some(bus)) = (&lane, &bus) {
             let now = Instant::now();
             if now >= next_tick {
-                next_tick = advance_tick(next_tick, now);
+                let (next, skipped) = advance_tick(next_tick, now);
+                next_tick = next;
                 let had_coils = envelope.take_coils(&mut frames);
                 let speaker_on = speaker.is_some() && envelope.speaker_active();
+                if speaker_was_on && !speaker_on {
+                    envelope.clear_speaker();
+                }
+                speaker_was_on = speaker_on;
                 if !speaker_on {
                     speaker_live = false;
                     prefill_left = 0;
                 }
                 // Pre-fill: hold the first reports back until the ring holds SPEAKER_PREFILL
-                // frames, then let the next few ticks send two, so the surplus lands in the pad's
-                // FIFO as headroom rather than in ours.
+                // frames or the burst is over, then let the next few ticks send two, so the
+                // surplus lands in the pad's FIFO as headroom rather than in ours.
                 let mut holding = false;
                 if speaker_on && !speaker_live {
-                    if envelope.speaker_queued() < SPEAKER_PREFILL * SPEAKER_IN_SAMPLES {
-                        holding = true;
-                    } else {
+                    if speaker_start_ready(
+                        envelope.speaker_queued(),
+                        envelope.speaker_idle_ms(),
+                        SPEAKER_PREFILL * SPEAKER_IN_SAMPLES,
+                    ) {
                         speaker_live = true;
                         prefill_left = SPEAKER_PREFILL - 1;
+                    } else {
+                        holding = true;
                     }
                 }
                 // Two per tick only while that pre-fill drains. Keyed on ring depth alone it never
                 // stops: the host feeds exactly the pad's rate, so depth later is clock drift, not
                 // backlog, and the ring's own cap is what absorbs that.
-                let reports_now = if prefill_left > 0 && envelope.speaker_queued() >= 2 * SPEAKER_IN_SAMPLES {
+                let queued = envelope.speaker_queued();
+                let base = if prefill_left > 0 && queued >= 2 * SPEAKER_IN_SAMPLES {
                     prefill_left -= 1;
                     2
                 } else {
                     1
+                };
+                // Ticks that slipped by come back out of the ring, so a stall costs the pad's FIFO
+                // nothing for the rest of the sound.
+                let reports_now = if speaker_live {
+                    reports_for_tick(base, skipped, queued)
+                } else {
+                    base
                 };
                 for _ in 0..if holding { 0 } else { reports_now } {
                     let audio;
                     let coil;
                     let report: &[u8] = if speaker_live {
                         let lane_enc = speaker.as_mut().expect("speaker_live implies a lane");
-                        let frame = if envelope.take_speaker(&mut speaker_pcm) {
-                            lane_enc.encode(&speaker_pcm)
+                        let pcm = if envelope.take_speaker(&mut speaker_pcm) {
+                            &speaker_pcm
                         } else {
-                            lane_enc.silence
+                            &SILENCE_PCM
                         };
+                        let frame = lane_enc.encode(pcm);
                         seq = seq.wrapping_add(1);
                         counter = counter.wrapping_add(1);
                         audio = build_audio_report(seq, counter, &current, &frames, &frame);
@@ -1027,11 +1071,48 @@ mod tests {
     fn an_overrun_tick_lands_in_the_future_on_the_pads_phase() {
         let tick = Instant::now();
         let now = tick + COIL_TICK * 5 + Duration::from_micros(300);
-        let next = advance_tick(tick, now);
+        let (next, skipped) = advance_tick(tick, now);
 
         assert!(next > now);
         let steps = (next - tick).as_nanos() / COIL_TICK.as_nanos();
         assert_eq!(steps, 6);
         assert_eq!(next - tick, COIL_TICK * 6);
+        assert_eq!(skipped, 5, "the tick itself is served, the five after it slipped by");
+    }
+
+    #[test]
+    fn an_on_time_tick_skips_nothing() {
+        let tick = Instant::now();
+        assert_eq!(advance_tick(tick, tick).1, 0);
+        assert_eq!(advance_tick(tick, tick + Duration::from_micros(300)).1, 0);
+        assert_eq!(
+            advance_tick(tick, tick + COIL_TICK).1,
+            1,
+            "a whole tick late is one skipped"
+        );
+    }
+
+    #[test]
+    fn a_catch_up_is_real_audio_and_at_most_two() {
+        let ring = |reports: usize| reports * SPEAKER_IN_SAMPLES;
+        assert_eq!(reports_for_tick(1, 0, ring(9)), 1, "nothing skipped, nothing repaid");
+        assert_eq!(reports_for_tick(1, 1, ring(9)), 2);
+        assert_eq!(
+            reports_for_tick(1, 7, ring(9)),
+            3,
+            "two at most, however long the stall"
+        );
+        assert_eq!(
+            reports_for_tick(1, 2, ring(2)),
+            2,
+            "the second extra has no audio behind it"
+        );
+        assert_eq!(reports_for_tick(1, 2, ring(1)), 1, "a lone report is the tick's own");
+        assert_eq!(reports_for_tick(1, 1, ring(0)), 1);
+        assert_eq!(
+            reports_for_tick(2, 2, ring(3)),
+            3,
+            "pre-fill's second report counts first"
+        );
     }
 }

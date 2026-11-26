@@ -1,5 +1,5 @@
-//! Input plumbing the loops share: the disconnect chord, the remote gate, the on-screen
-//! keyboard, and the webOS EXIT/Home keys. Re-exported from `runtime` via `use input::*`.
+//! Input plumbing the loops share: the remote gate, the on-screen keyboard, and the webOS
+//! EXIT/Home keys. Re-exported from `runtime` via `use input::*`.
 
 use super::*;
 
@@ -28,68 +28,6 @@ pub(super) fn note_focus(event: &sdl3::event::Event) {
 /// See [`note_focus`].
 pub(super) fn window_focused() -> bool {
     WINDOW_FOCUSED.load(Ordering::Relaxed)
-}
-
-/// How long the controller chord ([`DisconnectChord`]) must be held before the in-stream
-/// disconnect dialog opens. The chord's buttons are also game input, so it fires on a hold,
-/// not a press — 1s, to match webOS's own long-press threshold on the EXIT gesture.
-pub(super) const EXIT_HOLD: Duration = Duration::from_millis(1000);
-
-/// The gamepad route to the disconnect dialog:
-/// L1+R1+Start+Select held for [`EXIT_HOLD`], the escape chord every punktfunk client uses.
-/// No subset opens it — L1+R1 and a held Guide are game input.
-///
-/// Tracked as button state rather than read back from SDL because SDL only reports
-/// transitions here — and a chord needs to know what is down *now*, not what changed
-/// last.
-#[derive(Default)]
-pub(super) struct DisconnectChord {
-    left_shoulder: bool,
-    right_shoulder: bool,
-    start: bool,
-    back: bool,
-    /// When the currently-held chord became complete; `None` when none is.
-    since: Option<Instant>,
-}
-
-impl DisconnectChord {
-    /// Records one button transition and arms or disarms the hold timer.
-    pub(super) fn set(&mut self, button: sdl3::gamepad::Button, down: bool) {
-        use sdl3::gamepad::Button;
-        match button {
-            Button::LeftShoulder => self.left_shoulder = down,
-            Button::RightShoulder => self.right_shoulder = down,
-            Button::Start => self.start = down,
-            Button::Back => self.back = down,
-            _ => return,
-        }
-        // Re-derived after every transition, so releasing any part of a chord restarts
-        // the hold instead of leaving a stale deadline armed.
-        self.since = match (self.complete(), self.since) {
-            (true, Some(t)) => Some(t),
-            (true, None) => Some(Instant::now()),
-            (false, _) => None,
-        };
-    }
-
-    fn complete(&self) -> bool {
-        self.left_shoulder && self.right_shoulder && self.start && self.back
-    }
-
-    /// Whether a chord has now been held long enough to fire.
-    pub(super) fn held_for(&self, hold: Duration) -> bool {
-        self.since.is_some_and(|t| t.elapsed() >= hold)
-    }
-
-    /// Forgets all held buttons.
-    ///
-    /// Called when the chord fires and when the pad disconnects, because in both cases
-    /// the releases that follow never reach [`set`](Self::set) — the open dialog swallows
-    /// controller events, and an unplugged pad sends none. Without this the buttons would
-    /// stay "down" forever and the dialog would reopen the instant it was dismissed.
-    pub(super) fn clear(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// Which of the compositor's keys the Magic Remote pressed. webOS 23+ also types every pad
@@ -410,36 +348,6 @@ mod remote_gate_tests {
         assert!(gate.admits(&up_key(false, false), t));
         let esc = key(Some(Scancode::Escape), Some(Keycode::Escape), 1, true, false);
         assert!(gate.admits(&esc, t));
-    }
-}
-
-#[cfg(test)]
-mod disconnect_chord_tests {
-    use super::*;
-    use sdl3::gamepad::Button::{self, Back, Guide, LeftShoulder, RightShoulder, Start};
-
-    fn held(buttons: &[Button]) -> DisconnectChord {
-        let mut chord = DisconnectChord::default();
-        for &b in buttons {
-            chord.set(b, true);
-        }
-        chord
-    }
-
-    #[test]
-    fn only_the_full_chord_arms_the_dialog() {
-        let mut chord = held(&[LeftShoulder, RightShoulder, Start, Back]);
-        assert!(chord.held_for(Duration::ZERO));
-        chord.set(Start, false);
-        assert!(!chord.held_for(Duration::ZERO), "a released button kept the hold armed");
-        for partial in [
-            &[Guide][..],
-            &[LeftShoulder, RightShoulder],
-            &[Start, Back],
-            &[Guide, LeftShoulder, RightShoulder, Start],
-        ] {
-            assert!(!held(partial).held_for(Duration::ZERO), "{partial:?} armed the dialog");
-        }
     }
 }
 

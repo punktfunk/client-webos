@@ -7,6 +7,7 @@
 
 use super::*;
 use punktfunk_core::hud::{self as core_hud, Extra, HudCorner, HudLine, Role, StatsSnapshot, StatsVerbosity};
+use punktfunk_core::quic::v2::hello::{RoleEcho, ScreenEcho, ScreenWish};
 
 /// One frame of the dial's animation. The loop runs every 2 ms; the ring needs no more than 60 Hz.
 const RING_FRAME: Duration = Duration::from_millis(16);
@@ -60,8 +61,8 @@ pub(super) struct Hud {
 }
 
 impl Hud {
-    /// The overlays a stream starts with. `initial_wipe` is the stream's first clear, which
-    /// stays owed when it could not draw.
+    /// The overlays a stream starts with, the screen's start line ([`screen_line`]) among them.
+    /// `initial_wipe` is the stream's first clear, which stays owed when it could not draw.
     pub(super) fn new(settings: &store::Settings, connected: &session::Connected, initial_wipe: Result<()>) -> Self {
         let tier = settings.stats_verbosity();
         let enabled = tier != StatsVerbosity::Off;
@@ -75,6 +76,12 @@ impl Hud {
         }
         let mut warned = false;
         let was_active = !overlay::drawn(initial_wipe, &mut warned);
+        let mut notif = overlay::Notification::new();
+        let shared = connected.client.screen() == Some(&ScreenEcho::Shared);
+        let wish = ScreenWish::parse(&settings.host_screen);
+        if let Some(line) = screen_line(shared, wish.as_ref(), connected.client.role()) {
+            notif.show(line);
+        }
         Self {
             tier,
             enabled,
@@ -86,7 +93,7 @@ impl Hud {
             snap: None,
             built_at: None,
             prev_cpu: None,
-            notif: overlay::Notification::new(),
+            notif,
             // The one-line exit hint, from the first frame of the stream.
             exit_hint_at: settings.exit_hint.then(Instant::now),
             hold_since: None,
@@ -212,7 +219,7 @@ impl Hud {
             self.snap = Some(snap);
         }
         let log_lines = log_overlay_lines();
-        let pad = !cx.pads.is_empty();
+        let exit_hint = hint_frame.map(|alpha| (exit_hint_text(cx.pads), alpha));
         let (lines, tier, corner, scale) = (&self.lines, self.tier, self.corner, self.scale);
         let log_rows = &mut self.log_rows;
         let notif_frame = if notif_active { self.notif.frame() } else { None };
@@ -233,8 +240,8 @@ impl Hud {
                 if let Some((text, alpha)) = notif_frame {
                     overlay::toast(f, text, alpha);
                 }
-                if let Some(alpha) = hint_frame {
-                    overlay::exit_hint(f, &exit_hint_text(pad), alpha);
+                if let Some((text, alpha)) = &exit_hint {
+                    overlay::exit_hint(f, text, *alpha);
                 }
                 if ring_visible {
                     ring.render(f.canvas, f.ui, f.w as u32, f.h as u32, f.k, f.fonts, ring_dt);
@@ -245,9 +252,29 @@ impl Hud {
     }
 }
 
-/// How to leave with the input in hand: the pad chord when a controller is attached.
-fn exit_hint_text(pad: bool) -> String {
-    pf_l10n::client::notice_exit_hold(if pad { "L1 + R1 + Start + Select" } else { "Back" })
+/// The one line a stream owes about its screen at start: that it is another device's, else why
+/// it is not the one the preset asked for. One toast slot; a shared screen explains a lost wish.
+fn screen_line(shared: bool, wish: Option<&ScreenWish>, echo: Option<RoleEcho>) -> Option<String> {
+    if shared {
+        return Some(pf_l10n::client::notice_shared_screen().into());
+    }
+    pf_client_core::host_text::screen_wish_line(wish, echo?.reason)
+}
+
+/// How to leave with the input in hand: the pad's End stream shortcut when a controller is
+/// attached and has one, else the remote's held Back.
+fn exit_hint_text(pads: &pads::Pads) -> String {
+    use pf_client_core::shortcuts::{Action, Client, Device};
+    let end = Action::Slot(pf_client_core::overlay_actions::SlotId::EndStream);
+    let trigger = (pads.shortcuts().bindings.iter())
+        .find(|b| b.action == end && b.trigger.device() == Device::Pad)
+        .filter(|_| !pads.is_empty())
+        .map(|b| &b.trigger);
+    match trigger {
+        Some(t) if !t.hold() => pf_l10n::client::notice_exit_keys(t.chord(Client::WebOS)),
+        Some(t) => pf_l10n::client::notice_exit_hold(t.chord(Client::WebOS)),
+        None => pf_l10n::client::notice_exit_hold("Back"),
+    }
 }
 
 /// What the green button does next: more detail, or hide from the top tier.
@@ -333,4 +360,26 @@ fn tv_extras(connected: &session::Connected, prev_cpu: &mut Option<(u64, Instant
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use punktfunk_core::quic::v2::hello::RoleReason;
+
+    /// A shared screen takes the one slot; a lost wish is said; an honoured one or an older host is not.
+    #[test]
+    fn the_start_line_says_one_thing_about_the_screen() {
+        let echo = |reason| Some(RoleEcho { role: None, reason });
+        let second = Some(&ScreenWish::Second);
+        let lost = pf_client_core::host_text::screen_wish_line(second, RoleReason::NotAllowed);
+        assert!(lost.is_some());
+        assert_eq!(screen_line(false, second, echo(RoleReason::NotAllowed)), lost);
+        assert_eq!(screen_line(false, second, echo(RoleReason::AsAsked)), None);
+        assert_eq!(screen_line(false, second, None), None, "an older host");
+        assert_eq!(
+            screen_line(true, second, echo(RoleReason::NotAllowed)).as_deref(),
+            Some(pf_l10n::client::notice_shared_screen())
+        );
+    }
 }
