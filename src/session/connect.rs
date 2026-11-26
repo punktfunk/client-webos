@@ -251,9 +251,7 @@ impl Negotiated {
         let ten_bit_sdr = params.ten_bit_sdr && caps.h265 && codec_pref.allows_ten_bit();
         Self {
             audio_channels,
-            // VIDEO_CAP_CHACHA20: unconditional — armv7 has no hardware AES, so ChaCha20 is
-            // faster. A ≥0.17.2 host picks it up; older hosts ignore the unknown bit.
-            video_caps: quic::VIDEO_CAP_CHACHA20
+            video_caps: super::cipher::cipher_caps()
                 | if hdr {
                     quic::VIDEO_CAP_10BIT | quic::VIDEO_CAP_HDR
                 } else if ten_bit_sdr {

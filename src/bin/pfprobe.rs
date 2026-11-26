@@ -11,6 +11,11 @@ fn main() -> anyhow::Result<()> {
     anyhow::bail!("pfprobe targets webOS (armv7 linux) — build with the cross toolchain");
 }
 
+/// The session's own cipher pick, so the probe measures the cipher a stream uses.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../session/cipher.rs"]
+mod cipher;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod real {
     use std::time::{Duration, Instant};
@@ -64,7 +69,7 @@ mod real {
         };
         let client = NativeClient::connect(punktfunk_core::client::ConnectParams {
             bitrate_kbps: PROBE_SESSION_BITRATE_KBPS,
-            video_caps: quic::VIDEO_CAP_CHACHA20,
+            video_caps: crate::cipher::cipher_caps(),
             video_codecs: quic::CODEC_HEVC | quic::CODEC_H264,
             pin: Some(pin),
             identity: Some((cert, key)),
