@@ -308,6 +308,8 @@ impl Service {
             can_wake: !online && !h.mac.is_empty(),
             // This client has no per-host clipboard flag; see `ConsoleCmd::SetClipboard`.
             clipboard_sync: false,
+            // The shell offers no keep-address row on webOS; see `ConsoleCmd::SetKeepAddress`.
+            keep_addr: false,
             // No launch history on the record: ordering by name rather than a recency it lacks.
             last_used: None,
             os: advert
@@ -324,6 +326,8 @@ impl Service {
             running: String::new(),
             // The Screen section and the presets' Host screen row; a pin shares it via `row`.
             screens: self.screens.get(&key).filter(|_| h.is_paired()).cloned(),
+            // A TV runs no host, so no row is this device's own.
+            local: false,
             key,
         }
     }
@@ -473,11 +477,18 @@ impl Service {
             // - `EndGame`: no title here is ever `endable` (see `to_model`), so the shell never
             //   offers it.
             // - `Install`: no title here carries `install` (see `to_model`), likewise.
+            // - `SetKeepAddress`: the shell offers keep-address on no webOS card.
+            // - `LaunchLocal`: no row here is `local`.
+            // - `SetHidden`, `FetchHidden`: `ConsoleOptions::hides` is off.
             ConsoleCmd::RefreshRunning { .. }
             | ConsoleCmd::SetClipboard { .. }
             | ConsoleCmd::PromptAnswer { .. }
             | ConsoleCmd::EndGame { .. }
-            | ConsoleCmd::Install { .. } => {}
+            | ConsoleCmd::Install { .. }
+            | ConsoleCmd::SetKeepAddress { .. }
+            | ConsoleCmd::LaunchLocal { .. }
+            | ConsoleCmd::SetHidden { .. }
+            | ConsoleCmd::FetchHidden { .. } => {}
         }
     }
 
@@ -1427,6 +1438,7 @@ fn discovered_row(d: &DiscoveredHost) -> HostRow {
         mgmt_port: d.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
         can_wake: false,
         clipboard_sync: false,
+        keep_addr: false,
         last_used: None,
         os: d.os.clone(),
         // Unpaired: there is nothing it would let this TV do to it.
@@ -1439,6 +1451,7 @@ fn discovered_row(d: &DiscoveredHost) -> HostRow {
         // `LibraryGame::running` is false here. Empty renders as no line.
         running: String::new(),
         screens: None,
+        local: false,
     }
 }
 
