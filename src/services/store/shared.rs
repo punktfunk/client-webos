@@ -199,9 +199,8 @@ mod tests {
 }
 
 /// The settings one launch runs with: the global document with the resolved profile applied
-/// — one-off ?? per-title ?? host default, the shared resolver's own precedence — then the
-/// Desktop card's standing rule that pointer capture is off there (unless a profile is bound to
-/// that card, or the resolved one pins the mouse mode), then this set's caps. The single merge
+/// — one-off ?? per-title ?? host default, the shared resolver's own precedence — then this
+/// set's caps. The Desktop card is a title like any other (`DESKTOP_PIN_ID`). The single merge
 /// point every launch goes through.
 pub fn launch_settings(
     state: &Persisted,
@@ -225,14 +224,6 @@ pub fn launch_settings(
     let mut settings = profile
         .as_ref()
         .map_or_else(|| global.clone(), |p| p.overrides.apply(global));
-    // Desktop defaults to absolute pointer. Two overrides: profile bound to this card (wins
-    // wholesale, inherited mouse mode included), or resolved profile pinning mouse mode.
-    // Pin presence is read; LOAD_BEARING_PIN must exempt this field.
-    let bound_to_card = per_title.is_some_and(|id| state.profiles.iter().any(|p| p.id == id));
-    let inherits_pointer = profile.as_ref().is_none_or(|p| p.overrides.mouse_mode.is_none());
-    if id == DESKTOP_PIN_ID && !bound_to_card && inherits_pointer {
-        settings.set_cursor_capture(false);
-    }
     settings.clamp_to_caps();
     settings
 }
@@ -306,6 +297,55 @@ pub fn delete_profile(state: &mut Persisted, id: &str) -> bool {
         }
         h.game_presets.retain(|_, p| p != id);
         h.pinned_presets.retain(|p| p != id);
+    }
+    true
+}
+
+/// Save a host this TV just paired with, merged by `upsert_known_host`. Nothing else in the
+/// document changes: a new host gets no settings profile.
+pub fn remember_host(state: &mut Persisted, record: crate::core::model::KnownHost) {
+    crate::core::model::upsert_known_host(&mut state.known_hosts, record);
+}
+
+/// Once per document, bring it to Desktop mouse mode, this client's default: a stored Capture
+/// turns Desktop, and each profile still exactly as older builds seeded it for a new host's
+/// Desktop card goes, with its bindings. A seed is named `Desktop` or `Desktop N`, overrides the
+/// mouse mode to desktop and nothing else, and is named by no binding but a `DESKTOP_PIN_ID` one.
+/// Other profiles keep their mouse mode. Reports whether the document changed.
+pub fn migrate_mouse_mode(state: &mut Persisted) -> bool {
+    if std::mem::replace(&mut state.mouse_mode_migrated, true) {
+        return false;
+    }
+    let desktop = trust::MouseMode::Desktop.as_name();
+    if state.settings.mouse_mode == trust::MouseMode::Capture.as_name() {
+        state.settings.mouse_mode = desktop.into();
+    }
+    let seed = presets::SettingsOverlay {
+        mouse_mode: Some(desktop.into()),
+        ..Default::default()
+    };
+    let seeds: Vec<String> = state
+        .profiles
+        .iter()
+        .filter(|p| {
+            let named = p.name == "Desktop"
+                || p.name
+                    .strip_prefix("Desktop ")
+                    .is_some_and(|n| n.parse::<u32>().is_ok());
+            let untouched = p.overrides == seed && p.accent.is_none() && p.extra.is_empty();
+            let desktop_only = state.known_hosts.iter().all(|h| {
+                h.preset_id.as_deref() != Some(p.id.as_str())
+                    && !h.pinned_presets.contains(&p.id)
+                    && h.game_presets
+                        .iter()
+                        .all(|(game, id)| *id != p.id || game == DESKTOP_PIN_ID)
+            });
+            named && untouched && desktop_only
+        })
+        .map(|p| p.id.clone())
+        .collect();
+    for id in &seeds {
+        delete_profile(state, id);
     }
     true
 }
@@ -396,10 +436,9 @@ mod launch_tests {
         assert!(h.pinned_presets.is_empty());
     }
 
-    /// A title binding beats the host's default; a dangling id falls through to it; the
-    /// desktop card streams with capture off unless the profile pins the mouse mode.
+    /// A title binding beats the host's default; a dangling id falls through to it.
     #[test]
-    fn launch_follows_the_shared_precedence_and_the_desktop_rule() {
+    fn launch_follows_the_shared_precedence() {
         let mut title_profile = StreamPreset::new("Doom");
         title_profile.overrides.bitrate_kbps = Some(12_000);
         let tid = title_profile.id.clone();
@@ -411,14 +450,15 @@ mod launch_tests {
         });
         state.profiles.push(host_profile);
         state.known_hosts[0].preset_id = Some(hid);
-        state.settings.set_cursor_capture(true);
+        state.settings.mouse_mode = "capture".into();
 
         let doom = launch_settings(&state, "", "10.0.0.2", 47989, Some("doom"), None);
         assert_eq!(doom.bitrate_kbps, 12_000);
         let other = launch_settings(&state, "", "10.0.0.2", 47989, Some("quake"), None);
         assert_eq!(other.bitrate_kbps, 34_000, "the host default covers an unbound title");
         let desktop = launch_settings(&state, "", "10.0.0.2", 47989, None, None);
-        assert!(!desktop.cursor_capture(), "the desktop card streams with capture off");
+        assert_eq!(desktop.bitrate_kbps, 34_000, "the host default covers the desktop card");
+        assert!(desktop.cursor_capture(), "the desktop card keeps the global capture");
         assert!(other.cursor_capture(), "a game keeps the global capture");
 
         state.known_hosts[0].bind_game_preset("doom", Some("gone"));
@@ -442,5 +482,141 @@ mod launch_tests {
         let state: Persisted = serde_json::from_value(json).unwrap();
         let settings = launch_settings(&state, "", "10.0.0.2", 47989, None, None);
         assert_eq!(settings.host_screen, "second");
+    }
+
+    /// The Desktop card streams in the Mouse mode setting: the global value, else a profile's.
+    #[test]
+    fn the_desktop_card_follows_the_mouse_mode() {
+        let mut pointer = StreamPreset::new("Pointer");
+        pointer.overrides.mouse_mode = Some("desktop".into());
+        let pid = pointer.id.clone();
+        let mut state = state_with(pointer, |_| {});
+        let capture = |s: &Persisted| launch_settings(s, "", "10.0.0.2", 47989, None, None).cursor_capture();
+        state.settings.mouse_mode = "capture".into();
+        assert!(capture(&state), "the global Capture");
+        state.settings.mouse_mode = "desktop".into();
+        assert!(!capture(&state), "the global Desktop");
+        state.settings.mouse_mode = "capture".into();
+        state.known_hosts[0].bind_game_preset(DESKTOP_PIN_ID, Some(&pid));
+        assert!(!capture(&state), "a profile on the card overrides the global");
+        state.profiles[0].overrides.mouse_mode = Some("capture".into());
+        state.settings.mouse_mode = "desktop".into();
+        assert!(capture(&state), "and the other way round");
+    }
+
+    /// Pairing a new host saves its record and nothing else.
+    #[test]
+    fn a_new_host_gets_no_profile() {
+        let mut state = Persisted::default();
+        remember_host(&mut state, host_record());
+        assert_eq!(state.known_hosts.len(), 1);
+        assert!(state.profiles.is_empty());
+        assert!(state.known_hosts[0].game_profile(DESKTOP_PIN_ID).is_none());
+    }
+
+    /// A Desktop profile as older builds seeded it, bound to host `h`'s Desktop card.
+    fn seed(state: &mut Persisted, name: &str, h: usize) -> String {
+        let mut p = StreamPreset::new(name);
+        p.overrides.mouse_mode = Some("desktop".into());
+        let id = p.id.clone();
+        state.profiles.push(p);
+        state.known_hosts[h].bind_game_preset(DESKTOP_PIN_ID, Some(&id));
+        id
+    }
+
+    /// Untouched seeds go with their bindings; one the player renamed, extended or bound
+    /// elsewhere stays. Once: a seed-shaped profile made after the first load survives a reload.
+    #[test]
+    fn seeded_desktop_profiles_go_once() {
+        let mut state = Persisted {
+            known_hosts: (0..7).map(|_| host_record()).collect(),
+            ..Default::default()
+        };
+        seed(&mut state, "Desktop", 0);
+        seed(&mut state, "Desktop 2", 1);
+        let renamed = seed(&mut state, "Desktop 3", 2);
+        state.profiles[2].name = "Couch".into();
+        seed(&mut state, "Desktop 4", 3);
+        state.profiles[3].overrides.bitrate_kbps = Some(20_000);
+        let default = seed(&mut state, "Desktop 5", 4);
+        state.known_hosts[4].preset_id = Some(default.clone());
+        let game = seed(&mut state, "Desktop 6", 5);
+        state.known_hosts[5].bind_game_preset("steam:570", Some(&game));
+        let pinned = seed(&mut state, "Desktop 7", 6);
+        state.known_hosts[6].pinned_presets.push(pinned);
+
+        assert!(migrate_mouse_mode(&mut state));
+        let names: Vec<&str> = state.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Couch", "Desktop 4", "Desktop 5", "Desktop 6", "Desktop 7"]);
+        assert!(state.known_hosts[0].game_presets.is_empty(), "its binding goes too");
+        assert!(state.known_hosts[1].game_presets.is_empty());
+        assert_eq!(
+            state.known_hosts[2].game_profile(DESKTOP_PIN_ID),
+            Some(renamed.as_str())
+        );
+        assert_eq!(state.known_hosts[4].preset_id.as_deref(), Some(default.as_str()));
+        assert_eq!(
+            state.known_hosts[4].game_profile(DESKTOP_PIN_ID),
+            Some(default.as_str())
+        );
+        assert_eq!(state.known_hosts[5].game_profile("steam:570"), Some(game.as_str()));
+        assert_eq!(state.known_hosts[5].game_profile(DESKTOP_PIN_ID), Some(game.as_str()));
+
+        let made_after = seed(&mut state, "Desktop", 0);
+        let json = serde_json::to_value(&state).unwrap();
+        let mut reloaded: Persisted = serde_json::from_value(json).unwrap();
+        assert!(!migrate_mouse_mode(&mut reloaded), "a second load changes nothing");
+        assert!(reloaded.profiles.iter().any(|p| p.id == made_after));
+        assert_eq!(
+            reloaded.known_hosts[0].game_profile(DESKTOP_PIN_ID),
+            Some(made_after.as_str())
+        );
+    }
+
+    /// A fresh install streams every card in Desktop mode; a profile pinning Capture wins on
+    /// its own card.
+    #[test]
+    fn a_fresh_install_streams_in_desktop_mode() {
+        let mut aim = StreamPreset::new("Aim");
+        aim.overrides.mouse_mode = Some("capture".into());
+        let pid = aim.id.clone();
+        let state = state_with(aim, |h| {
+            h.bind_game_preset("doom", Some(&pid));
+        });
+        let capture = |launch| launch_settings(&state, "", "10.0.0.2", 47989, launch, None).cursor_capture();
+        assert!(!capture(None), "the Desktop card");
+        assert!(!capture(Some("quake")), "a game");
+        assert!(capture(Some("doom")), "a profile pinning Capture");
+    }
+
+    /// A stored Capture turns Desktop once, also under the unreleased marker's name; a Capture
+    /// the player picks afterwards survives a reload, and a profile's pin is left alone.
+    #[test]
+    fn a_stored_capture_turns_desktop_once() {
+        let mut aim = StreamPreset::new("Aim");
+        aim.overrides.mouse_mode = Some("capture".into());
+        let mut json = serde_json::to_value(state_with(aim, |_| {})).unwrap();
+        json["settings"]["mouse_mode"] = "capture".into();
+        json["desktop_seeds_dropped"] = true.into();
+        let mut state: Persisted = serde_json::from_value(json).unwrap();
+
+        assert!(migrate_mouse_mode(&mut state));
+        assert_eq!(state.settings.mouse_mode, "desktop");
+        assert_eq!(state.profiles[0].overrides.mouse_mode.as_deref(), Some("capture"));
+
+        state.settings.mouse_mode = "capture".into();
+        let mut reloaded: Persisted = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert!(!migrate_mouse_mode(&mut reloaded));
+        assert_eq!(reloaded.settings.mouse_mode, "capture");
+    }
+
+    /// A document already on Desktop keeps its settings.
+    #[test]
+    fn a_document_on_desktop_keeps_its_settings() {
+        let mut state = state_with(StreamPreset::new("Work"), |_| {});
+        state.settings.mouse_mode = "desktop".into();
+        let before = state.clone();
+        assert!(migrate_mouse_mode(&mut state), "the marker is new");
+        assert_eq!((state.settings, state.profiles), (before.settings, before.profiles));
     }
 }

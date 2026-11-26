@@ -57,8 +57,9 @@ This repo is only the webOS-specific client: a host for Punktfunk's shared contr
   set as a host's default. The same profiles every other client edits.
 - **Interface** — Punktfunk's shared controller UI, the same one the desktop and Android clients
   use. Driven by a game pad, the Magic Remote, or a keyboard and mouse.
-- **Input** — Magic Remote pointer, gamepads, USB keyboard and mouse. Pointer capture for games,
-  absolute pointing for the desktop; the Red button right-clicks.
+- **Input** — Magic Remote pointer, gamepads, USB keyboard and mouse. Mouse mode Desktop
+  (absolute pointing, the default) or Capture, set globally or per profile; the Red button
+  right-clicks.
 - **DualSense** — adaptive triggers, lightbar, player LEDs, touchpad, gyro, speakers and haptics over
   Bluetooth and wired (see the note below).
 - **Hosts** — LAN discovery (mDNS) or add a host by IP; PIN pairing with persisted trust, per-host settings.

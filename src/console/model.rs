@@ -29,7 +29,7 @@ use crate::services::library::{self, GamesLoaded, LibraryError, ScreensAnswer, D
 use crate::services::logs::{upload_to_host, HostTarget};
 use crate::services::power::{self, PowerRights};
 use crate::services::store::console::ConsoleStore;
-use crate::services::store::{self, shared, ExitAction};
+use crate::services::store::{shared, ExitAction};
 use crate::services::{budget, profiles, wol};
 
 /// How often every row is re-probed for its presence pip. Ten seconds is the desktop's
@@ -816,9 +816,7 @@ impl Service {
                 ..KnownHost::default()
             };
             record.set_fingerprint(fingerprint);
-            if let Some(fresh) = store::upsert_known_host(&mut state.known_hosts, record) {
-                store::seed_new_host_profiles(fresh, &mut state.profiles);
-            }
+            shared::remember_host(state, record);
             true
         });
         // It answered a handshake a moment ago, so the pip should not wait for the next sweep.

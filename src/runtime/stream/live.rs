@@ -622,7 +622,7 @@ impl Stream {
     }
 
     /// Pointer capture and the HID grab follow the dialog, the dial and focus. Who draws the
-    /// pointer follows the HID mouse.
+    /// pointer follows the HID mouse: while one drives the host, the TV's arrow hides.
     fn sync_capture(&mut self, cx: &Cx<'_>, events: &sdl3::EventPump) {
         // The dialog is navigated with the Magic Remote's pointer, so a captured stream
         // must hand the pointer back while it's up — hidden/relative there'd be nothing
@@ -634,13 +634,10 @@ impl Stream {
         // every motion, so a stream that kept them under the launcher left Home with no
         // pointer and a warp per remote move. The hand-back needs the repaint nudge.
         let want_captured = cx.settings.cursor_capture() && !self.disconnect.is_open() && self.focused;
-        if want_captured != self.cursor.is_captured() {
-            self.cursor.set_captured(want_captured, cx.window);
-            self.cursor.flush(cx.window, events);
-        }
+        let hid_active = self.focused && !self.disconnect.is_open() && !self.ring.open();
         if let Some(hid) = &self.hid {
             // Deactivating releases whatever HID held on the host.
-            hid.set_active(self.focused && !self.disconnect.is_open() && !self.ring.open());
+            hid.set_active(hid_active);
         }
         self.input_suspended = self.disconnect.is_open();
         // Desktop mode aims with the TV's arrow, which never draws for a mouse node the reader
@@ -650,6 +647,11 @@ impl Stream {
             .hid
             .as_ref()
             .is_some_and(crate::platform::webos::evdev::HidInput::has_mouse);
+        let hid_drives = hid_active && host_draws;
+        if want_captured != self.cursor.is_captured() || hid_drives != self.cursor.hid_drives() {
+            self.cursor.set(want_captured, hid_drives, cx.window);
+            self.cursor.flush(cx.window, events);
+        }
         if host_draws != self.host_draws_cursor
             && cx.connected.client.host_caps() & punktfunk_core::quic::HOST_CAP_CURSOR != 0
             && cx.connected.client.set_cursor_render(!host_draws).is_ok()
