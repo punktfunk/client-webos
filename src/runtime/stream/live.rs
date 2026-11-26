@@ -452,6 +452,7 @@ impl Stream {
                     width,
                     height,
                     refresh_hz,
+                    refresh_mhz: 0,
                 };
                 if let Err(e) = cx.connected.client.request_mode(mode) {
                     tracing::warn!("dial: mode request: {e}");

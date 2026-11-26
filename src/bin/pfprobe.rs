@@ -60,6 +60,7 @@ mod real {
             width: 1280,
             height: 720,
             refresh_hz: 60,
+            refresh_mhz: 0,
         };
         let client = NativeClient::connect(punktfunk_core::client::ConnectParams {
             bitrate_kbps: PROBE_SESSION_BITRATE_KBPS,

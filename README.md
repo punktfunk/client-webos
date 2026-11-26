@@ -86,6 +86,22 @@ webosbrew repository instead.
 
 **Directly onto a TV** (Developer Mode required): `task deploy TV_HOST=root@<tv-ip>`.
 
+## Troubleshooting
+
+### This TV blocks the app from its video decoder
+
+TVs with a `k3lp` or `k5lp` chip (webOS 3.5–4.x) start sideloaded apps in a sandbox that leaves
+out the decoder's device. The log names it: `jailer config leaves /dev/rtkmem unreadable`. The TV
+needs LG's current sandbox configuration, `jail_app.conf` and `jail_app.conf.sig` in
+`/media/developer/`.
+
+- **Rooted TV:** install the `fetch-jailer-conf` script from
+  [mariotaku's init scripts](https://gist.github.com/mariotaku/fab3ee34fae3415c8213d1a1639a6aff)
+  and restart the TV. It downloads both files from LG.
+- **Developer Mode only:** turn Developer Mode off, restart the TV, turn it on again and install
+  Punktfunk again. The Developer Mode app then downloads both files. Turning it off removes
+  every sideloaded app.
+
 ## Development
 
 Everything is a [go-task](https://taskfile.dev) target. Bare targets run natively and need a

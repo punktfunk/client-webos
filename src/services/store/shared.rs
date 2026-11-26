@@ -428,4 +428,19 @@ mod launch_tests {
             "a dangling title binding falls back to the host default"
         );
     }
+
+    /// A preset's `host_screen` survives the document and reaches the launch, which turns it
+    /// into the connect's screen wish; the global settings never hold one.
+    #[test]
+    fn a_preset_host_screen_round_trips_to_the_launch() {
+        let mut couch = StreamPreset::new("Couch");
+        couch.overrides.host_screen = Some("second".into());
+        let pid = couch.id.clone();
+        let state = state_with(couch, |h| h.preset_id = Some(pid));
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(json["settings"].get("host_screen").is_none(), "no global value");
+        let state: Persisted = serde_json::from_value(json).unwrap();
+        let settings = launch_settings(&state, "", "10.0.0.2", 47989, None, None);
+        assert_eq!(settings.host_screen, "second");
+    }
 }
