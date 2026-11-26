@@ -197,7 +197,7 @@ USB route in jail: **no `/dev/bus/usb`** (usbfs/libusb out), **`/dev/snd` rw** w
 
 ## AES-GCM when the CPU has AES, else ChaCha20
 
-32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`, so ChaCha20 was advertised unconditionally. The `aes-aws-lc-rs` backend uses the ARMv8 AES/PMULL instructions from 32-bit code, and AES-GCM decrypts about 2.5x faster than ChaCha20 on a C5 (about 12 µs to 4.5 µs per packet). `session::connect::cipher_caps` advertises `VIDEO_CAP_CHACHA20` only when `AT_HWCAP2` lacks `HWCAP2_AES`.
+32-bit userland on ARMv8-A. RustCrypto `aes` has intrinsics only for `aarch64`, so ChaCha20 was advertised unconditionally. The `aes-aws-lc-rs` backend uses the ARMv8 AES/PMULL instructions from 32-bit code, and AES-GCM decrypts about 2.5x faster than ChaCha20 on a C5 (about 12 µs to 4.5 µs per packet). `session::cipher::cipher_caps` advertises `VIDEO_CAP_CHACHA20` only when `AT_HWCAP2` lacks `HWCAP2_AES`.
 
 ## Audio: two routes, one pipeline (SDL is the default)
 

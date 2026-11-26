@@ -18,6 +18,7 @@
 //! Nothing here touches SDL: the pad-feedback drain, which does, lives with the loop that owns
 //! the SDL objects (`runtime::session_ext`).
 pub mod audio;
+mod cipher;
 mod connect;
 pub mod pad_audio;
 mod pipeline;
