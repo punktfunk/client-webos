@@ -829,6 +829,7 @@ impl Service {
     // ---- the host list -----------------------------------------------------------------
 
     fn save_host(&mut self, name: String, addr: String, port: u16) {
+        let (addr, port) = typed(addr, port);
         self.store.edit(|state| {
             // A hand-typed host has no pin, so only the unpinned placeholder at its address takes
             // the edit: a record pinned there may be the other OS of a dual-boot box.
@@ -857,6 +858,7 @@ impl Service {
     }
 
     fn update_host(&mut self, key: &str, name: String, addr: String, port: u16) {
+        let (addr, port) = typed(addr, port);
         let edited = self.store.edit(|state| {
             let Some(i) = shared::find_known(&state.known_hosts, key) else {
                 return false;
@@ -1508,4 +1510,22 @@ fn to_model(games: &[GameEntry]) -> Vec<LibraryGame> {
             install: None,
         })
         .collect()
+}
+
+/// A form's address as the store keeps it: bare, a pasted port in place of the field's.
+fn typed(addr: String, port: u16) -> (String, u16) {
+    let edit = pf_client_core::trust::HostEdit::typed(String::new(), addr, port);
+    (edit.addr.unwrap_or_default(), edit.port.unwrap_or(port))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `base_url` brackets a bare IPv6 itself, and a pasted port is the one to dial.
+    #[test]
+    fn a_typed_address_is_stored_bare() {
+        let typed = |addr: &str| super::typed(addr.into(), 9777);
+        assert_eq!(typed(" desk.lan:9800 "), ("desk.lan".into(), 9800));
+        assert_eq!(typed("[fd00::1]"), ("fd00::1".into(), 9777));
+        assert_eq!(typed("192.168.1.20"), ("192.168.1.20".into(), 9777));
+    }
 }
